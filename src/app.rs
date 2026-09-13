@@ -72,7 +72,7 @@ enum Action {
     Reveal,
 }
 
-pub struct AmbientApp {
+pub struct EbbApp {
     store: Store,
     cards: Vec<Card>,
     bar: Arc<Mutex<BarState>>,
@@ -105,7 +105,7 @@ pub struct AmbientApp {
     frames: u64,
 }
 
-impl AmbientApp {
+impl EbbApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         store: Store,
@@ -226,7 +226,7 @@ impl AmbientApp {
     fn header(&self, ui: &mut Ui) {
         let origin = ui.max_rect().min + vec2(32.0, 22.0);
         let painter = ui.painter();
-        let title = painter.text(origin, Align2::LEFT_TOP, "Ambient", theme::semibold(22.0), TEXT);
+        let title = painter.text(origin, Align2::LEFT_TOP, "Ebb", theme::semibold(22.0), TEXT);
         painter.text(
             pos2(title.right() + 14.0, title.bottom() - 3.0),
             Align2::LEFT_BOTTOM,
@@ -541,7 +541,7 @@ impl AmbientApp {
         ui.ctx().show_viewport_deferred(
             library::viewport_id(),
             ViewportBuilder::default()
-                .with_title("Ambient Library")
+                .with_title("Ebb Library")
                 .with_inner_size(library::SIZE)
                 .with_decorations(false)
                 .with_transparent(true)
@@ -603,7 +603,7 @@ impl AmbientApp {
         ui.ctx().show_viewport_deferred(
             bar::viewport_id(),
             ViewportBuilder::default()
-                .with_title("Ambient Capture")
+                .with_title("Ebb Capture")
                 .with_inner_size(size)
                 .with_decorations(false)
                 .with_transparent(true)
@@ -658,7 +658,7 @@ impl AmbientApp {
     }
 }
 
-impl eframe::App for AmbientApp {
+impl eframe::App for EbbApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Runs even while the layer is hidden, so tray and hotkey events work then too.
         let mut pressed = None;
@@ -821,7 +821,7 @@ impl eframe::App for AmbientApp {
                     })),
                     latency_ms: Box::new(move || bar.lock().unwrap().latency_ms),
                 };
-                let label = format!("ambient-{}", crate::renderer::NAME);
+                let label = format!("ebb-{}", crate::renderer::NAME);
                 crate::bench::start(ui.ctx().clone(), out, label, proc_ms, main_ms, hooks);
             }
         }
@@ -879,7 +879,7 @@ impl eframe::App for AmbientApp {
     }
 }
 
-/// Appends one line to %LOCALAPPDATA%\Ambient\timing.log. Runs off the UI thread:
+/// Appends one line to %LOCALAPPDATA%\Ebb\timing.log. Runs off the UI thread:
 /// the logon-session and process-snapshot queries take a few milliseconds.
 fn log_first_frame(frame_at: u64, proc_ms: f64, main_ms: f64, autostarted: bool) {
     let since = |t: Option<u64>| t.map_or("?".to_owned(), |t| format!("{:.0}", win::ms_between(t, frame_at)));

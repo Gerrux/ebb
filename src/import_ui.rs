@@ -30,7 +30,7 @@ struct Offer {
     plan: Plan,
     /// Cards of an earlier import that are unchanged and get replaced.
     replace: Vec<i64>,
-    /// Earlier imported notes left alone because they were changed in Ambient.
+    /// Earlier imported notes left alone because they were changed in Ebb.
     kept: usize,
     /// Open notes that were on the layer's monitor (placed exactly).
     in_place: usize,
@@ -130,7 +130,7 @@ impl StickyImport {
                         match (plan.notes.is_empty(), manual) {
                             (false, _) => State::Offer(Offer { kept: keep.len(), replace, in_place, plan }),
                             (true, true) => State::Failed(format!(
-                                "Нечего импортировать: {} изменены в Ambient и оставлены как есть, пустых {}, дубликатов {}.",
+                                "Нечего импортировать: {} изменены в Ebb и оставлены как есть, пустых {}, дубликатов {}.",
                                 plan.stats.already_imported, plan.stats.empty, plan.stats.duplicates
                             )),
                             (true, false) => State::Idle,

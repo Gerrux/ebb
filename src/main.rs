@@ -56,12 +56,13 @@ fn main() -> eframe::Result {
         return Ok(()); // nothing running
     }
 
+    store::migrate_legacy_data();
     let store = Store::open().expect("open database");
     let cards = store.load().expect("load cards");
 
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Ambient")
+            .with_title("Ebb")
             .with_inner_size([1280.0, 800.0])
             .with_decorations(false)
             .with_transparent(true)
@@ -76,8 +77,8 @@ fn main() -> eframe::Result {
     renderer::configure(&mut options);
 
     eframe::run_native(
-        "Ambient",
+        "Ebb",
         options,
-        Box::new(move |cc| Ok(Box::new(app::AmbientApp::new(cc, store, cards, main_started, autostarted)))),
+        Box::new(move |cc| Ok(Box::new(app::EbbApp::new(cc, store, cards, main_started, autostarted)))),
     )
 }

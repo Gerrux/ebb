@@ -35,7 +35,7 @@ pub fn hwnd_of(handle: &impl HasWindowHandle) -> Option<isize> {
 }
 
 /// A top-level window of this process with the given title. Titles aren't unique
-/// across processes (a second instance, AMBIENT_INSTANCE), so FindWindow alone
+/// across processes (a second instance, EBB_INSTANCE), so FindWindow alone
 /// could return another process's window.
 pub fn find_own_window(title: PCWSTR) -> Option<isize> {
     use windows::Win32::System::Threading::GetCurrentProcessId;
@@ -54,11 +54,11 @@ pub fn find_own_window(title: PCWSTR) -> Option<isize> {
 }
 
 pub fn find_capture_window() -> Option<isize> {
-    find_own_window(w!("Ambient Capture"))
+    find_own_window(w!("Ebb Capture"))
 }
 
 pub fn find_library_window() -> Option<isize> {
-    find_own_window(w!("Ambient Library"))
+    find_own_window(w!("Ebb Library"))
 }
 
 fn hwnd(raw: isize) -> HWND {

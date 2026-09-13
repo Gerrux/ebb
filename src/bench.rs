@@ -1,4 +1,4 @@
-//! Scripted measurement run, enabled by `AMBIENT_BENCH=<csv path>`.
+//! Scripted measurement run, enabled by `EBB_BENCH=<csv path>`.
 //!
 //! Timeline after the first frame: idle for `IDLE` (CPU time sampled across it),
 //! optionally fire the capture hotkey path and sample memory with the bar up, hide
@@ -16,10 +16,10 @@ const CAPTURE_UP: Duration = Duration::from_millis(1500);
 
 pub const HEADER: &str = "label,proc_ms,main_ms,ws_first,priv_first,ws_idle,priv_idle,cpu_idle_ms,latency_ms,ws_capture,priv_capture,search_latency_ms,ws_search,priv_search";
 
-/// `AMBIENT_BENCH=<csv>`, or `--bench=<csv>` for launchers that cannot set the
+/// `EBB_BENCH=<csv>`, or `--bench=<csv>` for launchers that cannot set the
 /// environment (Task Scheduler).
 pub fn path() -> Option<PathBuf> {
-    std::env::var_os("AMBIENT_BENCH").map(PathBuf::from).or_else(|| {
+    std::env::var_os("EBB_BENCH").map(PathBuf::from).or_else(|| {
         std::env::args().find_map(|a| a.strip_prefix("--bench=").map(PathBuf::from))
     })
 }

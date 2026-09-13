@@ -74,7 +74,31 @@ fn now() -> i64 {
 
 pub fn db_path() -> PathBuf {
     let base = std::env::var_os("LOCALAPPDATA").map_or_else(|| PathBuf::from("."), PathBuf::from);
-    base.join("Ambient").join("ambient.db")
+    base.join("Ebb").join("ebb.db")
+}
+
+/// Moves data left by the app's former name (`%LOCALAPPDATA%\Ambient\ambient.db`)
+/// to `db_path()`. Runs once, before the first `Store::open`; does nothing when the
+/// new database already exists. A locked old database (an old build still
+/// running) leaves everything in place for the next launch.
+pub fn migrate_legacy_data() {
+    let new_db = db_path();
+    let (Some(new_dir), Some(base)) = (new_db.parent(), new_db.parent().and_then(|p| p.parent())) else {
+        return;
+    };
+    let old_dir = base.join("Ambient");
+    if new_db.exists() || !old_dir.join("ambient.db").exists() || std::fs::create_dir_all(new_dir).is_err() {
+        return;
+    }
+    if std::fs::rename(old_dir.join("ambient.db"), &new_db).is_err() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(&old_dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().replacen("ambient.db", "ebb.db", 1);
+        let _ = std::fs::rename(entry.path(), new_dir.join(name));
+    }
+    let _ = std::fs::remove_dir(&old_dir);
 }
 
 impl Store {
@@ -287,7 +311,7 @@ impl Store {
     }
 
     /// State of earlier imports from `prefix`, for importing again:
-    /// - source ids to leave alone: their card was changed in Ambient (moved, edited,
+    /// - source ids to leave alone: their card was changed in Ebb (moved, edited,
     ///   trashed) or is gone, so a re-import must not duplicate or resurrect it;
     /// - card ids that are still exactly as imported and can be replaced.
     ///
@@ -357,7 +381,7 @@ impl Store {
                     r.height(),
                     n.created_at,
                     n.updated_at,
-                    // Not "viewed" in Ambient yet, except what lands on the layer now.
+                    // Not "viewed" in Ebb yet, except what lands on the layer now.
                     // One second back: timestamps are in seconds, and a move right
                     // after the import must still count as a change (import_state).
                     if rect.is_some() { (viewed - 1).max(n.updated_at) } else { n.updated_at },
@@ -486,7 +510,7 @@ mod tests {
     use crate::sticky::{Planned, plan};
 
     fn temp_store(name: &str) -> (Store, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("ambient-test-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ebb-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         (Store::open_at(dir.join("t.db")).unwrap(), dir)
     }
@@ -570,7 +594,7 @@ mod tests {
     #[test]
     #[ignore]
     fn search_speed() {
-        let notes: usize = std::env::var("AMBIENT_SPEED_NOTES").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000);
+        let notes: usize = std::env::var("EBB_SPEED_NOTES").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000);
         let (store, dir) = temp_store("speed");
         // Zipf-distributed vocabulary like natural text: a few very common words,
         // a long tail of rare ones. Known words sit at chosen ranks.

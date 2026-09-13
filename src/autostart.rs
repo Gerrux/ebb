@@ -35,7 +35,21 @@ fn user_name() -> Option<String> {
 
 fn task_name() -> String {
     let user = std::env::var("USERNAME").unwrap_or_default();
+    format!("Ebb autostart ({user})")
+}
+
+/// The task registered before the app was renamed from Ambient Notes.
+fn legacy_task_name() -> String {
+    let user = std::env::var("USERNAME").unwrap_or_default();
     format!("Ambient Notes autostart ({user})")
+}
+
+fn delete_task(root: &ITaskFolder, name: String) -> Result<()> {
+    match unsafe { root.DeleteTask(&BSTR::from(name), 0) } {
+        // ERROR_FILE_NOT_FOUND: already gone.
+        Err(e) if e.code() == windows::core::HRESULT::from_win32(2) => Ok(()),
+        other => other,
+    }
 }
 
 fn xml_escape(s: &str) -> String {
@@ -51,7 +65,7 @@ fn task_xml(user: &str, exe: &std::path::Path) -> String {
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Author>{user}</Author>
-    <Description>Starts Ambient Notes when {user} signs in.</Description>
+    <Description>Starts Ebb when {user} signs in.</Description>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
@@ -151,17 +165,15 @@ pub fn enable() -> Result<()> {
             TASK_LOGON_INTERACTIVE_TOKEN,
             &empty,
         )?;
+        let _ = delete_task(root, legacy_task_name());
         Ok(())
     })
 }
 
 pub fn disable() -> Result<()> {
-    with_root(|root| unsafe {
-        match root.DeleteTask(&BSTR::from(task_name()), 0) {
-            // ERROR_FILE_NOT_FOUND: already gone.
-            Err(e) if e.code() == windows::core::HRESULT::from_win32(2) => Ok(()),
-            other => other,
-        }
+    with_root(|root| {
+        let _ = delete_task(root, legacy_task_name());
+        delete_task(root, task_name())
     })
 }
 
@@ -179,8 +191,8 @@ mod tests {
 
     #[test]
     fn xml_round_trips_command() {
-        let xml = task_xml(r"PC\me", std::path::Path::new(r"C:\A & B\ambient.exe"));
-        assert_eq!(command_from_xml(&xml).as_deref(), Some(r"C:\A & B\ambient.exe"));
+        let xml = task_xml(r"PC\me", std::path::Path::new(r"C:\A & B\ebb.exe"));
+        assert_eq!(command_from_xml(&xml).as_deref(), Some(r"C:\A & B\ebb.exe"));
         assert!(xml.contains("<Priority>4</Priority>"));
         assert!(xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
     }

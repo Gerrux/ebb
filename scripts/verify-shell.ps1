@@ -1,10 +1,10 @@
 ﻿# Checks the shell integration of a running release build without synthetic input:
 # window styles, z-order pinning, tray registration, single instance, hide/show,
-# capture while hidden, --quit. Talks to Ambient's own hidden shell window only.
+# capture while hidden, --quit. Talks to Ebb's own hidden shell window only.
 # The idle-CPU check fails if the Sticky Notes import offer scans during it (3 s after
 # start): run against a profile where the import was done or declined, or with
 # LOCALAPPDATA pointing at a test directory.
-param([string]$Exe = "$PSScriptRoot\..\target\release\ambient.exe")
+param([string]$Exe = "$PSScriptRoot\..\target\release\ebb.exe")
 $ErrorActionPreference = 'Stop'
 $Exe = [IO.Path]::GetFullPath($Exe)
 
@@ -28,15 +28,15 @@ $WM_APP = 0x8000; $WM_TRAY = $WM_APP + 1; $WM_HOTKEY = 0x0312; $NIN_SELECT = 0x4
 $results = [System.Collections.Generic.List[object]]::new()
 function Check($name, $ok, $detail = "") { $results.Add([pscustomobject]@{ check = $name; ok = [bool]$ok; detail = $detail }) }
 function Wait-Until($cond, $ms = 3000) { $sw = [Diagnostics.Stopwatch]::StartNew(); while ($sw.ElapsedMilliseconds -lt $ms) { if (& $cond) { return $true }; Start-Sleep -Milliseconds 25 }; return [bool](& $cond) }
-function Layer { $p = Get-Process ambient -ErrorAction SilentlyContinue | Select-Object -First 1; if (-not $p) { return [IntPtr]::Zero }; [W]::FindWindow([NullString]::Value, "Ambient") }
+function Layer { $p = Get-Process ebb -ErrorAction SilentlyContinue | Select-Object -First 1; if (-not $p) { return [IntPtr]::Zero }; [W]::FindWindow([NullString]::Value, "Ebb") }
 
-if (Get-Process ambient -ErrorAction SilentlyContinue) { throw "close running Ambient instances first" }
+if (Get-Process ebb -ErrorAction SilentlyContinue) { throw "close running Ebb instances first" }
 
 $p = Start-Process $Exe -PassThru
 $shell = [IntPtr]::Zero
-Wait-Until { $script:shell = [W]::FindWindow("AmbientNotes.Shell", [NullString]::Value); $shell -ne [IntPtr]::Zero } | Out-Null
+Wait-Until { $script:shell = [W]::FindWindow("Ebb.Shell", [NullString]::Value); $shell -ne [IntPtr]::Zero } | Out-Null
 $layer = [IntPtr]::Zero
-Wait-Until { $script:layer = [W]::FindWindow([NullString]::Value, "Ambient"); ($layer -ne [IntPtr]::Zero) -and [W]::IsWindowVisible($layer) } 5000 | Out-Null
+Wait-Until { $script:layer = [W]::FindWindow([NullString]::Value, "Ebb"); ($layer -ne [IntPtr]::Zero) -and [W]::IsWindowVisible($layer) } 5000 | Out-Null
 Start-Sleep -Milliseconds 800
 Check "shell window exists" ($shell -ne [IntPtr]::Zero)
 Check "layer visible after start" ([W]::IsWindowVisible($layer))
@@ -87,7 +87,7 @@ Check "idle CPU while hidden (3 s)" (($cpu1 - $cpu0) -lt 50) ("{0:0} ms" -f ($cp
 # Capture hotkey while hidden.
 [void][W]::PostMessage($shell, $WM_HOTKEY, [IntPtr]1, [IntPtr]0)
 $cap = [IntPtr]::Zero
-$shown = Wait-Until { $script:cap = [W]::FindWindow([NullString]::Value, "Ambient Capture"); ($cap -ne [IntPtr]::Zero) -and [W]::IsWindowVisible($cap) }
+$shown = Wait-Until { $script:cap = [W]::FindWindow([NullString]::Value, "Ebb Capture"); ($cap -ne [IntPtr]::Zero) -and [W]::IsWindowVisible($cap) }
 Check "hotkey shows capture while layer hidden" $shown
 Check "layer stays hidden meanwhile" (-not [W]::IsWindowVisible($layer))
 [void][W]::PostMessage($shell, $WM_HOTKEY, [IntPtr]1, [IntPtr]0)
@@ -97,7 +97,7 @@ $sw = [Diagnostics.Stopwatch]::StartNew()
 $p2 = Start-Process $Exe -PassThru; $p2.WaitForExit(10000) | Out-Null
 Check "second instance exits" ($p2.HasExited) ("exit={0} in {1} ms" -f $p2.ExitCode, $sw.ElapsedMilliseconds)
 Check "second instance shows layer" (Wait-Until { [W]::IsWindowVisible($layer) })
-Check "still one process" (@(Get-Process ambient).Count -eq 1)
+Check "still one process" (@(Get-Process ebb).Count -eq 1)
 $ex3 = [int64][W]::GetWindowLongPtr($layer, -20); $st3 = [int64][W]::GetWindowLongPtr($layer, -16)
 Check "styles survive hide/show" ((($ex3 -band 0x80) -ne 0) -and (($ex3 -band 0x40000) -eq 0) -and (($st3 -band 0x80000) -eq 0)) ("exstyle=0x{0:X} style=0x{1:X}" -f $ex3, $st3)
 $below3 = Below $layer

@@ -1,9 +1,9 @@
-﻿# Release benchmark: launches each variant with AMBIENT_BENCH set, one warm-up then interleaved runs.
+﻿# Release benchmark: launches each variant with EBB_BENCH set, one warm-up then interleaved runs.
 # Example:
-#   .\scripts\bench.ps1 -Variants 'glow|target\release\ambient.exe|','wgpu|target\wgpu\release\ambient.exe|'
+#   .\scripts\bench.ps1 -Variants 'glow|target\release\ebb.exe|','wgpu|target\wgpu\release\ebb.exe|'
 # Variant names must not contain commas.
 # Variants: "name|exe|ENV=val;ENV=val". Interleaved runs, warm-up discarded, median [min-max].
-param([string[]]$Variants, [int]$Runs = 5, [string]$Out = "$env:TEMP\ambient-bench.csv")
+param([string[]]$Variants, [int]$Runs = 5, [string]$Out = "$env:TEMP\ebb-bench.csv")
 Remove-Item $Out -ErrorAction SilentlyContinue
 $parsed = foreach ($v in $Variants) {
     $name, $exe, $envs = $v -split '\|', 3
@@ -11,17 +11,17 @@ $parsed = foreach ($v in $Variants) {
 }
 function Run($v, $csv) {
     foreach ($e in $v.Env) { $k, $val = $e -split '=', 2; Set-Item "Env:$k" $val }
-    $env:AMBIENT_BENCH = $csv
+    $env:EBB_BENCH = $csv
     $p = Start-Process -FilePath $v.Exe -PassThru
     if (-not $p.WaitForExit(30000)) { Stop-Process -Id $p.Id -Force; Write-Host "timeout $($v.Name)" }
-    Remove-Item Env:AMBIENT_BENCH
+    Remove-Item Env:EBB_BENCH
     foreach ($e in $v.Env) { $k = ($e -split '=', 2)[0]; Remove-Item "Env:$k" }
     # Tag the row just written with the variant name.
     $lines = Get-Content $csv
     $lines[-1] = $v.Name + ($lines[-1].Substring($lines[-1].IndexOf(',')))
     Set-Content $csv $lines
 }
-$warm = "$env:TEMP\ambient-bench-warmup.csv"
+$warm = "$env:TEMP\ebb-bench-warmup.csv"
 foreach ($v in $parsed) { Run $v $warm }
 for ($i = 1; $i -le $Runs; $i++) { foreach ($v in $parsed) { Run $v $Out; Start-Sleep -Milliseconds 400 } }
 # The header comes from the first row ever written: list the newest build first when

@@ -124,7 +124,7 @@ fn copy_consistent(src: &Path, dir: &Path) -> std::io::Result<PathBuf> {
 
 /// Reads all non-deleted notes from a private copy of `src`.
 pub fn read_notes(src: &Path) -> Result<Vec<SourceNote>, String> {
-    let dir = std::env::temp_dir().join(format!("ambient-sticky-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("ebb-sticky-{}", std::process::id()));
     let result = (|| {
         let copy = copy_consistent(src, &dir).map_err(|e| format!("copy: {e}"))?;
         // Read-write on the copy so SQLite can replay the WAL into it.

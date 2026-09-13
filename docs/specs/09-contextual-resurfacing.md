@@ -28,7 +28,7 @@ product.txt §9: при запуске Figma — дизайн-заметки, в
 - Слежение за активным окном без поллинга: `SetWinEventHook(EVENT_SYSTEM_FOREGROUND,
   WINEVENT_OUTOFCONTEXT)` в потоке shell (у него уже есть цикл сообщений). Из события —
   `GetWindowThreadProcessId` → `QueryFullProcessImageNameW` → имя exe.
-- Своё окно Ambient и рабочий стол игнорировать.
+- Своё окно Ebb и рабочий стол игнорировать.
 - Слой под окнами: карточки появляются, даже если слой перекрыт, — пользователь увидит их,
   когда посмотрит на второй монитор (это и есть «ambient»).
 

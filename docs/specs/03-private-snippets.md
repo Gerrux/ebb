@@ -46,7 +46,7 @@ ALTER TABLE cards ADD COLUMN secret BLOB;       -- nonce(12) || ciphertext || ta
 ```
 
 Ключ данных: 256 бит, генерируется при первой записи секрета (`BCryptGenRandom`), хранится в
-`%LOCALAPPDATA%\Ambient\vault.key`, защищённый `CryptProtectData` (DPAPI, пользователь,
+`%LOCALAPPDATA%\Ebb\vault.key`, защищённый `CryptProtectData` (DPAPI, пользователь,
 `CRYPTPROTECT_UI_FORBIDDEN`, entropy = константа приложения). В базе ключа нет.
 
 Шифрование: AES-256-GCM через Windows CNG (`BCryptOpenAlgorithmProvider(BCRYPT_AES_ALGORITHM)`,
@@ -80,7 +80,7 @@ ALTER TABLE cards ADD COLUMN secret BLOB;       -- nonce(12) || ciphertext || ta
 
 ## Критерии приёмки
 
-- [ ] После миграции `findstr /c:"<секрет>"` по `ambient.db`, `-wal`, `-shm` ничего не находит
+- [ ] После миграции `findstr /c:"<секрет>"` по `ebb.db`, `-wal`, `-shm` ничего не находит
       (тест на временной базе: вставить, мигрировать, прочитать байты файлов).
 - [ ] Поиск по слову из секрета не находит карточку; по метке — находит.
 - [ ] «Копировать» кладёт секрет в буфер, Win+V его не показывает, через 30 с буфер пуст

@@ -1,0 +1,48 @@
+# Every push and PR: tests, the other renderer, and the installer built by the
+# same script as a release, uploaded as a workflow artifact to try out.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    # The app is Windows-only (Win32 shell, DWM, Task Scheduler).
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo test --release --locked
+
+      # glow ships; wgpu stays buildable for the benchmark (src/renderer.rs).
+      - run: cargo check --release --locked --no-default-features --features wgpu
+
+      # Reported, not enforced yet: existing warnings would fail every run.
+      - run: cargo clippy --release --locked
+        continue-on-error: true
+
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress -y
+          }
+
+      - run: powershell -NoProfile -File installer/build.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ebb-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error

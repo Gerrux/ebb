@@ -1,0 +1,69 @@
+# Tag vX.Y.Z -> GitHub release with the installer and the portable zip.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Built by installer/build.ps1, the same script as locally and in ci.yml.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # gh release create
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The installer and the exe carry the Cargo.toml version; a tag that says
+      # otherwise would publish a release whose files disagree with its name.
+      - name: tag matches Cargo.toml
+        shell: pwsh
+        run: |
+          $cargo = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          if ($cargo -ne $tag) { throw "Cargo.toml = $cargo, tag = $tag" }
+
+      - run: cargo test --release --locked
+
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress -y
+          }
+
+      - run: powershell -NoProfile -File installer/build.ps1
+
+      - name: checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem dist -File | Where-Object Name -ne SHA256SUMS.txt | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content -Encoding ascii dist/SHA256SUMS.txt
+
+      - name: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $files = (Get-ChildItem dist -File).FullName
+          # A re-run for the same tag updates the assets instead of failing on
+          # "release already exists".
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @files --clobber
+          } else {
+            $pre = if ($tag -match '-') { "--prerelease" } else { $null }
+            gh release create $tag --title "Ebb $($tag.TrimStart('v'))" --notes-file .github/release-notes.md --generate-notes @files $pre
+          }
+          if ($LASTEXITCODE -ne 0) { throw "gh release failed" }

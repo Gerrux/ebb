@@ -13,9 +13,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS, DeleteObject,
-};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
@@ -25,8 +22,8 @@ use windows::Win32::UI::Shell::{
     NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW,
-    FindWindowW, GetMessageW, HICON, ICONINFO, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW,
+    FindWindowW, GetMessageW, HICON, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW,
     RegisterClassExW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_NONOTIFY,
     TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_HOTKEY, WM_NULL,
     WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
@@ -35,16 +32,16 @@ use windows::core::{PCWSTR, w};
 
 use crate::autostart;
 
-/// Instance identity. `AMBIENT_INSTANCE=<name>` runs a separate instance (own mutex
+/// Instance identity. `EBB_INSTANCE=<name>` runs a separate instance (own mutex
 /// and shell window) next to the normal one, e.g. for testing against another
 /// LOCALAPPDATA while the real app keeps running.
 fn instance_suffix() -> String {
-    std::env::var("AMBIENT_INSTANCE").map(|s| format!(".{s}")).unwrap_or_default()
+    std::env::var("EBB_INSTANCE").map(|s| format!(".{s}")).unwrap_or_default()
 }
 
 fn class_name() -> &'static [u16] {
     static NAME: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
-    NAME.get_or_init(|| wide(&format!("AmbientNotes.Shell{}", instance_suffix())))
+    NAME.get_or_init(|| wide(&format!("Ebb.Shell{}", instance_suffix())))
 }
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_SHOW_LAYER: u32 = WM_APP + 2;
@@ -92,7 +89,7 @@ impl Shared {
 /// held for the whole process lifetime and released by the OS on exit.
 pub fn claim_single_instance() -> bool {
     unsafe {
-        let mutex = wide(&format!("Local\\AmbientNotes.Instance{}", instance_suffix()));
+        let mutex = wide(&format!("Local\\Ebb.Instance{}", instance_suffix()));
         match CreateMutexW(None, false, PCWSTR(mutex.as_ptr())) {
             Ok(handle) if GetLastError() == ERROR_ALREADY_EXISTS => {
                 let _ = CloseHandle(handle);
@@ -200,7 +197,7 @@ pub fn spawn(ctx: egui::Context, shared: Arc<Shared>) {
             let hwnd = CreateWindowExW(
                 WS_EX_TOOLWINDOW,
                 PCWSTR(class_name().as_ptr()),
-                w!("Ambient Notes"),
+                w!("Ebb"),
                 WS_POPUP,
                 0,
                 0,
@@ -366,7 +363,7 @@ unsafe fn add_tray_icon(hwnd: HWND) {
     data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
     data.uCallbackMessage = WM_TRAY;
     data.hIcon = tray_icon();
-    for (dst, src) in data.szTip.iter_mut().zip("Ambient Notes".encode_utf16()) {
+    for (dst, src) in data.szTip.iter_mut().zip("Ebb".encode_utf16()) {
         *dst = src;
     }
     data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
@@ -391,81 +388,13 @@ pub fn remove_tray_icon(shared: &Shared) {
 // Icon
 // ---------------------------------------------------------------------------
 
-/// Signed distance to a rounded box centered at `c` with half extents `h`.
-fn rounded_box(p: (f32, f32), c: (f32, f32), h: (f32, f32), r: f32) -> f32 {
-    let qx = (p.0 - c.0).abs() - (h.0 - r);
-    let qy = (p.1 - c.1).abs() - (h.1 - r);
-    let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
-    outside + qx.max(qy).min(0.0) - r
-}
-
-/// Straight-alpha BGRA pixels of the tray glyph: a rounded card with two text lines.
-pub fn icon_pixels(size: usize) -> Vec<u32> {
-    let s = size as f32;
-    let mut out = Vec::with_capacity(size * size);
-    for y in 0..size {
-        for x in 0..size {
-            let p = (x as f32 + 0.5, y as f32 + 0.5);
-            let card = (0.5 - rounded_box(p, (s * 0.5, s * 0.5), (s * 0.44, s * 0.40), s * 0.16)).clamp(0.0, 1.0);
-            let t = y as f32 / s;
-            let (mut r, mut g, mut b) = (132.0 - 30.0 * t, 160.0 - 40.0 * t, 255.0 - 25.0 * t);
-            let thickness = (s * 0.09).max(1.2);
-            let line = |cx: f32, cy: f32, half: f32| {
-                (0.5 - rounded_box(p, (cx, cy), (half, thickness / 2.0), thickness / 2.0)).clamp(0.0, 1.0)
-            };
-            let ink = line(s * 0.5, s * 0.40, s * 0.26).max(line(s * 0.42, s * 0.60, s * 0.18)) * 0.95;
-            r += (255.0 - r) * ink;
-            g += (255.0 - g) * ink;
-            b += (255.0 - b) * ink;
-            let a = (card * 255.0).round() as u32;
-            out.push((a << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32);
-        }
-    }
-    out
-}
-
+/// The exe's icon resource (id 1, see build.rs) at the tray's small-icon size,
+/// so Windows picks the hand-tuned 16/20/24 px frame instead of scaling one.
 fn tray_icon() -> HICON {
     unsafe {
         let size = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()).max(16);
-        let info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: size,
-                biHeight: -size, // top-down
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let mut bits: *mut c_void = std::ptr::null_mut();
-        let Ok(color) = CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0) else {
-            return HICON::default();
-        };
-        let pixels = icon_pixels(size as usize);
-        std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits as *mut u32, pixels.len());
-        let mask = CreateBitmap(size, size, 1, 1, None);
-        let icon = CreateIconIndirect(&ICONINFO {
-            fIcon: true.into(),
-            xHotspot: 0,
-            yHotspot: 0,
-            hbmMask: mask,
-            hbmColor: color,
-        });
-        let _ = DeleteObject(color.into());
-        let _ = DeleteObject(mask.into());
-        icon.unwrap_or_default()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn icon_has_transparent_corners_and_opaque_center() {
-        let size = 32;
-        let px = super::icon_pixels(size);
-        assert_eq!(px[0] >> 24, 0);
-        assert_eq!(px[size * size / 2 + size / 2] >> 24, 255);
+        let instance = GetModuleHandleW(None).unwrap_or_default();
+        LoadImageW(Some(instance.into()), PCWSTR(std::ptr::without_provenance(1)), IMAGE_ICON, size, size, LR_DEFAULTCOLOR)
+            .map_or_else(|_| HICON::default(), |h| HICON(h.0))
     }
 }
