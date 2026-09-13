@@ -16,8 +16,12 @@ const CAPTURE_UP: Duration = Duration::from_millis(1500);
 
 pub const HEADER: &str = "label,proc_ms,main_ms,ws_first,priv_first,ws_idle,priv_idle,cpu_idle_ms,latency_ms,ws_capture,priv_capture";
 
+/// `AMBIENT_BENCH=<csv>`, or `--bench=<csv>` for launchers that cannot set the
+/// environment (Task Scheduler).
 pub fn path() -> Option<PathBuf> {
-    std::env::var_os("AMBIENT_BENCH").map(PathBuf::from)
+    std::env::var_os("AMBIENT_BENCH").map(PathBuf::from).or_else(|| {
+        std::env::args().find_map(|a| a.strip_prefix("--bench=").map(PathBuf::from))
+    })
 }
 
 pub struct Hooks {

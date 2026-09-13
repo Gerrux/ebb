@@ -343,16 +343,102 @@ pub fn trim_working_set() {
     }
 }
 
+fn filetime_u64(f: FILETIME) -> u64 {
+    ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64
+}
+
+/// Current UTC time in 100 ns FILETIME units.
+pub fn now_filetime() -> u64 {
+    filetime_u64(unsafe { GetSystemTimePreciseAsFileTime() })
+}
+
+fn process_creation(process: windows::Win32::Foundation::HANDLE) -> Option<u64> {
+    let (mut creation, mut exit, mut kernel, mut user) = Default::default();
+    unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) }.ok()?;
+    Some(filetime_u64(creation))
+}
+
+pub fn ms_between(from: u64, to: u64) -> f64 {
+    (to as i64 - from as i64) as f64 / 10_000.0
+}
+
 /// Milliseconds since the OS created this process (includes loader time).
 pub fn ms_since_process_start() -> f64 {
+    let now = now_filetime();
+    process_creation(unsafe { GetCurrentProcess() }).map_or(f64::NAN, |c| ms_between(c, now))
+}
+
+pub fn process_start_filetime() -> Option<u64> {
+    process_creation(unsafe { GetCurrentProcess() })
+}
+
+/// When the logon session of this process was created (credentials accepted).
+/// Own session only, so no privileges are needed.
+pub fn logon_filetime() -> Option<u64> {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::Authentication::Identity::{LsaFreeReturnBuffer, LsaGetLogonSessionData};
+    use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_STATISTICS, TokenStatistics};
+    use windows::Win32::System::Threading::OpenProcessToken;
+
     unsafe {
-        let (mut creation, mut exit, mut kernel, mut user) = Default::default();
-        if GetProcessTimes(GetCurrentProcess(), &mut creation, &mut exit, &mut kernel, &mut user).is_err() {
-            return f64::NAN;
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
+        let mut stats = TOKEN_STATISTICS::default();
+        let mut len = 0;
+        let got = GetTokenInformation(
+            token,
+            TokenStatistics,
+            Some(&mut stats as *mut _ as *mut c_void),
+            size_of::<TOKEN_STATISTICS>() as u32,
+            &mut len,
+        );
+        let _ = CloseHandle(token);
+        got.ok()?;
+        let mut data = std::ptr::null_mut();
+        if LsaGetLogonSessionData(&stats.AuthenticationId, &mut data).is_err() || data.is_null() {
+            return None;
         }
-        let now = GetSystemTimePreciseAsFileTime();
-        let to_u64 = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
-        (to_u64(now).saturating_sub(to_u64(creation))) as f64 / 10_000.0
+        let logon = (*data).LogonTime;
+        let _ = LsaFreeReturnBuffer(data as *const c_void);
+        Some(logon as u64)
+    }
+}
+
+/// Creation time of the oldest explorer.exe in this session (the shell).
+pub fn explorer_start_filetime() -> Option<u64> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+    };
+    use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    use windows::Win32::System::Threading::{GetCurrentProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    unsafe {
+        let mut my_session = 0;
+        ProcessIdToSessionId(GetCurrentProcessId(), &mut my_session).ok()?;
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
+        let mut entry = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut oldest: Option<u64> = None;
+        let mut more = Process32FirstW(snap, &mut entry).is_ok();
+        while more {
+            let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+            let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+            let mut session = 0;
+            if name.eq_ignore_ascii_case("explorer.exe")
+                && ProcessIdToSessionId(entry.th32ProcessID, &mut session).is_ok()
+                && session == my_session
+            {
+                if let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, entry.th32ProcessID) {
+                    if let Some(t) = process_creation(h) {
+                        oldest = Some(oldest.map_or(t, |o| o.min(t)));
+                    }
+                    let _ = CloseHandle(h);
+                }
+            }
+            more = Process32NextW(snap, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snap);
+        oldest
     }
 }
 
@@ -363,8 +449,7 @@ pub fn cpu_ms() -> f64 {
         if GetProcessTimes(GetCurrentProcess(), &mut creation, &mut exit, &mut kernel, &mut user).is_err() {
             return f64::NAN;
         }
-        let to_u64 = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
-        (to_u64(kernel) + to_u64(user)) as f64 / 10_000.0
+        (filetime_u64(kernel) + filetime_u64(user)) as f64 / 10_000.0
     }
 }
 

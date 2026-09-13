@@ -9,6 +9,7 @@ use egui::{
     ViewportCommand, ViewportId, pos2, vec2,
 };
 
+use crate::autostart;
 use crate::card::{self, Card, Kind, MIN_SIZE, parse_capture};
 use crate::store::Store;
 use crate::theme::{self, TEXT, TEXT_DIM, TEXT_MUTED};
@@ -34,6 +35,30 @@ struct CaptureState {
     latency_ms: Option<f64>,
     submitted: Vec<String>,
     hwnd: Option<isize>,
+}
+
+#[derive(Default)]
+enum AutostartUi {
+    #[default]
+    Unknown,
+    Busy,
+    Known(Result<autostart::Status, String>),
+}
+
+/// Runs a Task Scheduler call off the UI thread, then refreshes the shown state.
+fn autostart_job(state: &Arc<Mutex<AutostartUi>>, ctx: &egui::Context, change: Option<bool>) {
+    *state.lock().unwrap() = AutostartUi::Busy;
+    let (state, ctx) = (state.clone(), ctx.clone());
+    std::thread::spawn(move || {
+        let changed = match change {
+            Some(true) => autostart::enable(),
+            Some(false) => autostart::disable(),
+            None => Ok(()),
+        };
+        let result = changed.and_then(|_| autostart::status()).map_err(|e| e.message());
+        *state.lock().unwrap() = AutostartUi::Known(result);
+        ctx.request_repaint();
+    });
 }
 
 enum Action {
@@ -63,13 +88,22 @@ pub struct AmbientApp {
     revealed: Option<(i64, Instant)>,
 
     show_debug: bool,
+    /// Autostart task state, filled in by a background query when the debug panel opens.
+    autostart: Arc<Mutex<AutostartUi>>,
+    autostarted: bool,
     main_started: Instant,
     first_frame: Option<(f64, f64)>,
     frames: u64,
 }
 
 impl AmbientApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, store: Store, cards: Vec<Card>, main_started: Instant) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        store: Store,
+        cards: Vec<Card>,
+        main_started: Instant,
+        autostarted: bool,
+    ) -> Self {
         theme::install(&cc.egui_ctx);
 
         let hwnd = win::hwnd_of(cc);
@@ -98,6 +132,8 @@ impl AmbientApp {
             editing: None,
             revealed: None,
             show_debug: false,
+            autostart: Arc::default(),
+            autostarted,
             main_started,
             first_frame: None,
             frames: 0,
@@ -261,7 +297,7 @@ impl AmbientApp {
     }
 
     fn debug_ui(&mut self, ui: &mut Ui) {
-        let rect = Rect::from_min_size(ui.max_rect().right_bottom() - vec2(420.0, 250.0), vec2(396.0, 226.0));
+        let rect = Rect::from_min_size(ui.max_rect().right_bottom() - vec2(420.0, 300.0), vec2(396.0, 276.0));
         glass_panel(ui, rect, false);
         let mut backdrop_clicked = false;
         let mut monitor_clicked = false;
@@ -296,6 +332,7 @@ impl AmbientApp {
                 backdrop_clicked = ui.button(format!("F2: {}", self.backdrop.label())).clicked();
             });
             monitor_clicked = ui.button(format!("F3: монитор {}", self.monitor)).clicked();
+            self.autostart_ui(ui);
         });
         if backdrop_clicked {
             self.cycle_backdrop();
@@ -304,6 +341,39 @@ impl AmbientApp {
             self.cycle_monitor();
         }
         ui.ctx().request_repaint_after(Duration::from_secs(1));
+    }
+
+    fn autostart_ui(&self, ui: &mut Ui) {
+        let mut state = self.autostart.lock().unwrap();
+        if matches!(*state, AutostartUi::Unknown) {
+            drop(state);
+            autostart_job(&self.autostart, ui.ctx(), None);
+            state = self.autostart.lock().unwrap();
+        }
+        // (checked, short note, full detail on hover)
+        let (mut on, note, detail) = match &*state {
+            AutostartUi::Unknown | AutostartUi::Busy => (false, Some("…"), None),
+            AutostartUi::Known(Ok(autostart::Status::Off)) => (false, None, None),
+            AutostartUi::Known(Ok(autostart::Status::On { current_exe: true, .. })) => (true, None, None),
+            AutostartUi::Known(Ok(autostart::Status::On { command, .. })) => {
+                (true, Some("другой exe"), Some(command.clone()))
+            }
+            AutostartUi::Known(Err(e)) => (false, Some("ошибка"), Some(e.clone())),
+        };
+        let busy = matches!(*state, AutostartUi::Busy | AutostartUi::Unknown);
+        drop(state);
+        ui.horizontal(|ui| {
+            let resp = ui.add_enabled(!busy, egui::Checkbox::new(&mut on, "Запускать при входе в Windows"));
+            if resp.changed() {
+                autostart_job(&self.autostart, ui.ctx(), Some(on));
+            }
+            if let Some(note) = note {
+                let label = ui.label(RichText::new(note).size(11.5).color(TEXT_MUTED));
+                if let Some(detail) = detail {
+                    label.on_hover_text(detail);
+                }
+            }
+        });
     }
 
     fn cycle_backdrop(&mut self) {
@@ -374,21 +444,16 @@ impl eframe::App for AmbientApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.frames += 1;
         if self.first_frame.is_none() {
+            let frame_at = win::now_filetime();
             let proc_ms = win::ms_since_process_start();
             let main_ms = self.main_started.elapsed().as_secs_f64() * 1000.0;
             self.first_frame = Some((proc_ms, main_ms));
-            let line = format!("first frame: {proc_ms:.0} ms since process start, {main_ms:.0} ms since main()\n");
-            eprint!("{line}");
-            if let Some(dir) = crate::store::db_path().parent() {
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("timing.log")) {
-                    let _ = f.write_all(line.as_bytes());
-                }
-            }
-            // Startup touches lots of one-off pages (loader, driver init, font parsing).
-            // Drop them from the working set once the first frames are out; private
-            // bytes are unchanged and hotkey latency rises by ~3 ms.
-            std::thread::spawn(|| {
+            let autostarted = self.autostarted;
+            std::thread::spawn(move || {
+                log_first_frame(frame_at, proc_ms, main_ms, autostarted);
+                // Startup touches lots of one-off pages (loader, driver init, font parsing).
+                // Drop them from the working set once the first frames are out; private
+                // bytes are unchanged and hotkey latency rises by ~3 ms.
                 std::thread::sleep(Duration::from_secs(2));
                 win::trim_working_set();
             });
@@ -444,6 +509,33 @@ impl eframe::App for AmbientApp {
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0; 4]
+    }
+}
+
+/// Appends one line to %LOCALAPPDATA%\Ambient\timing.log. Runs off the UI thread:
+/// the logon-session and process-snapshot queries take a few milliseconds.
+fn log_first_frame(frame_at: u64, proc_ms: f64, main_ms: f64, autostarted: bool) {
+    let since = |t: Option<u64>| t.map_or("?".to_owned(), |t| format!("{:.0}", win::ms_between(t, frame_at)));
+    let logon = win::logon_filetime();
+    let rel = |t: Option<u64>| match (logon, t) {
+        (Some(l), Some(t)) => format!("{:.0}", win::ms_between(l, t)),
+        _ => "?".to_owned(),
+    };
+    let line = format!(
+        "first frame: {proc_ms:.0} ms since process start, {main_ms:.0} ms since main(); \
+         autostart={autostarted}; logon->frame {} ms, logon->process {} ms, logon->explorer {} ms\n",
+        since(logon),
+        rel(win::process_start_filetime()),
+        rel(win::explorer_start_filetime()),
+    );
+    if let Some(dir) = crate::store::db_path().parent() {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("timing.log")) {
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
+    if cfg!(debug_assertions) {
+        eprint!("{line}");
     }
 }
 

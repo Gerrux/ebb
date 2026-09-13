@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod autostart;
 mod bench;
 mod card;
 mod renderer;
@@ -34,8 +35,32 @@ fn seed(store: &Store) -> Vec<Card> {
     cards
 }
 
+/// `--autostart-on|off|run|status`: manage the logon task without the UI.
+/// Exit code 0 on success (for `status`: 0 = on, 1 = off), 2 on error.
+fn autostart_cli(arg: &str) -> Option<i32> {
+    let result = match arg {
+        "--autostart-on" => autostart::enable().map(|_| 0),
+        "--autostart-off" => autostart::disable().map(|_| 0),
+        "--autostart-run" => autostart::run_now().map(|_| 0),
+        "--autostart-status" => autostart::status().map(|s| {
+            println!("{s:?}");
+            if matches!(s, autostart::Status::Off) { 1 } else { 0 }
+        }),
+        _ => return None,
+    };
+    Some(result.unwrap_or_else(|e| {
+        eprintln!("{arg}: {e}");
+        2
+    }))
+}
+
 fn main() -> eframe::Result {
     let main_started = Instant::now();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = args.first().and_then(|a| autostart_cli(a)) {
+        std::process::exit(code);
+    }
+    let autostarted = args.iter().any(|a| a == autostart::FLAG);
 
     let store = Store::open().expect("open database");
     let mut cards = store.load().expect("load cards");
@@ -59,6 +84,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Ambient",
         options,
-        Box::new(move |cc| Ok(Box::new(app::AmbientApp::new(cc, store, cards, main_started)))),
+        Box::new(move |cc| Ok(Box::new(app::AmbientApp::new(cc, store, cards, main_started, autostarted)))),
     )
 }
