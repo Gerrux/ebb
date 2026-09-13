@@ -3,13 +3,23 @@ name = "ambient"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["glow"]
+# Exactly one renderer per build; the benchmark compares them (see src/renderer.rs).
+glow = ["eframe/glow"]
+wgpu = ["eframe/wgpu_no_default_features", "dep:wgpu"]
+# egui_mcp support (AccessKit tree over EGUI_INSPECTION=1).
+inspection = ["eframe/inspection"]
+
 [dependencies]
-eframe = { version = "0.36", default-features = false, features = ["glow", "inspection"] }
+eframe = { version = "0.36", default-features = false }
 egui = "0.36"
 raw-window-handle = "0.6"
-rusqlite = { version = "0.40", features = ["bundled"] }
+# Only to turn on the D3D12 backend (eframe re-exports the API); no Vulkan/GL/Metal.
+wgpu = { version = "30", default-features = false, features = ["std", "dx12", "wgsl"], optional = true }
+rusqlite ={ version = "0.40", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_UI_HiDpi", "Win32_System_SystemInformation"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_UI_HiDpi", "Win32_System_SystemInformation", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_Security"] }
 
 [profile.release]
 opt-level = 3

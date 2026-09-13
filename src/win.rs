@@ -292,8 +292,56 @@ pub fn spawn_capture_hotkey(ctx: egui::Context, on_press: Arc<Mutex<Option<Insta
 }
 
 // ---------------------------------------------------------------------------
+// Files
+// ---------------------------------------------------------------------------
+
+/// Maps a file read-only for the rest of the process lifetime. The pages are
+/// file-backed and shared with every other process that maps the same file
+/// (system fonts are mapped by most GUI apps), so they are not private bytes.
+pub fn map_file_static(path: &str) -> Option<&'static [u8]> {
+    use windows::Win32::Foundation::{CloseHandle, GENERIC_READ};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, GetFileSizeEx, OPEN_EXISTING,
+    };
+    use windows::Win32::System::Memory::{CreateFileMappingW, FILE_MAP_READ, MapViewOfFile, PAGE_READONLY};
+
+    let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
+    unsafe {
+        let file = CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            GENERIC_READ.0,
+            FILE_SHARE_READ,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+        .ok()?;
+        let mut size = 0i64;
+        let mapping = GetFileSizeEx(file, &mut size)
+            .ok()
+            .filter(|_| size > 0)
+            .and_then(|_| CreateFileMappingW(file, None, PAGE_READONLY, 0, 0, None).ok());
+        let _ = CloseHandle(file);
+        let mapping = mapping?;
+        let view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+        // The view keeps the section alive; it is never unmapped.
+        let _ = CloseHandle(mapping);
+        (!view.Value.is_null()).then(|| std::slice::from_raw_parts(view.Value as *const u8, size as usize))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Metrics
 // ---------------------------------------------------------------------------
+
+/// Moves all pages out of the working set (they stay on the standby list and
+/// fault back in cheaply). Changes working set only, not private bytes.
+pub fn trim_working_set() {
+    unsafe {
+        let _ = windows::Win32::System::ProcessStatus::EmptyWorkingSet(GetCurrentProcess());
+    }
+}
 
 /// Milliseconds since the OS created this process (includes loader time).
 pub fn ms_since_process_start() -> f64 {
@@ -305,6 +353,18 @@ pub fn ms_since_process_start() -> f64 {
         let now = GetSystemTimePreciseAsFileTime();
         let to_u64 = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
         (to_u64(now).saturating_sub(to_u64(creation))) as f64 / 10_000.0
+    }
+}
+
+/// User + kernel CPU time consumed by this process, in milliseconds.
+pub fn cpu_ms() -> f64 {
+    unsafe {
+        let (mut creation, mut exit, mut kernel, mut user) = Default::default();
+        if GetProcessTimes(GetCurrentProcess(), &mut creation, &mut exit, &mut kernel, &mut user).is_err() {
+            return f64::NAN;
+        }
+        let to_u64 = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
+        (to_u64(kernel) + to_u64(user)) as f64 / 10_000.0
     }
 }
 

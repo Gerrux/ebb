@@ -1,7 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod bench;
 mod card;
+mod renderer;
 mod store;
 mod theme;
 mod win;
@@ -41,7 +43,7 @@ fn main() -> eframe::Result {
         cards = seed(&store);
     }
 
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Ambient")
             .with_inner_size([1280.0, 800.0])
@@ -52,6 +54,7 @@ fn main() -> eframe::Result {
             .with_maximize_button(false),
         ..Default::default()
     };
+    renderer::configure(&mut options);
 
     eframe::run_native(
         "Ambient",

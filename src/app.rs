@@ -385,6 +385,26 @@ impl eframe::App for AmbientApp {
                     let _ = f.write_all(line.as_bytes());
                 }
             }
+            // Startup touches lots of one-off pages (loader, driver init, font parsing).
+            // Drop them from the working set once the first frames are out; private
+            // bytes are unchanged and hotkey latency rises by ~3 ms.
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_secs(2));
+                win::trim_working_set();
+            });
+            if let Some(out) = crate::bench::path() {
+                let (hotkey, ctx) = (self.hotkey.clone(), ui.ctx().clone());
+                let capture = self.capture.clone();
+                let hooks = crate::bench::Hooks {
+                    trigger: Some(Box::new(move || {
+                        *hotkey.lock().unwrap() = Some(Instant::now());
+                        ctx.request_repaint();
+                    })),
+                    latency_ms: Box::new(move || capture.lock().unwrap().latency_ms),
+                };
+                let label = format!("ambient-{}", crate::renderer::NAME);
+                crate::bench::start(ui.ctx().clone(), out, label, proc_ms, main_ms, hooks);
+            }
         }
 
         let (f1, f2, f3, esc) = ui.input_mut(|i| {
@@ -417,6 +437,8 @@ impl eframe::App for AmbientApp {
         if self.show_debug {
             self.debug_ui(ui);
         }
+        // Created up front even while hidden: creating it on the first hotkey press
+        // saves ~4 MiB but doubles the first-show latency and flashes without acrylic.
         self.capture_viewport(ui);
     }
 

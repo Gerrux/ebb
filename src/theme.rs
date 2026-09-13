@@ -34,9 +34,9 @@ pub fn semibold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("semibold".into()))
 }
 
+/// Memory-mapped rather than read: saves ~3 MiB of private bytes versus a heap copy.
 fn read_static(path: &str) -> Option<&'static [u8]> {
-    // Loaded once for the whole process lifetime; leaking avoids a copy per face.
-    std::fs::read(path).ok().map(|b| &*Box::leak(b.into_boxed_slice()))
+    crate::win::map_file_static(path)
 }
 
 pub fn install(ctx: &egui::Context) {
