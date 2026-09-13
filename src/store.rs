@@ -11,6 +11,29 @@ pub struct Store {
     conn: Connection,
 }
 
+/// Deleted cards stay restorable for this long, then are purged on startup.
+pub const TRASH_DAYS: i64 = 30;
+
+/// Which cards a search covers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Scope {
+    /// Everything not in the trash (layer and archive).
+    #[default]
+    Live,
+    Archive,
+    Trash,
+}
+
+impl Scope {
+    fn sql(self) -> &'static str {
+        match self {
+            Scope::Live => " AND c.deleted_at IS NULL",
+            Scope::Archive => " AND c.deleted_at IS NULL AND c.archived = 1",
+            Scope::Trash => " AND c.deleted_at IS NOT NULL",
+        }
+    }
+}
+
 /// One search result.
 #[derive(Clone, Debug)]
 pub struct Hit {
@@ -22,6 +45,8 @@ pub struct Hit {
     pub archived: bool,
     pub pinned: bool,
     pub updated_at: i64,
+    /// Set for cards in the trash.
+    pub deleted_at: Option<i64>,
 }
 
 /// Row of `SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at`.
@@ -116,20 +141,33 @@ impl Store {
             conn.execute("INSERT INTO cards_fts(cards_fts, rank) VALUES ('rank', 'bm25(8.0, 1.0, 4.0)')", [])?;
             conn.execute("INSERT INTO cards_fts(cards_fts) VALUES ('rebuild')", [])?;
         }
+        // Trash: deleted cards keep their row for TRASH_DAYS.
+        let has_deleted_at: bool =
+            conn.query_row("SELECT count(*) FROM pragma_table_info('cards') WHERE name='deleted_at'", [], |r| r.get(0))?;
+        if !has_deleted_at {
+            conn.execute("ALTER TABLE cards ADD COLUMN deleted_at INTEGER", [])?;
+        }
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS cards_kind_created ON cards(kind, created_at);
              CREATE INDEX IF NOT EXISTS cards_created ON cards(created_at);
-             CREATE INDEX IF NOT EXISTS cards_updated ON cards(updated_at);",
+             CREATE INDEX IF NOT EXISTS cards_updated ON cards(updated_at);
+             CREATE INDEX IF NOT EXISTS cards_deleted ON cards(deleted_at) WHERE deleted_at IS NOT NULL;",
+        )?;
+        conn.execute(
+            "DELETE FROM cards WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
+            [now() - TRASH_DAYS * 86_400],
         )?;
         Ok(Self { conn })
     }
 
-    /// Full-text search over all cards, archived included. Private bodies are never
-    /// returned as snippets.
-    pub fn search(&self, q: &crate::search::Query, limit: usize) -> rusqlite::Result<Vec<Hit>> {
+    /// Full-text search within `scope`. Private bodies are never returned as snippets.
+    pub fn search(&self, q: &crate::search::Query, scope: Scope, limit: usize) -> rusqlite::Result<Vec<Hit>> {
         use rusqlite::types::Value;
 
-        // Filters as a condition on `cards` (alias c).
+        // Filters as a condition on `cards` (alias c). The scope condition is kept
+        // apart: Live excludes only the few trashed cards, so it doesn't need the
+        // exhaustive-join path below.
+        let scope_sql = scope.sql();
         let mut filters = String::new();
         let mut args: Vec<Value> = Vec::new();
         if let Some(kind) = q.kind {
@@ -141,7 +179,7 @@ impl Store {
             args.push(Value::Integer(*from));
             args.push(Value::Integer(*to));
         }
-        let columns = "c.id, c.kind, c.title, c.tags, c.archived, c.pinned, c.updated_at";
+        let columns = "c.id, c.kind, c.title, c.deleted_at, c.archived, c.pinned, c.updated_at";
         let row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Hit> {
             let kind = Kind::parse(&r.get::<_, String>(1)?);
             let body: String = r.get(7)?;
@@ -149,6 +187,7 @@ impl Store {
                 id: r.get(0)?,
                 kind,
                 title: r.get(2)?,
+                deleted_at: r.get(3)?,
                 archived: r.get(4)?,
                 pinned: r.get(5)?,
                 updated_at: r.get(6)?,
@@ -163,9 +202,10 @@ impl Store {
 
         let Some(expr) = q.fts_expression() else {
             // Filters only (or nothing): newest first.
+            let order = if scope == Scope::Trash { "c.deleted_at DESC" } else { "c.updated_at DESC" };
             let sql = format!(
-                "SELECT {columns}, substr(c.body, 1, 400) FROM cards c WHERE 1{filters}
-                 ORDER BY c.updated_at DESC LIMIT {limit}"
+                "SELECT {columns}, substr(c.body, 1, 400) FROM cards c WHERE 1{scope_sql}{filters}
+                 ORDER BY {order} LIMIT {limit}"
             );
             return run(sql, args);
         };
@@ -176,7 +216,7 @@ impl Store {
         // candidate set gets the boost; with filters every match is joined instead,
         // so a rare kind isn't cut off by the candidate limit. Snippets are built in
         // Rust for the final rows only (cheaper than snippet() on every candidate).
-        let candidates = if filters.is_empty() {
+        let candidates = if filters.is_empty() && scope == Scope::Live {
             format!("SELECT rowid, rank FROM cards_fts WHERE cards_fts MATCH ? ORDER BY rank LIMIT {}", (limit * 4).max(100))
         } else {
             "SELECT rowid, rank FROM cards_fts WHERE cards_fts MATCH ?".to_owned()
@@ -184,7 +224,7 @@ impl Store {
         let sql = format!(
             "SELECT {columns}, c.body
              FROM ({candidates}) f JOIN cards c ON c.id = f.rowid
-             WHERE 1{filters}
+             WHERE 1{scope_sql}{filters}
              ORDER BY f.rank - 1.5 * (c.archived = 0) - 1.5 * c.pinned
              LIMIT {limit}"
         );
@@ -207,7 +247,7 @@ impl Store {
         }
         like_args.extend(args);
         let sql = format!(
-            "SELECT {columns}, c.body FROM cards c WHERE 1{like_filters}{filters}
+            "SELECT {columns}, c.body FROM cards c WHERE 1{scope_sql}{like_filters}{filters}
              ORDER BY c.updated_at DESC LIMIT {limit}"
         );
         run(sql, like_args)
@@ -300,7 +340,7 @@ impl Store {
     pub fn load(&self) -> rusqlite::Result<Vec<Card>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at
-             FROM cards WHERE archived = 0 ORDER BY updated_at",
+             FROM cards WHERE archived = 0 AND deleted_at IS NULL ORDER BY updated_at",
         )?;
         let rows = stmt.query_map([], card_row)?;
         rows.collect()
@@ -359,9 +399,43 @@ impl Store {
         Ok(())
     }
 
+    /// Moves a card to the trash.
     pub fn delete(&self, id: i64) -> rusqlite::Result<()> {
-        self.conn.execute("DELETE FROM cards WHERE id=?1", [id])?;
+        self.conn.execute("UPDATE cards SET deleted_at=?2 WHERE id=?1", params![id, now()])?;
         Ok(())
+    }
+
+    /// Takes a card out of the trash, back where it was (layer or archive).
+    pub fn restore(&self, id: i64) -> rusqlite::Result<()> {
+        self.conn.execute("UPDATE cards SET deleted_at=NULL WHERE id=?1", [id])?;
+        Ok(())
+    }
+
+    pub fn set_archived(&self, id: i64, archived: bool) -> rusqlite::Result<()> {
+        self.conn.execute("UPDATE cards SET archived=?2 WHERE id=?1", params![id, archived])?;
+        Ok(())
+    }
+
+    /// Deletes a trashed card for good.
+    pub fn purge(&self, id: i64) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM cards WHERE id=?1 AND deleted_at IS NOT NULL", [id])?;
+        Ok(())
+    }
+
+    pub fn empty_trash(&self) -> rusqlite::Result<usize> {
+        self.conn.execute("DELETE FROM cards WHERE deleted_at IS NOT NULL", [])
+    }
+
+    /// (on the layer, archived, in the trash)
+    pub fn counts(&self) -> rusqlite::Result<(i64, i64, i64)> {
+        self.conn.query_row(
+            "SELECT count(*) FILTER (WHERE deleted_at IS NULL AND archived = 0),
+                    count(*) FILTER (WHERE deleted_at IS NULL AND archived = 1),
+                    count(*) FILTER (WHERE deleted_at IS NOT NULL)
+             FROM cards",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
     }
 }
 
@@ -396,7 +470,7 @@ mod tests {
 
     fn find(store: &Store, query: &str) -> Vec<String> {
         let q = crate::search::parse(query, now(), 0);
-        store.search(&q, 20).unwrap().into_iter().map(|h| format!("{}|{}", h.title, h.snippet.replace(['\u{1}', '\u{2}'], ""))).collect()
+        store.search(&q, Scope::Live, 20).unwrap().into_iter().map(|h| format!("{}|{}", h.title, h.snippet.replace(['\u{1}', '\u{2}'], ""))).collect()
     }
 
     #[test]
@@ -419,13 +493,27 @@ mod tests {
         assert_eq!(find(&store, "board").len(), 0, "LIKE is on title+body; 'board' isn't there");
         assert_eq!(find(&store, "taging").len(), 1);
 
-        // Edits reindex; deletes drop from the index.
+        // Edits reindex; the trash is out of normal search but can be searched and
+        // restored; purging drops the card from the index.
         secret.body = "пароль changed".into();
         store.save(&secret).unwrap();
         assert!(find(&store, "hunter2").is_empty());
         assert_eq!(find(&store, "changed").len(), 1);
         store.delete(secret.id).unwrap();
         assert!(find(&store, "changed").is_empty());
+        let q = crate::search::parse("changed", now(), 0);
+        let trashed = store.search(&q, Scope::Trash, 20).unwrap();
+        assert_eq!(trashed.len(), 1);
+        assert!(trashed[0].deleted_at.is_some());
+        assert_eq!(store.counts().unwrap().2, 1);
+        store.restore(secret.id).unwrap();
+        assert_eq!(find(&store, "changed").len(), 1);
+        store.set_archived(secret.id, true).unwrap();
+        assert_eq!(store.search(&q, Scope::Archive, 20).unwrap().len(), 1);
+        store.delete(secret.id).unwrap();
+        store.purge(secret.id).unwrap();
+        assert!(store.search(&q, Scope::Trash, 20).unwrap().is_empty());
+        assert!(store.card(secret.id).unwrap().is_none());
 
         // Reopening an existing database without the index builds it.
         store.conn.execute_batch("DROP TABLE cards_fts;").unwrap();
@@ -492,7 +580,7 @@ mod tests {
             let mut n = 0;
             for _ in 0..30 {
                 let t = std::time::Instant::now();
-                n = store.search(&q, 50).unwrap().len();
+                n = store.search(&q, Scope::Live, 50).unwrap().len();
                 times.push(t.elapsed().as_secs_f64() * 1000.0);
             }
             times.sort_by(f64::total_cmp);

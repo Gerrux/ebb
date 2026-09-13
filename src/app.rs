@@ -24,6 +24,25 @@ const HEADER_H: f32 = 30.0;
 const FOOTER_H: f32 = 22.0;
 const REVEAL_FOR: Duration = Duration::from_secs(5);
 const HIGHLIGHT_FOR: Duration = Duration::from_millis(2500);
+const TOAST_FOR: Duration = Duration::from_secs(6);
+
+#[derive(Clone, Copy)]
+enum Undo {
+    Unarchive(i64),
+    Restore(i64),
+}
+
+struct Toast {
+    text: String,
+    undo: Option<Undo>,
+    at: Instant,
+}
+
+impl Toast {
+    fn new(text: impl Into<String>, undo: Option<Undo>) -> Self {
+        Self { text: text.into(), undo, at: Instant::now() }
+    }
+}
 
 #[derive(Default)]
 enum AutostartUi {
@@ -76,6 +95,7 @@ pub struct AmbientApp {
     revealed: Option<(i64, Instant)>,
     /// Card just opened from search: outlined for a moment.
     highlighted: Option<(i64, Instant)>,
+    toast: Option<Toast>,
 
     sticky: StickyImport,
 
@@ -129,6 +149,7 @@ impl AmbientApp {
             editing: None,
             revealed: None,
             highlighted: None,
+            toast: None,
             sticky: StickyImport::default(),
             show_debug: false,
             autostart: Arc::default(),
@@ -289,10 +310,13 @@ impl AmbientApp {
                 Action::Archive => {
                     self.cards[idx].archived = true;
                     self.save(idx);
+                    self.toast = Some(Toast::new("Карточка в архиве", Some(Undo::Unarchive(self.cards[idx].id))));
                     remove = Some(idx);
                 }
                 Action::Delete => {
                     let _ = self.store.delete(self.cards[idx].id);
+                    let text = format!("Карточка в корзине, {} дней можно вернуть", crate::store::TRASH_DAYS);
+                    self.toast = Some(Toast::new(text, Some(Undo::Restore(self.cards[idx].id))));
                     remove = Some(idx);
                 }
                 Action::StartEdit => {
@@ -313,6 +337,52 @@ impl AmbientApp {
                 let c = self.cards.remove(idx);
                 self.cards.push(c);
             }
+        }
+    }
+
+    /// Bottom-center notice with an optional undo, dismissed after TOAST_FOR.
+    fn toast_ui(&mut self, ui: &mut Ui) {
+        let Some(toast) = &self.toast else { return };
+        let left = TOAST_FOR.saturating_sub(toast.at.elapsed());
+        if left.is_zero() {
+            self.toast = None;
+            return;
+        }
+        ui.ctx().request_repaint_after(left);
+
+        let font = FontId::proportional(14.0);
+        let text = ui.painter().layout_no_wrap(toast.text.clone(), font, TEXT);
+        let undo_w = if toast.undo.is_some() { 96.0 } else { 0.0 };
+        let size = vec2(text.size().x + undo_w + 40.0, 44.0);
+        let full = ui.max_rect();
+        let rect = Rect::from_center_size(pos2(full.center().x, full.bottom() - 48.0 - size.y / 2.0), size);
+        glass_panel(ui, rect, false);
+        ui.painter().galley(pos2(rect.left() + 20.0, rect.center().y - text.size().y / 2.0), text, TEXT);
+
+        let mut undo = None;
+        if let Some(action) = toast.undo {
+            let button = Rect::from_min_size(pos2(rect.right() - undo_w - 8.0, rect.top() + 8.0), vec2(undo_w, 28.0));
+            let resp = ui.interact(button, Id::new("toast-undo"), Sense::click());
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Отменить"));
+            let fill = if resp.hovered() { Color32::from_rgba_unmultiplied(96, 165, 250, 90) } else { theme::chip_fill() };
+            ui.painter().rect_filled(button, CornerRadius::same(8), fill);
+            ui.painter().text(button.center(), Align2::CENTER_CENTER, "Отменить", FontId::proportional(13.5), TEXT);
+            if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                undo = Some(action);
+            }
+        }
+        if let Some(action) = undo {
+            match action {
+                Undo::Unarchive(id) => {
+                    let _ = self.store.set_archived(id, false);
+                }
+                Undo::Restore(id) => {
+                    let _ = self.store.restore(id);
+                }
+            }
+            self.toast = None;
+            self.reload_cards();
+            self.bar.lock().unwrap().invalidate();
         }
     }
 
@@ -619,6 +689,7 @@ impl eframe::App for AmbientApp {
         self.cards_ui(ui);
         let area = self.area(ui);
         self.sticky.ui(ui, &mut self.store, &mut self.cards, area);
+        self.toast_ui(ui);
         if self.show_debug {
             self.debug_ui(ui);
         }

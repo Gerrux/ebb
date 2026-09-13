@@ -76,7 +76,6 @@ pub struct BarState {
     first_row: usize,
     /// Index into the action strip when Tab moved focus there.
     action: Option<usize>,
-    confirm_delete: bool,
     search_ms: f64,
     notice: Option<(String, Instant)>,
     store: Option<Store>,
@@ -236,7 +235,7 @@ fn actions(hit: &Hit) -> [(ActionKind, &'static str); 5] {
         (ActionKind::Copy, "Копировать"),
         (ActionKind::Pin, if hit.pinned { "Открепить" } else { "Закрепить" }),
         (ActionKind::Archive, if hit.archived { "Вернуть на слой" } else { "В архив" }),
-        (ActionKind::Delete, "Удалить"),
+        (ActionKind::Delete, "В корзину"),
     ]
 }
 
@@ -251,7 +250,7 @@ fn run_search(st: &mut BarState) {
     st.parsed = search::parse(&st.query, now, st.utc_offset);
     let selected_id = st.hits.get(st.selected).map(|h| h.id);
     let started = Instant::now();
-    st.hits = st.store.as_ref().and_then(|s| s.search(&st.parsed, RESULTS).ok()).unwrap_or_default();
+    st.hits = st.store.as_ref().and_then(|s| s.search(&st.parsed, crate::store::Scope::Live, RESULTS).ok()).unwrap_or_default();
     st.search_ms = started.elapsed().as_secs_f64() * 1000.0;
     if st.last_query != st.query {
         // New text: start from the top.
@@ -265,7 +264,6 @@ fn run_search(st: &mut BarState) {
             .unwrap_or(st.selected.min(st.hits.len().saturating_sub(1)));
     }
     st.searched = Some(st.query.clone());
-    st.confirm_delete = false;
 }
 
 fn perform(ui: &Ui, st: &mut BarState, kind: ActionKind) -> bool {
@@ -304,13 +302,9 @@ fn perform(ui: &Ui, st: &mut BarState, kind: ActionKind) -> bool {
             st.searched = None;
         }
         ActionKind::Delete => {
-            if !st.confirm_delete {
-                st.confirm_delete = true;
-                return false;
-            }
             let _ = store.delete(hit.id);
             st.outbox.push(Outbox::Changed);
-            st.notice = Some(("Удалено".into(), Instant::now()));
+            st.notice = Some(("В корзине".into(), Instant::now()));
             st.action = None;
             st.searched = None;
         }
@@ -370,7 +364,6 @@ fn search_ui(ui: &mut Ui, st: &mut BarState) -> bool {
     if esc {
         if st.action.is_some() {
             st.action = None;
-            st.confirm_delete = false;
         } else {
             return true;
         }
@@ -386,7 +379,6 @@ fn search_ui(ui: &mut Ui, st: &mut BarState) -> bool {
         }
         if tab {
             st.action = if st.action.is_some() { None } else { Some(0) };
-            st.confirm_delete = false;
         }
         if let Some(a) = st.action.as_mut() {
             if left {
@@ -394,9 +386,6 @@ fn search_ui(ui: &mut Ui, st: &mut BarState) -> bool {
             }
             if right {
                 *a = (*a + 1) % 5;
-            }
-            if left || right {
-                st.confirm_delete = false;
             }
         }
         if copy && perform(ui, st, ActionKind::Copy) {
@@ -472,7 +461,7 @@ fn search_ui(ui: &mut Ui, st: &mut BarState) -> bool {
             double = Some(idx);
         }
         let selected = idx == st.selected;
-        hit_row(ui, r, &st.hits[idx], &st.parsed, selected, resp.hovered(), selected.then_some(st.action).flatten(), st.confirm_delete);
+        hit_row(ui, r, &st.hits[idx], &st.parsed, selected, resp.hovered(), selected.then_some(st.action).flatten());
     }
     if let Some(idx) = clicked {
         st.selected = idx;
@@ -526,7 +515,7 @@ fn highlighted(text: &str, size: f32, color: Color32, width: f32) -> LayoutJob {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn hit_row(ui: &Ui, r: Rect, hit: &Hit, q: &search::Query, selected: bool, hovered: bool, action: Option<usize>, confirm_delete: bool) {
+fn hit_row(ui: &Ui, r: Rect, hit: &Hit, q: &search::Query, selected: bool, hovered: bool, action: Option<usize>) {
     let painter = ui.painter();
     if selected || hovered {
         let fill = if selected { Color32::from_white_alpha(20) } else { Color32::from_white_alpha(9) };
@@ -565,8 +554,7 @@ fn hit_row(ui: &Ui, r: Rect, hit: &Hit, q: &search::Query, selected: bool, hover
     if action.is_some() {
         // Action strip replaces the second line.
         let mut x = text_left;
-        for (i, (kind, label)) in actions(hit).iter().enumerate() {
-            let label = if *kind == ActionKind::Delete && confirm_delete && action == Some(i) { "Точно удалить? Enter" } else { label };
+        for (i, (_, label)) in actions(hit).iter().enumerate() {
             let g = painter.layout_no_wrap(label.to_string(), FontId::proportional(12.0), TEXT);
             let chip = Rect::from_min_size(pos2(x, r.top() + 29.0), g.size() + vec2(14.0, 5.0));
             let on = action == Some(i);
