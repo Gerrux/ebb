@@ -25,6 +25,17 @@ const FOOTER_H: f32 = 22.0;
 const REVEAL_FOR: Duration = Duration::from_secs(5);
 const HIGHLIGHT_FOR: Duration = Duration::from_millis(2500);
 const TOAST_FOR: Duration = Duration::from_secs(6);
+const LAYER_FADE_IN: Duration = Duration::from_millis(220);
+const CARD_APPEAR: Duration = Duration::from_millis(220);
+const CARD_LEAVE: Duration = Duration::from_millis(160);
+pub(crate) const PANEL_APPEAR: Duration = Duration::from_millis(200);
+const PANEL_FADE_OUT: Duration = Duration::from_millis(250);
+
+/// Ease-out cubic on a 0..1 progress (clamped).
+pub(crate) fn panel_ease(t: f32) -> f32 {
+    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
+}
+const LAYER_FADE_OUT: Duration = Duration::from_millis(160);
 
 // Settings keys.
 const SET_MONITOR: &str = "layer.monitor";
@@ -66,6 +77,9 @@ pub struct AmbientApp {
     cards: Vec<Card>,
     bar: Arc<Mutex<BarState>>,
     shell: Arc<shell::Shared>,
+    /// Set by fade-out threads; logic() then hides the window through eframe.
+    bar_faded_out: Arc<std::sync::atomic::AtomicBool>,
+    layer_faded_out: Arc<std::sync::atomic::AtomicBool>,
 
     hwnd: Option<isize>,
     layer_visible: bool,
@@ -78,6 +92,9 @@ pub struct AmbientApp {
     /// Card just opened from search: outlined for a moment.
     highlighted: Option<(i64, Instant)>,
     toast: Option<Toast>,
+    /// Cards that just arrived on the layer / just left it, for their animations.
+    appearing: Vec<(i64, Instant)>,
+    leaving: Vec<(Card, Instant)>,
 
     sticky: StickyImport,
 
@@ -115,8 +132,10 @@ impl AmbientApp {
             }
             win::apply_backdrop(h, backdrop, false);
             // Still hidden here (eframe shows it after the first frame), so the
-            // taskbar never sees a button.
-            win::install_window_rules(h, win::LAYER);
+            // taskbar never sees a button. Starts transparent; fades in after the
+            // first frame.
+            win::install_window_rules(h, win::LAYER | win::FADE);
+            win::set_window_alpha(h, 0);
         }
 
         let shell = Arc::new(shell::Shared::default());
@@ -129,6 +148,8 @@ impl AmbientApp {
             cards,
             bar: Arc::default(),
             shell,
+            bar_faded_out: Arc::default(),
+            layer_faded_out: Arc::default(),
             hwnd,
             layer_visible: true,
             backdrop,
@@ -138,6 +159,8 @@ impl AmbientApp {
             revealed: None,
             highlighted: None,
             toast: None,
+            appearing: Vec::new(),
+            leaving: Vec::new(),
             sticky: StickyImport::default(),
             show_debug: false,
             autostarted,
@@ -158,7 +181,10 @@ impl AmbientApp {
         }
         let pos = card::free_slot(&self.cards, area);
         match self.store.insert(&parsed, pos) {
-            Ok(c) => self.cards.push(c),
+            Ok(c) => {
+                self.appearing.push((c.id, Instant::now()));
+                self.cards.push(c);
+            }
             Err(e) => eprintln!("insert failed: {e}"),
         }
     }
@@ -242,14 +268,43 @@ impl AmbientApp {
             }
         }
 
+        // Appear: fade in while rising a few points. Leave: fade out, not interactive.
+        let ease = |t: f32| 1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3);
+        self.appearing.retain(|(_, at)| at.elapsed() < CARD_APPEAR);
+        self.leaving.retain(|(_, at)| at.elapsed() < CARD_LEAVE);
+        if !self.appearing.is_empty() || !self.leaving.is_empty() {
+            ui.ctx().request_repaint();
+        }
+
         let mut actions: Vec<(usize, Action)> = Vec::new();
         for idx in 0..self.cards.len() {
             let id = self.cards[idx].id;
             let editing = self.editing.as_mut().filter(|(eid, _)| *eid == id).map(|(_, b)| b);
             let revealed = self.revealed.is_some_and(|(rid, _)| rid == id);
-            for a in card_ui(ui, origin, area, &mut self.cards[idx], hovered_id == Some(id), editing, revealed) {
+            let appear = self
+                .appearing
+                .iter()
+                .find(|(aid, _)| *aid == id)
+                .map_or(1.0, |(_, at)| ease(at.elapsed().as_secs_f32() / CARD_APPEAR.as_secs_f32()));
+            let card = &mut self.cards[idx];
+            let hovered = hovered_id == Some(id);
+            let produced = ui
+                .scope(|ui| {
+                    ui.multiply_opacity(appear);
+                    card_ui(ui, origin + vec2(0.0, (1.0 - appear) * 10.0), area, card, hovered, editing, revealed)
+                })
+                .inner;
+            for a in produced {
                 actions.push((idx, a));
             }
+        }
+        for (card, at) in &mut self.leaving {
+            let t = ease(at.elapsed().as_secs_f32() / CARD_LEAVE.as_secs_f32());
+            ui.scope(|ui| {
+                ui.disable();
+                ui.multiply_opacity(1.0 - t);
+                let _ = card_ui(ui, origin + vec2(0.0, t * 6.0), area, card, false, None, false);
+            });
         }
 
         if let Some((hid, t)) = self.highlighted {
@@ -309,7 +364,8 @@ impl AmbientApp {
             }
         }
         if let Some(idx) = remove {
-            self.cards.remove(idx);
+            let card = self.cards.remove(idx);
+            self.leaving.push((card, Instant::now()));
             self.library.lock().unwrap().invalidate();
             self.bar.lock().unwrap().invalidate();
         } else if let Some(idx) = to_front {
@@ -328,29 +384,40 @@ impl AmbientApp {
             self.toast = None;
             return;
         }
-        ui.ctx().request_repaint_after(left);
-
-        let font = FontId::proportional(14.0);
-        let text = ui.painter().layout_no_wrap(toast.text.clone(), font, TEXT);
-        let undo_w = if toast.undo.is_some() { 96.0 } else { 0.0 };
-        let size = vec2(text.size().x + undo_w + 40.0, 44.0);
-        let full = ui.max_rect();
-        let rect = Rect::from_center_size(pos2(full.center().x, full.bottom() - 48.0 - size.y / 2.0), size);
-        glass_panel(ui, rect, false);
-        ui.painter().galley(pos2(rect.left() + 20.0, rect.center().y - text.size().y / 2.0), text, TEXT);
+        // Rises in over PANEL_APPEAR, fades out over its last PANEL_FADE_OUT.
+        let appear = panel_ease(toast.at.elapsed().as_secs_f32() / PANEL_APPEAR.as_secs_f32());
+        let fade_out = (left.as_secs_f32() / PANEL_FADE_OUT.as_secs_f32()).min(1.0);
+        if appear < 1.0 || fade_out < 1.0 {
+            ui.ctx().request_repaint();
+        } else {
+            ui.ctx().request_repaint_after(left.saturating_sub(PANEL_FADE_OUT));
+        }
 
         let mut undo = None;
-        if let Some(action) = toast.undo {
-            let button = Rect::from_min_size(pos2(rect.right() - undo_w - 8.0, rect.top() + 8.0), vec2(undo_w, 28.0));
-            let resp = ui.interact(button, Id::new("toast-undo"), Sense::click());
-            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Отменить"));
-            let fill = if resp.hovered() { Color32::from_rgba_unmultiplied(96, 165, 250, 90) } else { theme::chip_fill() };
-            ui.painter().rect_filled(button, CornerRadius::same(8), fill);
-            ui.painter().text(button.center(), Align2::CENTER_CENTER, "Отменить", FontId::proportional(13.5), TEXT);
-            if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
-                undo = Some(action);
+        ui.scope(|ui| {
+            ui.multiply_opacity(appear * fade_out);
+            let font = FontId::proportional(14.0);
+            let text = ui.painter().layout_no_wrap(toast.text.clone(), font, TEXT);
+            let undo_w = if toast.undo.is_some() { 96.0 } else { 0.0 };
+            let size = vec2(text.size().x + undo_w + 40.0, 44.0);
+            let full = ui.max_rect();
+            let center = pos2(full.center().x, full.bottom() - 48.0 - size.y / 2.0 + (1.0 - appear) * 12.0);
+            let rect = Rect::from_center_size(center, size);
+            glass_panel(ui, rect, false);
+            ui.painter().galley(pos2(rect.left() + 20.0, rect.center().y - text.size().y / 2.0), text, TEXT);
+
+            if let Some(action) = toast.undo {
+                let button = Rect::from_min_size(pos2(rect.right() - undo_w - 8.0, rect.top() + 8.0), vec2(undo_w, 28.0));
+                let resp = ui.interact(button, Id::new("toast-undo"), Sense::click());
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Отменить"));
+                let fill = if resp.hovered() { Color32::from_rgba_unmultiplied(96, 165, 250, 90) } else { theme::chip_fill() };
+                ui.painter().rect_filled(button, CornerRadius::same(8), fill);
+                ui.painter().text(button.center(), Align2::CENTER_CENTER, "Отменить", FontId::proportional(13.5), TEXT);
+                if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                    undo = Some(action);
+                }
             }
-        }
+        });
         if let Some(action) = undo {
             match action {
                 Undo::Unarchive(id) => {
@@ -499,15 +566,27 @@ impl AmbientApp {
         }
         self.layer_visible = visible;
         self.shell.layer_visible.store(visible, Ordering::Relaxed);
-        ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(visible));
-        if !visible {
-            self.commit_edit();
-            // Nothing is drawn while hidden; give the pages back until it's shown again.
-            std::thread::spawn(|| {
-                std::thread::sleep(Duration::from_millis(500));
-                win::trim_working_set();
-            });
+        if visible {
+            if let Some(h) = self.hwnd {
+                win::fade(h, 0, 255, LAYER_FADE_IN, || {});
+            }
+            ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(true));
+            return;
         }
+        self.commit_edit();
+        let Some(h) = self.hwnd else {
+            ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(false));
+            return;
+        };
+        // Fade out, then hide through eframe (logic() picks up the flag).
+        let (done, ctx) = (self.layer_faded_out.clone(), ctx.clone());
+        win::fade(h, 255, 0, LAYER_FADE_OUT, move || {
+            done.store(true, Ordering::Relaxed);
+            ctx.request_repaint();
+            // Nothing is drawn while hidden; give the pages back until it's shown again.
+            std::thread::sleep(Duration::from_millis(400));
+            win::trim_working_set();
+        });
     }
 
     fn cycle_backdrop(&mut self) {
@@ -517,7 +596,8 @@ impl AmbientApp {
     fn bar_viewport(&self, ui: &Ui) {
         let (visible, size) = {
             let bar = self.bar.lock().unwrap();
-            (bar.visible, bar.size())
+            // `shown`, not `visible`: the window stays up while it fades out.
+            (bar.shown, bar.size())
         };
         let state = self.bar.clone();
         ui.ctx().show_viewport_deferred(
@@ -549,6 +629,7 @@ impl AmbientApp {
                 card.archived = false;
                 card.pos = card::free_slot(&self.cards, ctx.content_rect().size());
                 card.size = card.size.max(MIN_SIZE);
+                self.appearing.push((card.id, Instant::now()));
                 self.cards.push(card);
                 let idx = self.cards.len() - 1;
                 self.save(idx);
@@ -565,6 +646,13 @@ impl AmbientApp {
     fn reload_cards(&mut self) {
         self.commit_edit();
         if let Ok(cards) = self.store.load() {
+            let now = Instant::now();
+            // Cards that weren't on the layer before appear; ones that left fade out.
+            for c in cards.iter().filter(|c| !self.cards.iter().any(|old| old.id == c.id)) {
+                self.appearing.push((c.id, now));
+            }
+            let gone = self.cards.drain(..).filter(|old| !cards.iter().any(|c| c.id == old.id));
+            self.leaving.extend(gone.map(|c| (c, now)));
             self.cards = cards;
         }
     }
@@ -590,6 +678,10 @@ impl eframe::App for AmbientApp {
                     ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::Focus);
                 }
             }
+        }
+
+        if self.layer_faded_out.swap(false, Ordering::Relaxed) && !self.layer_visible {
+            ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(false));
         }
 
         // Library window: place it once created, apply its requests.
@@ -624,17 +716,20 @@ impl eframe::App for AmbientApp {
             bar.hwnd = win::find_capture_window();
             if let Some(h) = bar.hwnd {
                 win::apply_backdrop(h, Backdrop::AccentAcrylic, true);
-                win::install_window_rules(h, 0);
+                win::install_window_rules(h, win::FADE);
             }
         }
+        let id = bar::viewport_id();
+        let mut hide = std::mem::take(&mut bar.hide_requested);
         if let Some((mode, t)) = pressed {
-            let id = bar::viewport_id();
             match bar.press(mode, t) {
-                Press::Hide => ctx.send_viewport_cmd_to(id, ViewportCommand::Visible(false)),
+                Press::Hide => hide = true,
                 press => {
                     let size = bar.size();
                     if let (Press::Show, Some(h)) = (&press, bar.hwnd) {
                         win::move_near_cursor(h, (size.x * win::dpi_scale(h)) as i32);
+                        // Transparent until the bar's first frame starts the fade-in.
+                        win::set_alpha_now(h, 0);
                     }
                     // Explicit commands: with the layer hidden the root ui (which carries
                     // the viewport builder) doesn't run until something is visible.
@@ -643,6 +738,26 @@ impl eframe::App for AmbientApp {
                     ctx.send_viewport_cmd_to(id, ViewportCommand::Focus);
                 }
             }
+        }
+        if hide {
+            // Fade out, then hide through eframe so winit's visibility stays in sync.
+            match bar.hwnd {
+                Some(h) => {
+                    let (done, ctx) = (self.bar_faded_out.clone(), ctx.clone());
+                    win::fade(h, 255, 0, Duration::from_secs_f32(bar::DISAPPEAR_SECS), move || {
+                        done.store(true, Ordering::Relaxed);
+                        ctx.request_repaint();
+                    });
+                }
+                None => {
+                    bar.shown = false;
+                    ctx.send_viewport_cmd_to(id, ViewportCommand::Visible(false));
+                }
+            }
+        }
+        if self.bar_faded_out.swap(false, Ordering::Relaxed) && !bar.visible {
+            bar.shown = false;
+            ctx.send_viewport_cmd_to(id, ViewportCommand::Visible(false));
         }
         let outbox = std::mem::take(&mut bar.outbox);
         drop(bar);
@@ -677,6 +792,10 @@ impl eframe::App for AmbientApp {
             let proc_ms = win::ms_since_process_start();
             let main_ms = self.main_started.elapsed().as_secs_f64() * 1000.0;
             self.first_frame = Some((proc_ms, main_ms));
+            if let Some(h) = self.hwnd {
+                // eframe shows the window right after this frame; it's still at alpha 0.
+                win::fade(h, 0, 255, LAYER_FADE_IN, || {});
+            }
             let autostarted = self.autostarted;
             std::thread::spawn(move || {
                 log_first_frame(frame_at, proc_ms, main_ms, autostarted);

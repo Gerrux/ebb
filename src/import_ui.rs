@@ -38,11 +38,13 @@ struct Offer {
 
 pub struct StickyImport {
     state: Arc<Mutex<State>>,
+    /// Which panel was drawn last and when it first appeared, for the slide-in.
+    shown: Mutex<Option<(std::mem::Discriminant<State>, std::time::Instant)>>,
 }
 
 impl Default for StickyImport {
     fn default() -> Self {
-        Self { state: Arc::new(Mutex::new(State::Idle)) }
+        Self { state: Arc::new(Mutex::new(State::Idle)), shown: Mutex::new(None) }
     }
 }
 
@@ -169,8 +171,27 @@ impl StickyImport {
     pub fn ui(&self, ui: &mut Ui, store: &mut Store, cards: &mut Vec<Card>, layer: Option<isize>) {
         let mut state = self.state.lock().unwrap();
         if matches!(*state, State::Idle | State::Scanning) {
+            *self.shown.lock().unwrap() = None;
             return;
         }
+        // Slide in from the right while fading in, each time a new panel shows up.
+        let since = {
+            let mut shown = self.shown.lock().unwrap();
+            let kind = std::mem::discriminant(&*state);
+            match *shown {
+                Some((k, at)) if k == kind => at,
+                _ => {
+                    let now = std::time::Instant::now();
+                    *shown = Some((kind, now));
+                    now
+                }
+            }
+        };
+        let appear = crate::app::panel_ease(since.elapsed().as_secs_f32() / crate::app::PANEL_APPEAR.as_secs_f32());
+        if appear < 1.0 {
+            ui.ctx().request_repaint();
+        }
+        ui.multiply_opacity(appear);
         let height = match &*state {
             State::Offer(o) if !o.replace.is_empty() || o.kept > 0 => 258.0,
             State::Offer(_) => 236.0,
@@ -180,7 +201,7 @@ impl StickyImport {
         };
         let area = ui.max_rect().size();
         let pixels_per_point = ui.ctx().pixels_per_point();
-        let rect = Rect::from_min_size(ui.max_rect().right_top() + vec2(-452.0, 64.0), vec2(420.0, height));
+        let rect = Rect::from_min_size(ui.max_rect().right_top() + vec2(-452.0 + (1.0 - appear) * 24.0, 64.0), vec2(420.0, height));
         crate::app::glass_panel(ui, rect, false);
 
         let mut next = None;

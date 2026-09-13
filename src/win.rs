@@ -20,10 +20,10 @@ use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindowLongPtrW, HWND_BOTTOM, MONITORINFOF_PRIMARY,
+    GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindowLongPtrW, HWND_BOTTOM, MONITORINFOF_PRIMARY,
     SET_WINDOW_POS_FLAGS, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
     SetWindowLongPtrW, SetWindowPos, WINDOWPOS, WM_STYLECHANGING, WM_WINDOWPOSCHANGING, WS_EX_APPWINDOW,
-    WS_EX_TOOLWINDOW, WS_SYSMENU,
+    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_SYSMENU,
 };
 use windows::core::{BOOL, PCWSTR, w};
 
@@ -34,17 +34,31 @@ pub fn hwnd_of(handle: &impl HasWindowHandle) -> Option<isize> {
     }
 }
 
-pub fn find_window(title: PCWSTR) -> Option<isize> {
-    let hwnd = unsafe { FindWindowW(PCWSTR::null(), title) }.ok()?;
-    (!hwnd.is_invalid()).then_some(hwnd.0 as isize)
+/// A top-level window of this process with the given title. Titles aren't unique
+/// across processes (a second instance, AMBIENT_INSTANCE), so FindWindow alone
+/// could return another process's window.
+pub fn find_own_window(title: PCWSTR) -> Option<isize> {
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, GetWindowThreadProcessId};
+    let me = unsafe { GetCurrentProcessId() };
+    let mut after = None;
+    loop {
+        let hwnd = unsafe { FindWindowExW(None, after, PCWSTR::null(), title) }.ok()?;
+        let mut pid = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        if pid == me {
+            return Some(hwnd.0 as isize);
+        }
+        after = Some(hwnd);
+    }
 }
 
 pub fn find_capture_window() -> Option<isize> {
-    find_window(w!("Ambient Capture"))
+    find_own_window(w!("Ambient Capture"))
 }
 
 pub fn find_library_window() -> Option<isize> {
-    find_window(w!("Ambient Library"))
+    find_own_window(w!("Ambient Library"))
 }
 
 fn hwnd(raw: isize) -> HWND {
@@ -335,6 +349,95 @@ pub static PIN_BOTTOM: AtomicBool = AtomicBool::new(true);
 
 /// Subclass flags (`dwRefData`).
 pub const LAYER: usize = 1;
+/// Keeps WS_EX_LAYERED so the whole window (backdrop included) can fade; see [`fade`].
+pub const FADE: usize = 2;
+
+/// Whole-window opacity through the layered-window alpha, which DWM applies to the
+/// composed window including its acrylic backdrop (egui can only fade its own
+/// drawing). Needs the FADE window rule.
+pub fn set_window_alpha(raw: isize, alpha: u8) {
+    use windows::Win32::Foundation::COLORREF;
+    use windows::Win32::UI::WindowsAndMessaging::{LWA_ALPHA, SetLayeredWindowAttributes};
+    unsafe {
+        let _ = SetLayeredWindowAttributes(hwnd(raw), COLORREF(0), alpha, LWA_ALPHA);
+    }
+}
+
+/// Latest fade per window; an older fade thread stops when it sees a newer one.
+static FADES: std::sync::Mutex<Vec<(isize, u64)>> = std::sync::Mutex::new(Vec::new());
+static FADE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn current_fade(raw: isize) -> Option<u64> {
+    FADES.lock().unwrap().iter().find(|(h, _)| *h == raw).map(|(_, g)| *g)
+}
+
+/// Stops any fade on the window and sets its alpha right away (no thread).
+pub fn set_alpha_now(raw: isize, alpha: u8) {
+    FADES.lock().unwrap().retain(|(h, _)| *h != raw);
+    set_window_alpha(raw, alpha);
+}
+
+/// Animates the window alpha from `from` to `to` over `duration` (ease-out) on a
+/// short-lived thread, stepping every ~8 ms; a newer fade on the same window
+/// cancels this one. `done` runs at the end unless cancelled.
+///
+/// Steps use a high-resolution waitable timer, not DwmFlush: DwmFlush blocks
+/// until the next present, and running it while a window presents its first
+/// frame delayed that window's appearance by ~170 ms.
+pub fn fade(raw: isize, from: u8, to: u8, duration: std::time::Duration, done: impl FnOnce() + Send + 'static) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, INFINITE, SetWaitableTimer, TIMER_ALL_ACCESS,
+        WaitForSingleObject,
+    };
+    let generation = FADE_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
+    {
+        let mut fades = FADES.lock().unwrap();
+        fades.retain(|(h, _)| *h != raw);
+        fades.push((raw, generation));
+    }
+    set_window_alpha(raw, from);
+    std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        let timer = unsafe {
+            CreateWaitableTimerExW(None, PCWSTR::null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0)
+        }
+        .ok();
+        let step = || match timer {
+            Some(t) => unsafe {
+                // Relative due time in 100 ns units: 8 ms.
+                let due = -80_000i64;
+                if SetWaitableTimer(t, &due, 0, None, None, false).is_ok() {
+                    WaitForSingleObject(t, INFINITE);
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(8));
+                }
+            },
+            None => std::thread::sleep(std::time::Duration::from_millis(8)),
+        };
+        let completed = loop {
+            step();
+            if current_fade(raw) != Some(generation) {
+                break false;
+            }
+            let t = (start.elapsed().as_secs_f32() / duration.as_secs_f32()).min(1.0);
+            let eased = 1.0 - (1.0 - t).powi(3);
+            let alpha = from as f32 + (to as f32 - from as f32) * eased;
+            set_window_alpha(raw, alpha.round() as u8);
+            if t >= 1.0 {
+                break true;
+            }
+        };
+        if let Some(t) = timer {
+            unsafe {
+                let _ = CloseHandle(t);
+            }
+        }
+        if completed {
+            done();
+        }
+    });
+}
 
 /// winit rewrites GWL_STYLE/GWL_EXSTYLE from its own flags whenever any of them
 /// change (e.g. on show/hide), which would undo style tweaks made once. Enforcing
@@ -357,8 +460,13 @@ unsafe extern "system" fn subclass_proc(
                 let s = &mut *(lparam.0 as *mut STYLESTRUCT);
                 if wparam.0 as i32 == GWL_STYLE.0 {
                     s.styleNew &= !WS_SYSMENU.0;
-                } else if wparam.0 as i32 == GWL_EXSTYLE.0 && flags & LAYER != 0 {
-                    s.styleNew = (s.styleNew | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0;
+                } else if wparam.0 as i32 == GWL_EXSTYLE.0 {
+                    if flags & LAYER != 0 {
+                        s.styleNew = (s.styleNew | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0;
+                    }
+                    if flags & FADE != 0 {
+                        s.styleNew |= WS_EX_LAYERED.0;
+                    }
                 }
             }
             WM_WINDOWPOSCHANGING if flags & LAYER != 0 && PIN_BOTTOM.load(Ordering::Relaxed) => {

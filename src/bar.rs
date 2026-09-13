@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{
     Align, Align2, Color32, CornerRadius, FontId, Key, Layout, Modifiers, Rect, RichText, Sense, Stroke,
-    StrokeKind, Ui, UiBuilder, Vec2, ViewportCommand, ViewportId, pos2, vec2,
+    StrokeKind, Ui, UiBuilder, Vec2, ViewportId, pos2, vec2,
 };
 
 use crate::card::{Kind, parse_capture};
@@ -23,6 +23,9 @@ use crate::theme::{self, TEXT, TEXT_DIM, TEXT_MUTED};
 pub const CAPTURE_SIZE: Vec2 = vec2(640.0, 132.0);
 pub const SEARCH_SIZE: Vec2 = vec2(680.0, 476.0);
 const ROW_H: f32 = 54.0;
+/// Appear animation: window fade (see app.rs) and content rise.
+pub const APPEAR_SECS: f32 = 0.16;
+pub const DISAPPEAR_SECS: f32 = 0.11;
 const RESULTS: usize = 40;
 
 pub fn viewport_id() -> ViewportId {
@@ -53,7 +56,16 @@ pub enum Press {
 
 #[derive(Default)]
 pub struct BarState {
+    /// Logically open (accepts input).
     pub visible: bool,
+    /// The window is on screen: true from show until its fade-out finished.
+    pub shown: bool,
+    /// The fade-in for the current showing has been started (from the bar's own
+    /// first frame, so it isn't spent while eframe hasn't shown the window yet).
+    fading_in: bool,
+    /// Closed from inside the bar (Enter, Esc, focus lost): the root fades the
+    /// window out and then hides it.
+    pub hide_requested: bool,
     pub mode: Mode,
     /// When the hotkey was pressed for the current showing.
     pub pressed_at: Option<Instant>,
@@ -98,6 +110,7 @@ impl BarState {
         }
         let was_visible = self.visible;
         self.visible = true;
+        self.shown = true;
         self.mode = mode;
         self.request_focus = true;
         if mode == Mode::Search {
@@ -111,6 +124,7 @@ impl BarState {
         } else {
             self.pressed_at = Some(t);
             self.latency_ms = None;
+            self.fading_in = false;
             Press::Show
         }
     }
@@ -123,8 +137,18 @@ impl BarState {
 
 pub fn ui(ui: &mut Ui, state: &Mutex<BarState>) {
     let mut st = state.lock().unwrap();
-    if !st.visible {
+    if !st.shown {
         return;
+    }
+    // Fading out: keep drawing, but no input.
+    if !st.visible {
+        ui.disable();
+    }
+    if st.visible && !st.fading_in {
+        st.fading_in = true;
+        if let Some(h) = st.hwnd {
+            crate::win::fade(h, 0, 255, Duration::from_secs_f32(APPEAR_SECS), || {});
+        }
     }
     if st.latency_ms.is_none() {
         if let Some(t) = st.pressed_at {
@@ -143,15 +167,26 @@ pub fn ui(ui: &mut Ui, state: &Mutex<BarState>) {
         StrokeKind::Inside,
     );
 
-    let close = match st.mode {
-        Mode::Capture => capture_ui(ui, &mut st),
-        Mode::Search => search_ui(ui, &mut st),
-    };
-    if close || lost_focus {
-        st.visible = false;
-        ui.ctx().send_viewport_cmd(ViewportCommand::Visible(false));
+    // The window itself fades in (root, win::fade); the content rises a few
+    // points while it does.
+    let t = st.pressed_at.map_or(1.0, |p| (p.elapsed().as_secs_f32() / APPEAR_SECS).min(1.0));
+    if t < 1.0 {
+        ui.ctx().request_repaint();
     }
-    if !st.outbox.is_empty() || close || lost_focus {
+    let rise = (1.0 - t).powi(3) * 8.0;
+    let content = rect.translate(vec2(0.0, rise));
+    let close = ui
+        .scope_builder(UiBuilder::new().max_rect(content), |ui| match st.mode {
+            Mode::Capture => capture_ui(ui, &mut st),
+            Mode::Search => search_ui(ui, &mut st),
+        })
+        .inner;
+    let close = st.visible && (close || lost_focus);
+    if close {
+        st.visible = false;
+        st.hide_requested = true;
+    }
+    if !st.outbox.is_empty() || close {
         ui.ctx().request_repaint_of(ViewportId::ROOT);
     }
 }
@@ -161,8 +196,12 @@ pub fn ui(ui: &mut Ui, state: &Mutex<BarState>) {
 // ---------------------------------------------------------------------------
 
 fn capture_ui(ui: &mut Ui, st: &mut BarState) -> bool {
+    let enabled = ui.is_enabled();
     let (submit, cancel) = ui.input_mut(|i| {
-        (i.consume_key(Modifiers::NONE, Key::Enter), i.consume_key(Modifiers::NONE, Key::Escape))
+        (
+            enabled && i.consume_key(Modifiers::NONE, Key::Enter),
+            enabled && i.consume_key(Modifiers::NONE, Key::Escape),
+        )
     });
 
     let parsed = parse_capture(&st.text);
@@ -314,7 +353,12 @@ fn perform(ui: &Ui, st: &mut BarState, kind: ActionKind) -> bool {
 
 fn search_ui(ui: &mut Ui, st: &mut BarState) -> bool {
     let in_actions = st.action.is_some();
+    // Disabled while fading out: draw as before, react to nothing.
+    let enabled = ui.is_enabled();
     let (esc, enter, up, down, left, right, tab, copy) = ui.input_mut(|i| {
+        if !enabled {
+            return Default::default();
+        }
         let copy = i.events.iter().any(|e| matches!(e, egui::Event::Copy));
         i.events.retain(|e| !matches!(e, egui::Event::Copy));
         (
@@ -349,7 +393,7 @@ fn search_ui(ui: &mut Ui, st: &mut BarState) -> bool {
             ),
         );
     });
-    if let Some(edit) = &edit {
+    if let Some(edit) = edit.as_ref().filter(|_| enabled) {
         if std::mem::take(&mut st.request_focus) || !edit.has_focus() {
             edit.request_focus();
         }
