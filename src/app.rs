@@ -187,16 +187,9 @@ impl AmbientApp {
         let Some(idx) = self.cards.iter().position(|c| c.id == id) else { return };
         let buf = buf.trim();
         let c = &mut self.cards[idx];
-        match buf.split_once('\n') {
-            Some((t, b)) => {
-                c.title = t.trim().to_owned();
-                c.body = b.trim().to_owned();
-            }
-            None => {
-                c.title.clear();
-                c.body = buf.to_owned();
-            }
-        }
+        // Saved as written; an old separate title becomes the first line of the text.
+        c.title.clear();
+        c.body = buf.to_owned();
         c.tags = buf
             .split_whitespace()
             .filter_map(|w| w.strip_prefix('#'))
@@ -916,20 +909,20 @@ fn card_ui(
                 }
                 return;
             }
-            if !card.title.is_empty() {
+            let hidden = card.kind == Kind::Private && !revealed;
+            // A hidden Private card still says what it is (see card::private_label).
+            let heading = if hidden { card::private_label(&card.title, &card.body) } else { None };
+            let heading = heading.as_deref().or((!card.title.is_empty()).then_some(card.title.as_str()));
+            if let Some(heading) = heading {
                 ui.add(
-                    egui::Label::new(RichText::new(&card.title).font(theme::semibold(15.0)).color(TEXT))
+                    egui::Label::new(RichText::new(heading).font(theme::semibold(15.0)).color(TEXT))
                         .wrap()
                         .selectable(false),
                 );
             }
-            let text = if card.kind == Kind::Private && !revealed {
-                "••••••••••".to_owned()
-            } else {
-                without_tags(&card.body)
-            };
-            let color = if card.title.is_empty() { TEXT } else { TEXT_DIM };
-            let size = if card.title.is_empty() { 14.5 } else { 13.5 };
+            let text = if hidden { "••••••••••".to_owned() } else { without_tags(&card.body) };
+            let color = if heading.is_none() { TEXT } else { TEXT_DIM };
+            let size = if heading.is_none() { 14.5 } else { 13.5 };
             ui.add(egui::Label::new(RichText::new(text).size(size).color(color)).wrap().selectable(false));
         },
     );

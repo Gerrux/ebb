@@ -183,10 +183,15 @@ impl Store {
         let row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Hit> {
             let kind = Kind::parse(&r.get::<_, String>(1)?);
             let body: String = r.get(7)?;
+            let title: String = r.get(2)?;
             Ok(Hit {
                 id: r.get(0)?,
                 kind,
-                title: r.get(2)?,
+                title: if kind == Kind::Private {
+                    crate::card::private_label(&title, &body).unwrap_or_default()
+                } else {
+                    title
+                },
                 deleted_at: r.get(3)?,
                 archived: r.get(4)?,
                 pinned: r.get(5)?,

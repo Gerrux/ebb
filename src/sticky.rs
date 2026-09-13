@@ -211,15 +211,6 @@ fn classify(plain: &str) -> Kind {
     }
 }
 
-fn split_title(plain: &str) -> (String, String) {
-    match plain.split_once('\n') {
-        Some((first, rest)) if first.chars().count() <= 80 && !rest.trim().is_empty() => {
-            (first.trim().to_owned(), rest.trim().to_owned())
-        }
-        _ => (String::new(), plain.to_owned()),
-    }
-}
-
 fn tags(plain: &str) -> Vec<String> {
     let mut tags: Vec<String> = plain
         .split_whitespace()
@@ -295,13 +286,13 @@ pub fn plan(notes: &[SourceNote], already: &std::collections::HashSet<String>, l
             continue;
         }
         let kind = classify(&plain);
-        let (title, body) = split_title(&plain);
         let old = now - note.updated_at > OLD_AFTER_DAYS * 86_400;
         planned.push(Planned {
             source_id: note.id.clone(),
             kind,
-            title,
-            body,
+            // Text as written, no title split (see card::parse_capture).
+            title: String::new(),
+            body: plain.clone(),
             tags: tags(&plain),
             created_at: note.created_at,
             updated_at: note.updated_at,

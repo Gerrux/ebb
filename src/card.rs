@@ -98,6 +98,19 @@ pub struct Card {
     pub created_at: i64,
 }
 
+/// What a hidden Private card may show: its title, or else the first line when
+/// more lines follow ("Wi-Fi офис" above the password). Single-line notes show
+/// nothing, since that line may be the secret itself.
+pub fn private_label(title: &str, body: &str) -> Option<String> {
+    if !title.is_empty() {
+        return Some(title.to_owned());
+    }
+    let mut lines = body.lines().map(str::trim).filter(|l| !l.is_empty());
+    let first = lines.next()?;
+    lines.next()?;
+    Some(first.chars().take(60).collect())
+}
+
 pub const MIN_SIZE: Vec2 = vec2(200.0, 96.0);
 pub const DEFAULT_SIZE: Vec2 = vec2(280.0, 150.0);
 
@@ -164,15 +177,12 @@ pub fn parse_capture(input: &str) -> Parsed {
         .map(|t| t.trim_end_matches([',', '.', ';']).to_lowercase())
         .collect();
 
-    let (title, body) = match rest.split_once('\n') {
-        Some((first, others)) => (first.trim().to_owned(), others.trim().to_owned()),
-        None => (String::new(), rest.to_owned()),
-    };
-
+    // No automatic title: the first line is often not one, and splitting it off
+    // changes how the note reads. The text is kept as written.
     Parsed {
         kind,
-        title,
-        body,
+        title: String::new(),
+        body: rest.to_owned(),
         tags,
     }
 }
@@ -229,10 +239,17 @@ mod tests {
     }
 
     #[test]
-    fn extracts_tags_and_title() {
+    fn private_label_never_shows_a_lone_line() {
+        assert_eq!(private_label("", "Wi-Fi офис\nguest / pass").as_deref(), Some("Wi-Fi офис"));
+        assert_eq!(private_label("", "hunter2"), None);
+        assert_eq!(private_label("Title", "x").as_deref(), Some("Title"));
+    }
+
+    #[test]
+    fn extracts_tags_and_keeps_text_as_written() {
         let p = parse_capture("Pricing\nпопробовать annual plan #product #pricing.");
-        assert_eq!(p.title, "Pricing");
-        assert_eq!(p.body, "попробовать annual plan #product #pricing.");
+        assert_eq!(p.title, "");
+        assert_eq!(p.body, "Pricing\nпопробовать annual plan #product #pricing.");
         assert_eq!(p.tags, vec!["product", "pricing"]);
     }
 }
