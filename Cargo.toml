@@ -1,0 +1,25 @@
+[package]
+name = "ambient"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = { version = "0.36", default-features = false, features = ["glow", "inspection"] }
+egui = "0.36"
+raw-window-handle = "0.6"
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_UI_HiDpi", "Win32_System_SystemInformation"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

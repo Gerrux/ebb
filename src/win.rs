@@ -1,0 +1,329 @@
+//! Thin Win32 layer: backdrop effects, monitor placement, hotkeys, metrics.
+
+use std::ffi::c_void;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use windows::Win32::Foundation::{FILETIME, HWND, LPARAM, POINT, RECT};
+use windows::Win32::Graphics::Dwm::{
+    DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+};
+use windows::Win32::Graphics::Gdi::{
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromPoint,
+};
+use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
+use windows::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
+use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+use windows::Win32::UI::Controls::MARGINS;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_WIN, RegisterHotKey, VK_SPACE,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    FindWindowW, GWL_STYLE, GetCursorPos, GetMessageW, GetWindowLongPtrW, MONITORINFOF_PRIMARY,
+    MSG, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW,
+    SetWindowPos, WM_HOTKEY, WS_SYSMENU,
+};
+use windows::core::{BOOL, PCWSTR, w};
+
+pub fn hwnd_of(handle: &impl HasWindowHandle) -> Option<isize> {
+    match handle.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+        _ => None,
+    }
+}
+
+pub fn find_window(title: PCWSTR) -> Option<isize> {
+    let hwnd = unsafe { FindWindowW(PCWSTR::null(), title) }.ok()?;
+    (!hwnd.is_invalid()).then_some(hwnd.0 as isize)
+}
+
+pub fn find_capture_window() -> Option<isize> {
+    find_window(w!("Ambient Capture"))
+}
+
+fn hwnd(raw: isize) -> HWND {
+    HWND(raw as *mut c_void)
+}
+
+// ---------------------------------------------------------------------------
+// Backdrop
+// ---------------------------------------------------------------------------
+
+/// Two ways to get frosted glass behind a borderless transparent window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backdrop {
+    /// Documented `DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_TRANSIENTWINDOW` (Win11 22H2+).
+    DwmAcrylic,
+    /// Undocumented `SetWindowCompositionAttribute(ACCENT_ENABLE_ACRYLICBLURBEHIND)`.
+    /// Stays blurred when the window is inactive.
+    AccentAcrylic,
+    Off,
+}
+
+impl Backdrop {
+    pub fn next(self) -> Self {
+        match self {
+            Self::DwmAcrylic => Self::AccentAcrylic,
+            Self::AccentAcrylic => Self::Off,
+            Self::Off => Self::DwmAcrylic,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DwmAcrylic => "DWM acrylic (DWMSBT_TRANSIENTWINDOW)",
+            Self::AccentAcrylic => "Accent acrylic (SetWindowCompositionAttribute)",
+            Self::Off => "off",
+        }
+    }
+}
+
+#[repr(C)]
+struct AccentPolicy {
+    accent_state: u32,
+    accent_flags: u32,
+    gradient_color: u32,
+    animation_id: u32,
+}
+
+#[repr(C)]
+struct WindowCompositionAttribData {
+    attrib: u32,
+    pv_data: *mut c_void,
+    cb_data: usize,
+}
+
+#[link(name = "user32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn SetWindowCompositionAttribute(hwnd: HWND, data: *mut WindowCompositionAttribData) -> BOOL;
+}
+
+const WCA_ACCENT_POLICY: u32 = 19;
+const ACCENT_DISABLED: u32 = 0;
+const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
+
+unsafe fn set_accent(hwnd: HWND, state: u32, abgr: u32) {
+    let mut policy = AccentPolicy {
+        accent_state: state,
+        accent_flags: 0,
+        gradient_color: abgr,
+        animation_id: 0,
+    };
+    let mut data = WindowCompositionAttribData {
+        attrib: WCA_ACCENT_POLICY,
+        pv_data: &mut policy as *mut _ as *mut c_void,
+        cb_data: size_of::<AccentPolicy>(),
+    };
+    unsafe {
+        let _ = SetWindowCompositionAttribute(hwnd, &mut data);
+    }
+}
+
+unsafe fn set_dwm_i32(hwnd: HWND, attr: windows::Win32::Graphics::Dwm::DWMWINDOWATTRIBUTE, v: i32) {
+    unsafe {
+        let _ = DwmSetWindowAttribute(hwnd, attr, &v as *const i32 as *const c_void, 4);
+    }
+}
+
+pub fn apply_backdrop(raw: isize, mode: Backdrop) {
+    let h = hwnd(raw);
+    unsafe {
+        // Without WS_SYSMENU DWM stops drawing the (disabled) caption buttons
+        // into the extended frame.
+        let style = GetWindowLongPtrW(h, GWL_STYLE);
+        if style & WS_SYSMENU.0 as isize != 0 {
+            SetWindowLongPtrW(h, GWL_STYLE, style & !(WS_SYSMENU.0 as isize));
+            let _ = SetWindowPos(h, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+
+        set_dwm_i32(h, DWMWA_USE_IMMERSIVE_DARK_MODE, 1);
+        set_dwm_i32(h, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND.0);
+        let margins = MARGINS {
+            cxLeftWidth: -1,
+            cxRightWidth: -1,
+            cyTopHeight: -1,
+            cyBottomHeight: -1,
+        };
+        let _ = DwmExtendFrameIntoClientArea(h, &margins);
+
+        match mode {
+            Backdrop::DwmAcrylic => {
+                set_accent(h, ACCENT_DISABLED, 0);
+                set_dwm_i32(h, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW.0);
+            }
+            Backdrop::AccentAcrylic => {
+                set_dwm_i32(h, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE.0);
+                // ABGR tint; low alpha, the egui layer adds its own tint on top.
+                set_accent(h, ACCENT_ENABLE_ACRYLICBLURBEHIND, 0x10_18_14_10);
+            }
+            Backdrop::Off => {
+                set_dwm_i32(h, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE.0);
+                set_accent(h, ACCENT_DISABLED, 0);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Monitors
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub struct Monitor {
+    pub work: RECT,
+    pub primary: bool,
+}
+
+pub fn monitors() -> Vec<Monitor> {
+    unsafe extern "system" fn cb(m: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> BOOL {
+        let out = unsafe { &mut *(data.0 as *mut Vec<Monitor>) };
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if unsafe { GetMonitorInfoW(m, &mut info) }.as_bool() {
+            out.push(Monitor {
+                work: info.rcWork,
+                primary: info.dwFlags & MONITORINFOF_PRIMARY != 0,
+            });
+        }
+        true.into()
+    }
+    let mut out: Vec<Monitor> = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(None, None, Some(cb), LPARAM(&mut out as *mut _ as isize));
+    }
+    // Secondary monitors first: the ambient layer prefers them.
+    out.sort_by_key(|m| m.primary);
+    out
+}
+
+/// Cover the work area of a monitor (physical pixels, bypasses DPI conversions).
+pub fn place_on(raw: isize, m: &Monitor) {
+    let r = m.work;
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd(raw),
+            None,
+            r.left,
+            r.top,
+            r.right - r.left,
+            r.bottom - r.top,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+pub fn dpi_scale(raw: isize) -> f32 {
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd(raw)) };
+    if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 }
+}
+
+/// Center a window horizontally in the upper third of the monitor under the cursor.
+pub fn move_near_cursor(raw: isize, width_px: i32) {
+    unsafe {
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(mon, &mut info).as_bool() {
+            return;
+        }
+        let r = info.rcWork;
+        let x = r.left + ((r.right - r.left) - width_px) / 2;
+        let y = r.top + (r.bottom - r.top) / 4;
+        let _ = SetWindowPos(
+            hwnd(raw),
+            None,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hotkeys
+// ---------------------------------------------------------------------------
+
+/// Candidate capture hotkeys, first free one wins. Ctrl+Alt+Space is often taken
+/// (PowerToys), Ctrl+Space and Ctrl+Shift+Space collide with IDE completion.
+const CAPTURE_HOTKEYS: &[(&str, HOT_KEY_MODIFIERS, u32)] = &[
+    ("Win+Alt+N", HOT_KEY_MODIFIERS(MOD_WIN.0 | MOD_ALT.0), b'N' as u32),
+    ("Ctrl+Alt+N", HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_ALT.0), b'N' as u32),
+    ("Ctrl+Alt+Space", HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_ALT.0), VK_SPACE.0 as u32),
+];
+
+/// Registers the capture hotkey on a dedicated thread with a blocking message loop
+/// (no polling: zero idle CPU, no added latency). Returns the chosen combo.
+pub fn spawn_capture_hotkey(ctx: egui::Context, on_press: Arc<Mutex<Option<Instant>>>) -> Option<&'static str> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("hotkeys".into())
+        .spawn(move || unsafe {
+            // Hotkeys belong to the registering thread, so register here.
+            let chosen = CAPTURE_HOTKEYS.iter().find(|(_, mods, vk)| {
+                RegisterHotKey(None, 1, *mods | MOD_NOREPEAT, *vk).is_ok()
+            });
+            let _ = tx.send(chosen.map(|(name, ..)| *name));
+            if chosen.is_none() {
+                eprintln!("no capture hotkey could be registered");
+                return;
+            }
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                if msg.message == WM_HOTKEY {
+                    *on_press.lock().unwrap() = Some(Instant::now());
+                    ctx.request_repaint();
+                }
+            }
+        })
+        .expect("spawn hotkey thread");
+    rx.recv().ok().flatten()
+}
+
+// ---------------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------------
+
+/// Milliseconds since the OS created this process (includes loader time).
+pub fn ms_since_process_start() -> f64 {
+    unsafe {
+        let (mut creation, mut exit, mut kernel, mut user) = Default::default();
+        if GetProcessTimes(GetCurrentProcess(), &mut creation, &mut exit, &mut kernel, &mut user).is_err() {
+            return f64::NAN;
+        }
+        let now = GetSystemTimePreciseAsFileTime();
+        let to_u64 = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
+        (to_u64(now).saturating_sub(to_u64(creation))) as f64 / 10_000.0
+    }
+}
+
+/// (working set, private bytes) in MiB.
+pub fn memory_mib() -> (f64, f64) {
+    unsafe {
+        let mut c = PROCESS_MEMORY_COUNTERS_EX {
+            cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+            ..Default::default()
+        };
+        let ok = GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut c as *mut _ as *mut _,
+            c.cb,
+        );
+        if ok.is_err() {
+            return (f64::NAN, f64::NAN);
+        }
+        let mib = |b: usize| b as f64 / (1024.0 * 1024.0);
+        (mib(c.WorkingSetSize), mib(c.PrivateUsage))
+    }
+}

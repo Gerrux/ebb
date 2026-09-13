@@ -1,0 +1,984 @@
+# Ambient Notes — contextual second-screen workspace for Windows
+
+Спроектируй и реализуй Windows desktop-приложение нового типа для работы с короткими заметками, идеями, напоминаниями, prompts, ссылками, личными целями и reference-информацией.
+
+Это не должен быть ещё один классический notes app.
+
+Основная идея продукта:
+
+**Пользователь записывает информацию, перестаёт держать её в голове, а приложение самостоятельно помогает вернуть нужную заметку в поле зрения в подходящий момент.**
+
+Основной цикл продукта:
+
+**Capture → Forget → Resurface → Act → Archive**
+
+Приложение должно заменить хаотично разбросанные Windows Sticky Notes, но сохранить их главное преимущество: информация остаётся визуально близко к пользователю.
+
+---
+
+# 1. Product vision
+
+Пользователь работает за Windows-компьютером с двумя мониторами.
+
+Основной монитор используется для текущей работы.
+
+Второй монитор превращается в спокойный визуальный слой памяти — ambient workspace.
+
+На нём находятся:
+
+* текущие идеи;
+* важные заметки;
+* цели;
+* prompts;
+* ссылки;
+* reference-информация;
+* временные напоминания;
+* контекстные карточки;
+* несколько автоматически resurfaced заметок.
+
+Главный экран не должен превращаться в доску из сотен sticky notes.
+
+Одновременно видимыми должны быть примерно **5–15 наиболее релевантных карточек**.
+
+Все остальные заметки существуют в архиве и мгновенно доступны через поиск.
+
+Ключевая философия:
+
+> Не заставлять пользователя организовывать знания.
+> Помогать ему вспоминать нужное.
+
+---
+
+# 2. Visual direction
+
+Интерфейс должен ощущаться как часть Windows desktop environment.
+
+Использовать современный минималистичный glass / acrylic / translucent design.
+
+Визуальные ориентиры:
+
+* Windows 11;
+* Fluent Design;
+* acrylic glass;
+* frosted glass;
+* subtle blur;
+* мягкие тени;
+* лёгкая глубина;
+* спокойная типографика;
+* отсутствие визуального шума.
+
+Приложение должно выглядеть особенно хорошо на втором мониторе.
+
+Не делать интерфейс похожим на:
+
+* Trello;
+* Notion;
+* Jira;
+* классическую kanban-доску;
+* перегруженный productivity dashboard.
+
+Это должен быть скорее **живой desktop layer**, чем традиционное приложение.
+
+---
+
+# 3. Main Workspace
+
+Основной экран должен быть практически полностью посвящён карточкам.
+
+Фон:
+
+* прозрачный / полупрозрачный;
+* optionally показывает wallpaper Windows;
+* регулируемая степень blur;
+* opacity control.
+
+Карточки свободно располагаются на canvas.
+
+Каждая карточка имеет:
+
+* текст;
+* optional title;
+* type;
+* tags;
+* priority;
+* context;
+* created date;
+* last viewed date;
+* optional resurfacing rules;
+* optional expiration/review date.
+
+Карточки можно:
+
+* drag & drop;
+* resize;
+* collapse;
+* pin;
+* temporarily hide;
+* archive;
+* delete;
+* mark as done.
+
+---
+
+# 4. Card types
+
+Поддержать несколько базовых типов карточек.
+
+## Note
+
+Обычная короткая заметка.
+
+Пример:
+
+"Попробовать onboarding без обязательной регистрации."
+
+---
+
+## Idea
+
+Идея для продукта или проекта.
+
+Дополнительное поле:
+
+Potential / Maybe / Explore / Important.
+
+---
+
+## Prompt
+
+Хранение reusable AI prompts.
+
+Поддержать:
+
+* название;
+* prompt body;
+* variables;
+* copy button;
+* optional category.
+
+Пример:
+
+"Product Critic"
+
+---
+
+## Link
+
+Карточка-ссылка.
+
+Автоматически показывать:
+
+* favicon;
+* domain;
+* page title;
+* URL.
+
+---
+
+## Goal
+
+Личная или рабочая цель.
+
+Возможные поля:
+
+* target;
+* deadline;
+* status;
+* review cadence.
+
+---
+
+## Reminder
+
+Карточка с resurfacing condition.
+
+Например:
+
+"Напомнить подумать об этом через две недели."
+
+---
+
+## Reference
+
+Информация, которую нужно иногда быстро находить:
+
+* commands;
+* paths;
+* server names;
+* VPN endpoints;
+* usernames;
+* IDs;
+* configuration snippets.
+
+---
+
+# 5. Private Snippet / Vault Card
+
+Добавить отдельный тип карточки:
+
+**Private Snippet**
+
+Он предназначен для умеренно чувствительной reference-информации.
+
+Например:
+
+* VPN hostname;
+* username;
+* internal service URL;
+* SSH alias;
+* Wi-Fi credentials;
+* API endpoint;
+* development token;
+* license key;
+* test account;
+* server details;
+* short private notes.
+
+Private Snippet должен:
+
+* быть зашифрован локально;
+* скрывать значение по умолчанию;
+* иметь Reveal button;
+* автоматически скрываться через несколько секунд;
+* не отображать содержимое в preview;
+* исключаться из AI processing;
+* исключаться из telemetry;
+* не индексироваться внешними search services;
+* иметь опцию "copy without reveal".
+
+Обязательно явно обозначить, что встроенный vault **не позиционируется как полноценная замена Bitwarden / 1Password / KeePass**.
+
+Не поощрять хранение:
+
+* банковских данных;
+* crypto seed phrases;
+* master passwords;
+* recovery codes;
+* TOTP secrets;
+* критических production credentials.
+
+Для таких данных поддержать карточку типа:
+
+**Secure Reference**
+
+Например:
+
+"Production VPN credentials → Bitwarden / Infrastructure / VPN"
+
+С возможностью открыть соответствующий password manager.
+
+---
+
+# 6. Capture UX
+
+Добавление заметки должно быть практически мгновенным.
+
+Global shortcut:
+
+**Ctrl + Shift + Space**
+
+Открывает небольшой floating capture bar.
+
+Пользователь может написать:
+
+"идея: добавить weekly recap"
+
+или:
+
+"vpn staging vpn.staging.internal"
+
+или:
+
+"через две недели проверить новую pricing модель"
+
+Приложение автоматически определяет:
+
+* тип карточки;
+* tags;
+* context;
+* возможное время resurfacing.
+
+Перед сохранением не должно быть длинной формы.
+
+Enter → сохранить.
+
+Shift + Enter → multiline.
+
+---
+
+# 7. Universal Search
+
+Отдельный global shortcut:
+
+**Ctrl + Space**
+
+Открывает Spotlight-style поиск.
+
+Поиск должен работать мгновенно.
+
+Искать по:
+
+* тексту;
+* title;
+* tags;
+* type;
+* context;
+* date;
+* semantic similarity.
+
+Примеры запросов:
+
+"pricing"
+
+"vpn"
+
+"figma"
+
+"prompts для анализа"
+
+"что я писал про onboarding"
+
+"идеи прошлого месяца"
+
+Результаты появляются в реальном времени.
+
+Keyboard-first navigation:
+
+↑ ↓ — выбор
+Enter — открыть
+Cmd/Ctrl+C — copy
+Tab — actions
+
+---
+
+# 8. Resurfacing Engine
+
+Это центральная функция продукта.
+
+Приложение должно периодически возвращать пользователю релевантные старые заметки.
+
+Не в форме агрессивных notifications.
+
+Вместо этого карточки спокойно появляются в секции:
+
+**Rediscover**
+
+или
+
+**Worth remembering**
+
+Пример:
+
+Пользователь месяц назад записал:
+
+"Попробовать annual pricing plan."
+
+Через несколько недель карточка снова ненавязчиво появляется на втором экране.
+
+---
+
+# 9. Contextual resurfacing
+
+В будущем предусмотреть resurfacing на основе контекста.
+
+Контекст может включать:
+
+* время;
+* день недели;
+* запущенное приложение;
+* активный проект;
+* keywords;
+* location only if user explicitly enables it;
+* recurring workflow.
+
+Примеры:
+
+При запуске Figma:
+
+показать связанные design notes.
+
+При запуске VS Code:
+
+показать development snippets.
+
+При открытии ChatGPT:
+
+показать saved prompts.
+
+В понедельник утром:
+
+показать цели недели.
+
+В пятницу:
+
+показать идеи, которые давно не пересматривались.
+
+---
+
+# 10. Resurfacing scoring
+
+У каждой карточки должен быть внутренний relevance score.
+
+Пример концептуальной формулы:
+
+relevance =
+context_match
+
+* recency
+* user_priority
+* forgotten_factor
+* semantic_match
+
+- recently_seen_penalty
+
+Важно избежать ситуации, когда одна и та же карточка показывается постоянно.
+
+Использовать cooldown.
+
+Например:
+
+если пользователь видел карточку сегодня, она не должна resurfacing снова несколько дней, если она не pinned.
+
+---
+
+# 11. Forgotten knowledge
+
+Одна из ключевых функций:
+
+**Forgotten Ideas**
+
+Периодически показывать старые идеи, которые пользователь давно не видел.
+
+Например:
+
+"Ты записал это 73 дня назад."
+
+Карточка должна давать варианты:
+
+Keep
+
+Resurface later
+
+Archive
+
+Delete
+
+Turn into project
+
+---
+
+# 12. Information decay
+
+Каждая заметка постепенно должна требовать меньше внимания.
+
+Можно использовать concept:
+
+**Information decay**
+
+Если карточка:
+
+* давно не открывалась;
+* не pinned;
+* не связана с active context;
+* несколько раз resurfaced без взаимодействия;
+
+она постепенно перемещается в archive candidate.
+
+Это помогает приложению автоматически бороться с информационным мусором.
+
+---
+
+# 13. Review Mode
+
+Добавить отдельный режим:
+
+**Weekly Review**
+
+Раз в неделю приложение предлагает быстро разобрать накопившиеся заметки.
+
+UI как Tinder-like review stack.
+
+Для каждой карточки:
+
+Keep
+
+Archive
+
+Delete
+
+Resurface later
+
+Pin
+
+Convert to Goal
+
+Review должен занимать несколько минут, а не превращаться в отдельную систему productivity management.
+
+---
+
+# 14. Smart organisation
+
+Пользователь не должен вручную строить сложную структуру папок.
+
+Основной уровень организации:
+
+* type;
+* tags;
+* project;
+* context.
+
+AI может автоматически предлагать tags.
+
+Например заметка:
+
+"Попробовать более короткий signup flow"
+
+может получить:
+
+product
+onboarding
+experiment
+
+Но пользователь всегда может изменить их вручную.
+
+---
+
+# 15. Automatic grouping
+
+Приложение может находить semantic clusters.
+
+Например 14 отдельных карточек про pricing.
+
+Показать пользователю:
+
+"You have 14 notes related to Pricing."
+
+И предложить:
+
+Create collection
+
+Summarize
+
+Merge duplicates
+
+Keep separately
+
+---
+
+# 16. Second monitor mode
+
+Это один из главных сценариев приложения.
+
+Добавить специальный режим:
+
+**Ambient Monitor**
+
+Приложение занимает второй монитор.
+
+На экране отображаются:
+
+Pinned
+
+Today
+
+Rediscover
+
+Contextual
+
+Можно выбрать layout:
+
+Free Canvas
+
+Columns
+
+Minimal Stack
+
+Zen
+
+---
+
+# 17. Zen mode
+
+Очень минималистичный режим.
+
+Показывает максимум:
+
+3–5 карточек.
+
+Например:
+
+Current focus
+
+One idea
+
+One reminder
+
+One rediscovered note
+
+Остальное скрыто.
+
+---
+
+# 18. Quick actions
+
+Hover над карточкой показывает actions:
+
+Pin
+
+Snooze
+
+Archive
+
+Copy
+
+Edit
+
+Delete
+
+More
+
+Но без hover интерфейс должен быть максимально чистым.
+
+---
+
+# 19. Command Palette
+
+Добавить command palette.
+
+Shortcut:
+
+Ctrl + K
+
+Команды:
+
+New note
+
+Search
+
+Show ideas
+
+Show prompts
+
+Show goals
+
+Show forgotten notes
+
+Weekly review
+
+Archive selected
+
+Focus mode
+
+Change transparency
+
+Move to monitor
+
+---
+
+# 20. Migration from Windows Sticky Notes
+
+Это крайне важная часть onboarding.
+
+При первом запуске предложить:
+
+**Import Windows Sticky Notes**
+
+Импортировать существующие заметки.
+
+Не удалять оригинальные данные.
+
+После импорта:
+
+проанализировать заметки локально или после explicit consent.
+
+Предложить категории:
+
+Ideas
+
+Prompts
+
+Links
+
+Personal
+
+Work
+
+Credentials / Private
+
+Old / Possibly outdated
+
+Duplicates
+
+Позволить пользователю быстро просмотреть classification.
+
+---
+
+# 21. AI assistant
+
+AI в приложении должен быть вспомогательным слоем, а не главным интерфейсом.
+
+AI может:
+
+* classify notes;
+* suggest tags;
+* summarize clusters;
+* detect duplicates;
+* detect outdated notes;
+* suggest resurfacing time;
+* answer questions по заметкам.
+
+Например:
+
+"Что я писал про pricing?"
+
+"Какие идеи про onboarding у меня были?"
+
+"Покажи старые идеи, которые я так и не реализовал."
+
+AI не должен автоматически отправлять Private Snippets во внешние модели.
+
+---
+
+# 22. Privacy principles
+
+По умолчанию приложение должно быть local-first.
+
+Основные заметки должны храниться локально.
+
+Если пользователь включает sync:
+
+* использовать end-to-end encryption;
+* шифровать private notes;
+* явно объяснить модель безопасности.
+
+Private Snippet content никогда не использовать:
+
+* для analytics;
+* для model training;
+* для semantic cloud search;
+* для external AI inference.
+
+---
+
+# 23. Data model
+
+Пример структуры Note:
+
+id
+
+title
+
+content
+
+type
+
+tags[]
+
+project
+
+context[]
+
+createdAt
+
+updatedAt
+
+lastViewedAt
+
+lastResurfacedAt
+
+resurfaceCount
+
+priority
+
+pinned
+
+archived
+
+reviewAt
+
+expiresAt
+
+sensitivity
+
+position
+
+size
+
+monitor
+
+---
+
+# 24. Suggested technology stack
+
+Windows-first application.
+
+Рассмотреть:
+
+Tauri + React + TypeScript
+
+или
+
+WinUI 3 / C#
+
+Приоритеты:
+
+* low memory footprint;
+* fast startup;
+* native Windows integration;
+* tray mode;
+* global keyboard shortcuts;
+* multi-monitor support;
+* transparent windows;
+* blur / acrylic / mica effects.
+
+Local database:
+
+SQLite.
+
+Full-text search:
+
+SQLite FTS.
+
+Semantic search:
+
+optional local embeddings.
+
+Sensitive snippets:
+
+использовать Windows DPAPI или Windows Credential Manager для encryption keys.
+
+Не хранить encryption keys рядом с plaintext database.
+
+---
+
+# 25. Performance requirements
+
+Приложение должно ощущаться моментальным.
+
+Target:
+
+launch < 1 second where possible.
+
+Capture overlay появляется практически мгновенно.
+
+Search results < 100 ms для обычного поиска.
+
+Idle CPU usage близок к нулю.
+
+Не использовать тяжёлые background processes без необходимости.
+
+---
+
+# 26. Product philosophy
+
+Приложение не должно требовать дисциплины.
+
+Не заставлять пользователя:
+
+* создавать папки;
+* поддерживать сложные databases;
+* постоянно сортировать заметки;
+* строить knowledge graph;
+* придумывать идеальную систему tags.
+
+Система должна принимать хаос и постепенно помогать его структурировать.
+
+Основная ценность продукта:
+
+**External memory without information overload.**
+
+---
+
+# 27. Emotional design goal
+
+Открывая второй монитор, пользователь должен чувствовать:
+
+"Здесь лежит всё, что мне важно помнить."
+
+Но никогда:
+
+"Мне надо разобрать ещё один inbox."
+
+Интерфейс должен создавать ощущение спокойствия.
+
+Не urgency.
+
+Не productivity guilt.
+
+Не бесконечного списка задач.
+
+---
+
+# 28. MVP
+
+Для первой версии реализовать только:
+
+1. Glass desktop workspace.
+
+2. Создание и редактирование карточек.
+
+3. Drag & drop / resize.
+
+4. Pin / archive.
+
+5. Global quick capture.
+
+6. Universal search.
+
+7. Tags.
+
+8. Basic resurfacing.
+
+9. Forgotten notes.
+
+10. Weekly review.
+
+11. Import Windows Sticky Notes.
+
+12. Private Snippets с локальным encryption.
+
+13. Multi-monitor support.
+
+Не добавлять на первом этапе:
+
+collaboration
+
+complex projects
+
+team workspaces
+
+calendar
+
+email
+
+kanban
+
+full task manager
+
+browser extension
+
+mobile app
+
+---
+
+# 29. Core UX principle
+
+Каждое новое feature необходимо проверять вопросом:
+
+**Помогает ли это пользователю помнить нужное или создаёт дополнительную систему, которую придётся обслуживать?**
+
+Если feature создаёт дополнительную administrative work — скорее всего его не нужно добавлять.
+
+---
+
+# 30. Desired result
+
+Создай приложение, которое ощущается как:
+
+**если бы Windows Sticky Notes, Spotlight, personal memory assistant и glass desktop widget были одним продуктом.**
+
+Но главное отличие — приложение не просто хранит заметки.
+
+Оно понимает:
+
+**что стоит оставить перед глазами, что можно забыть и когда это стоит показать снова.**
