@@ -1,6 +1,9 @@
 ﻿# Checks the shell integration of a running release build without synthetic input:
 # window styles, z-order pinning, tray registration, single instance, hide/show,
 # capture while hidden, --quit. Talks to Ambient's own hidden shell window only.
+# The idle-CPU check fails if the Sticky Notes import offer scans during it (3 s after
+# start): run against a profile where the import was done or declined, or with
+# LOCALAPPDATA pointing at a test directory.
 param([string]$Exe = "$PSScriptRoot\..\target\release\ambient.exe")
 $ErrorActionPreference = 'Stop'
 $Exe = [IO.Path]::GetFullPath($Exe)

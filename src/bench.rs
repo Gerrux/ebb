@@ -1,8 +1,8 @@
 //! Scripted measurement run, enabled by `AMBIENT_BENCH=<csv path>`.
 //!
 //! Timeline after the first frame: idle for `IDLE` (CPU time sampled across it),
-//! optionally fire the capture hotkey path, sample memory with the capture window
-//! up, then close. One CSV row per run.
+//! optionally fire the capture hotkey path and sample memory with the bar up, hide
+//! it, open search the same way and sample again, then close. One CSV row per run.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -14,7 +14,7 @@ const SETTLE: Duration = Duration::from_millis(1000);
 const IDLE: Duration = Duration::from_millis(3000);
 const CAPTURE_UP: Duration = Duration::from_millis(1500);
 
-pub const HEADER: &str = "label,proc_ms,main_ms,ws_first,priv_first,ws_idle,priv_idle,cpu_idle_ms,latency_ms,ws_capture,priv_capture";
+pub const HEADER: &str = "label,proc_ms,main_ms,ws_first,priv_first,ws_idle,priv_idle,cpu_idle_ms,latency_ms,ws_capture,priv_capture,search_latency_ms,ws_search,priv_search";
 
 /// `AMBIENT_BENCH=<csv>`, or `--bench=<csv>` for launchers that cannot set the
 /// environment (Task Scheduler).
@@ -25,8 +25,9 @@ pub fn path() -> Option<PathBuf> {
 }
 
 pub struct Hooks {
-    /// Simulates a hotkey press; `None` for apps without a capture window.
-    pub trigger: Option<Box<dyn Fn() + Send>>,
+    /// Simulates a hotkey press (`true` = search, `false` = capture); `None` for
+    /// apps without the bar.
+    pub trigger: Option<Box<dyn Fn(bool) + Send>>,
     pub latency_ms: Box<dyn Fn() -> Option<f64> + Send>,
 }
 
@@ -41,15 +42,23 @@ pub fn start(ctx: egui::Context, out: PathBuf, label: String, proc_ms: f64, main
         let (ws_idle, priv_idle) = win::memory_mib();
 
         let (mut latency, mut ws_cap, mut priv_cap) = (f64::NAN, f64::NAN, f64::NAN);
+        let (mut search_latency, mut ws_search, mut priv_search) = (f64::NAN, f64::NAN, f64::NAN);
         if let Some(trigger) = &hooks.trigger {
-            trigger();
+            trigger(false);
             std::thread::sleep(CAPTURE_UP);
             latency = (hooks.latency_ms)().unwrap_or(f64::NAN);
             (ws_cap, priv_cap) = win::memory_mib();
+
+            trigger(false); // hide
+            std::thread::sleep(Duration::from_millis(400));
+            trigger(true);
+            std::thread::sleep(CAPTURE_UP);
+            search_latency = (hooks.latency_ms)().unwrap_or(f64::NAN);
+            (ws_search, priv_search) = win::memory_mib();
         }
 
         let row = format!(
-            "{label},{proc_ms:.0},{main_ms:.0},{ws_first:.1},{priv_first:.1},{ws_idle:.1},{priv_idle:.1},{cpu_idle:.0},{latency:.1},{ws_cap:.1},{priv_cap:.1}\n"
+            "{label},{proc_ms:.0},{main_ms:.0},{ws_first:.1},{priv_first:.1},{ws_idle:.1},{priv_idle:.1},{cpu_idle:.0},{latency:.1},{ws_cap:.1},{priv_cap:.1},{search_latency:.1},{ws_search:.1},{priv_search:.1}\n"
         );
         let new = !out.exists();
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&out) {

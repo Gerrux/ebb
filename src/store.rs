@@ -11,6 +11,36 @@ pub struct Store {
     conn: Connection,
 }
 
+/// One search result.
+#[derive(Clone, Debug)]
+pub struct Hit {
+    pub id: i64,
+    pub kind: Kind,
+    pub title: String,
+    /// Body excerpt; matched terms are wrapped in \u{1} … \u{2}. Empty for Private.
+    pub snippet: String,
+    pub archived: bool,
+    pub pinned: bool,
+    pub updated_at: i64,
+}
+
+/// Row of `SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at`.
+fn card_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
+    let tags: String = r.get(4)?;
+    Ok(Card {
+        id: r.get(0)?,
+        kind: Kind::parse(&r.get::<_, String>(1)?),
+        title: r.get(2)?,
+        body: r.get(3)?,
+        tags: tags.split(',').filter(|t| !t.is_empty()).map(str::to_owned).collect(),
+        pinned: r.get(5)?,
+        archived: r.get(6)?,
+        pos: pos2(r.get(7)?, r.get(8)?),
+        size: vec2(r.get(9)?, r.get(10)?),
+        created_at: r.get(11)?,
+    })
+}
+
 fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -56,7 +86,145 @@ impl Store {
                  batch INTEGER NOT NULL
              );",
         )?;
+        let has_fts: bool = conn.query_row("SELECT count(*) FROM sqlite_master WHERE name='cards_fts'", [], |r| r.get(0))?;
+        conn.execute_batch(
+            "-- External-content index over cards. unicode61 folds case for Cyrillic too;
+             -- remove_diacritics folds ё→е. No `prefix=` option: on 10k notes it made
+             -- the file 20% larger (38 -> 46 MiB) without making any query faster.
+             CREATE VIRTUAL TABLE IF NOT EXISTS cards_fts USING fts5(
+                 title, body, tags,
+                 content='cards', content_rowid='id',
+                 tokenize='unicode61 remove_diacritics 2'
+             );
+             CREATE TRIGGER IF NOT EXISTS cards_fts_insert AFTER INSERT ON cards BEGIN
+                 INSERT INTO cards_fts(rowid, title, body, tags) VALUES (new.id, new.title, new.body, new.tags);
+             END;
+             CREATE TRIGGER IF NOT EXISTS cards_fts_delete AFTER DELETE ON cards BEGIN
+                 INSERT INTO cards_fts(cards_fts, rowid, title, body, tags)
+                 VALUES ('delete', old.id, old.title, old.body, old.tags);
+             END;
+             -- save() rewrites every column on each drag; reindex only when text changed.
+             CREATE TRIGGER IF NOT EXISTS cards_fts_update AFTER UPDATE ON cards
+             WHEN old.title IS NOT new.title OR old.body IS NOT new.body OR old.tags IS NOT new.tags BEGIN
+                 INSERT INTO cards_fts(cards_fts, rowid, title, body, tags)
+                 VALUES ('delete', old.id, old.title, old.body, old.tags);
+                 INSERT INTO cards_fts(rowid, title, body, tags) VALUES (new.id, new.title, new.body, new.tags);
+             END;",
+        )?;
+        if !has_fts {
+            // Column weights for `ORDER BY rank`: title, body, tags. Stored in the index.
+            conn.execute("INSERT INTO cards_fts(cards_fts, rank) VALUES ('rank', 'bm25(8.0, 1.0, 4.0)')", [])?;
+            conn.execute("INSERT INTO cards_fts(cards_fts) VALUES ('rebuild')", [])?;
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS cards_kind_created ON cards(kind, created_at);
+             CREATE INDEX IF NOT EXISTS cards_created ON cards(created_at);
+             CREATE INDEX IF NOT EXISTS cards_updated ON cards(updated_at);",
+        )?;
         Ok(Self { conn })
+    }
+
+    /// Full-text search over all cards, archived included. Private bodies are never
+    /// returned as snippets.
+    pub fn search(&self, q: &crate::search::Query, limit: usize) -> rusqlite::Result<Vec<Hit>> {
+        use rusqlite::types::Value;
+
+        // Filters as a condition on `cards` (alias c).
+        let mut filters = String::new();
+        let mut args: Vec<Value> = Vec::new();
+        if let Some(kind) = q.kind {
+            filters.push_str(" AND c.kind = ?");
+            args.push(Value::Text(kind.as_str().into()));
+        }
+        if let Some((from, to, _)) = &q.range {
+            filters.push_str(" AND c.created_at >= ? AND c.created_at < ?");
+            args.push(Value::Integer(*from));
+            args.push(Value::Integer(*to));
+        }
+        let columns = "c.id, c.kind, c.title, c.tags, c.archived, c.pinned, c.updated_at";
+        let row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Hit> {
+            let kind = Kind::parse(&r.get::<_, String>(1)?);
+            let body: String = r.get(7)?;
+            Ok(Hit {
+                id: r.get(0)?,
+                kind,
+                title: r.get(2)?,
+                archived: r.get(4)?,
+                pinned: r.get(5)?,
+                updated_at: r.get(6)?,
+                snippet: if kind == Kind::Private { String::new() } else { crate::search::snippet(&body, q, 160) },
+            })
+        };
+        let run = |sql: String, args: Vec<Value>| -> rusqlite::Result<Vec<Hit>> {
+            let mut stmt = self.conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(args), row)?;
+            rows.collect()
+        };
+
+        let Some(expr) = q.fts_expression() else {
+            // Filters only (or nothing): newest first.
+            let sql = format!(
+                "SELECT {columns}, substr(c.body, 1, 400) FROM cards c WHERE 1{filters}
+                 ORDER BY c.updated_at DESC LIMIT {limit}"
+            );
+            return run(sql, args);
+        };
+
+        // Ranking is bm25 (title > tags > body, stored as the index's `rank`), with
+        // cards on the layer and pinned ones nudged up; bm25 is negative. Without
+        // filters FTS5 can sort by rank itself and stop early, so only a bounded
+        // candidate set gets the boost; with filters every match is joined instead,
+        // so a rare kind isn't cut off by the candidate limit. Snippets are built in
+        // Rust for the final rows only (cheaper than snippet() on every candidate).
+        let candidates = if filters.is_empty() {
+            format!("SELECT rowid, rank FROM cards_fts WHERE cards_fts MATCH ? ORDER BY rank LIMIT {}", (limit * 4).max(100))
+        } else {
+            "SELECT rowid, rank FROM cards_fts WHERE cards_fts MATCH ?".to_owned()
+        };
+        let sql = format!(
+            "SELECT {columns}, c.body
+             FROM ({candidates}) f JOIN cards c ON c.id = f.rowid
+             WHERE 1{filters}
+             ORDER BY f.rank - 1.5 * (c.archived = 0) - 1.5 * c.pinned
+             LIMIT {limit}"
+        );
+        let mut fts_args = vec![Value::Text(expr)];
+        fts_args.extend(args.iter().cloned());
+        let hits = run(sql, fts_args)?;
+        if !hits.is_empty() || q.words.is_empty() {
+            return Ok(hits);
+        }
+
+        // Nothing token-wise: fall back to a substring scan (mid-word matches such as
+        // "taging" in "vpn.staging"). LIKE folds ASCII case only. Walks the updated_at
+        // index newest-first and stops at the limit; a miss still scans everything.
+        let mut like_filters = String::new();
+        let mut like_args = Vec::new();
+        for w in &q.words {
+            like_filters.push_str(" AND (c.title || ' ' || c.body) LIKE ? ESCAPE '\\'");
+            let escaped = w.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+            like_args.push(Value::Text(format!("%{escaped}%")));
+        }
+        like_args.extend(args);
+        let sql = format!(
+            "SELECT {columns}, c.body FROM cards c WHERE 1{like_filters}{filters}
+             ORDER BY c.updated_at DESC LIMIT {limit}"
+        );
+        run(sql, like_args)
+    }
+
+    pub fn card(&self, id: i64) -> rusqlite::Result<Option<Card>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at FROM cards WHERE id=?1",
+        )?;
+        let mut rows = stmt.query_map([id], card_row)?;
+        rows.next().transpose()
+    }
+
+    /// Records that the user looked at a card (input for resurfacing).
+    pub fn touch(&self, id: i64) -> rusqlite::Result<()> {
+        self.conn.execute("UPDATE cards SET last_viewed_at=?2 WHERE id=?1", params![id, now()])?;
+        Ok(())
     }
 
     pub fn setting(&self, key: &str) -> Option<String> {
@@ -134,21 +302,7 @@ impl Store {
             "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at
              FROM cards WHERE archived = 0 ORDER BY updated_at",
         )?;
-        let rows = stmt.query_map([], |r| {
-            let tags: String = r.get(4)?;
-            Ok(Card {
-                id: r.get(0)?,
-                kind: Kind::parse(&r.get::<_, String>(1)?),
-                title: r.get(2)?,
-                body: r.get(3)?,
-                tags: tags.split(',').filter(|t| !t.is_empty()).map(str::to_owned).collect(),
-                pinned: r.get(5)?,
-                archived: r.get(6)?,
-                pos: pos2(r.get(7)?, r.get(8)?),
-                size: vec2(r.get(9)?, r.get(10)?),
-                created_at: r.get(11)?,
-            })
-        })?;
+        let rows = stmt.query_map([], card_row)?;
         rows.collect()
     }
 
@@ -234,6 +388,121 @@ mod tests {
             on_layer,
             old: false,
         }
+    }
+
+    fn add(store: &Store, text: &str) -> Card {
+        store.insert(&crate::card::parse_capture(text), egui::pos2(0.0, 0.0)).unwrap()
+    }
+
+    fn find(store: &Store, query: &str) -> Vec<String> {
+        let q = crate::search::parse(query, now(), 0);
+        store.search(&q, 20).unwrap().into_iter().map(|h| format!("{}|{}", h.title, h.snippet.replace(['\u{1}', '\u{2}'], ""))).collect()
+    }
+
+    #[test]
+    fn full_text_search() {
+        let (store, dir) = temp_store("fts");
+        add(&store, "Онбординг\nПопробовать онбординг без регистрации #product");
+        add(&store, "идея: weekly recap по пятницам");
+        add(&store, "vpn staging vpn.staging.internal #infra");
+        let mut secret = add(&store, "секрет: Wi-Fi\nпароль hunter2");
+
+        // Case-insensitive Cyrillic, inflected form via stemming + prefix.
+        assert_eq!(find(&store, "ОНБОРДИНГА").len(), 1);
+        assert_eq!(find(&store, "vpn").len(), 1);
+        assert_eq!(find(&store, "#infra").len(), 1);
+        assert_eq!(find(&store, "идеи").len(), 1, "kind filter without text");
+        // Private bodies are searchable but never shown.
+        let hits = find(&store, "hunter2");
+        assert_eq!(hits, ["Wi-Fi|"]);
+        // Substring fallback for mid-word matches.
+        assert_eq!(find(&store, "board").len(), 0, "LIKE is on title+body; 'board' isn't there");
+        assert_eq!(find(&store, "taging").len(), 1);
+
+        // Edits reindex; deletes drop from the index.
+        secret.body = "пароль changed".into();
+        store.save(&secret).unwrap();
+        assert!(find(&store, "hunter2").is_empty());
+        assert_eq!(find(&store, "changed").len(), 1);
+        store.delete(secret.id).unwrap();
+        assert!(find(&store, "changed").is_empty());
+
+        // Reopening an existing database without the index builds it.
+        store.conn.execute_batch("DROP TABLE cards_fts;").unwrap();
+        drop(store);
+        let store = Store::open_at(dir.join("t.db")).unwrap();
+        assert_eq!(find(&store, "онбординг").len(), 1);
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `cargo test --release search_speed -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn search_speed() {
+        let notes: usize = std::env::var("AMBIENT_SPEED_NOTES").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000);
+        let (store, dir) = temp_store("speed");
+        // Zipf-distributed vocabulary like natural text: a few very common words,
+        // a long tail of rare ones. Known words sit at chosen ranks.
+        let mut vocab: Vec<String> = (0..20_000)
+            .map(|i| if i % 2 == 0 { format!("слово{i}") } else { format!("word{i}") })
+            .collect();
+        for (rank, w) in [(0, "и"), (1, "в"), (5, "проверить"), (40, "pricing"), (300, "онбординг"), (2000, "figma"), (8000, "vpn")] {
+            vocab[rank] = w.into();
+        }
+        let cumulative: Vec<f64> = vocab
+            .iter()
+            .enumerate()
+            .scan(0.0, |acc, (r, _)| {
+                *acc += 1.0 / (r as f64 + 1.0);
+                Some(*acc)
+            })
+            .collect();
+        let total = *cumulative.last().unwrap();
+        let mut rng = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let t = std::time::Instant::now();
+        store.conn.execute_batch("BEGIN").unwrap();
+        for i in 0..notes {
+            // Mostly short notes, some long: 5..~400 words.
+            let len = 5 + ((next() % 1000) as f64 / 1000.0).powi(3).mul_add(400.0, 0.0) as usize;
+            let body: Vec<&str> = (0..len)
+                .map(|_| {
+                    let x = (next() % 1_000_000) as f64 / 1_000_000.0 * total;
+                    &*vocab[cumulative.partition_point(|c| *c < x)]
+                })
+                .collect();
+            let kind = ["идея: ", "", "", "", "prompt: "][i % 5];
+            add(&store, &format!("{kind}Заметка {i}\n{}", body.join(" ")));
+        }
+        store.conn.execute_batch("COMMIT").unwrap();
+        println!("inserted {notes} notes in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+
+        for query in [
+            "pricing", "онбординга", "figma", "vpn", "проверить pricing", "онб", "идеи за месяц", "prompts figma",
+            "zzz_nothing", "ord19",
+        ] {
+            let q = crate::search::parse(query, now(), 0);
+            let mut times = Vec::new();
+            let mut n = 0;
+            for _ in 0..30 {
+                let t = std::time::Instant::now();
+                n = store.search(&q, 50).unwrap().len();
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            times.sort_by(f64::total_cmp);
+            println!("{query:>24}: {n:>2} hits, p50 {:.2} ms, p95 {:.2} ms", times[15], times[28]);
+        }
+        let size = std::fs::metadata(dir.join("t.db")).map(|m| m.len()).unwrap_or(0)
+            + std::fs::metadata(dir.join("t.db-wal")).map(|m| m.len()).unwrap_or(0);
+        println!("db+wal size: {:.1} MiB", size as f64 / 1048576.0);
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

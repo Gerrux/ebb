@@ -1,11 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod bar;
 mod autostart;
 mod bench;
 mod card;
 mod import_ui;
 mod renderer;
+mod search;
 mod shell;
 mod sticky;
 mod store;

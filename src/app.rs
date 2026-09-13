@@ -1,4 +1,4 @@
-//! The ambient layer (root viewport) and the quick-capture bar (deferred viewport).
+//! The ambient layer (root viewport); the capture/search bar lives in `bar`.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -11,6 +11,7 @@ use egui::{
 
 use std::sync::atomic::Ordering;
 
+use crate::bar::{self, BarState, Mode, Outbox, Press};
 use crate::import_ui::StickyImport;
 use crate::shell::{self, Event};
 use crate::autostart;
@@ -19,27 +20,10 @@ use crate::store::Store;
 use crate::theme::{self, TEXT, TEXT_DIM, TEXT_MUTED};
 use crate::win::{self, Backdrop};
 
-const CAPTURE_SIZE: Vec2 = vec2(640.0, 132.0);
 const HEADER_H: f32 = 30.0;
 const FOOTER_H: f32 = 22.0;
 const REVEAL_FOR: Duration = Duration::from_secs(5);
-
-fn capture_id() -> ViewportId {
-    ViewportId::from_hash_of("capture")
-}
-
-/// State shared with the capture viewport, which renders on its own callback.
-#[derive(Default)]
-struct CaptureState {
-    visible: bool,
-    text: String,
-    /// When the hotkey was pressed for the current showing.
-    pressed_at: Option<Instant>,
-    request_focus: bool,
-    latency_ms: Option<f64>,
-    submitted: Vec<String>,
-    hwnd: Option<isize>,
-}
+const HIGHLIGHT_FOR: Duration = Duration::from_millis(2500);
 
 #[derive(Default)]
 enum AutostartUi {
@@ -79,7 +63,7 @@ enum Action {
 pub struct AmbientApp {
     store: Store,
     cards: Vec<Card>,
-    capture: Arc<Mutex<CaptureState>>,
+    bar: Arc<Mutex<BarState>>,
     shell: Arc<shell::Shared>,
 
     hwnd: Option<isize>,
@@ -90,6 +74,8 @@ pub struct AmbientApp {
 
     editing: Option<(i64, String)>,
     revealed: Option<(i64, Instant)>,
+    /// Card just opened from search: outlined for a moment.
+    highlighted: Option<(i64, Instant)>,
 
     sticky: StickyImport,
 
@@ -133,7 +119,7 @@ impl AmbientApp {
         Self {
             store,
             cards,
-            capture: Arc::default(),
+            bar: Arc::default(),
             shell,
             hwnd,
             layer_visible: true,
@@ -142,6 +128,7 @@ impl AmbientApp {
             tint: 70,
             editing: None,
             revealed: None,
+            highlighted: None,
             sticky: StickyImport::default(),
             show_debug: false,
             autostart: Arc::default(),
@@ -218,15 +205,19 @@ impl AmbientApp {
         painter.text(
             pos2(title.right() + 14.0, title.bottom() - 3.0),
             Align2::LEFT_BOTTOM,
-            format!(
-                "{} карточек  ·  {} — записать  ·  F1 — debug",
-                self.cards.len(),
-                match self.shell.hotkey_label.get() {
-                    Some(Some(label)) => label,
+            {
+                let label = |l: &std::sync::OnceLock<Option<&'static str>>| match l.get() {
+                    Some(Some(label)) => *label,
                     Some(None) => "хоткей занят",
                     None => "…",
-                }
-            ),
+                };
+                format!(
+                    "{} карточек  ·  {} — записать  ·  {} — найти  ·  F1 — debug",
+                    self.cards.len(),
+                    label(&self.shell.hotkey_label),
+                    label(&self.shell.search_hotkey_label),
+                )
+            },
             FontId::proportional(13.0),
             TEXT_MUTED,
         );
@@ -259,6 +250,19 @@ impl AmbientApp {
             let revealed = self.revealed.is_some_and(|(rid, _)| rid == id);
             for a in card_ui(ui, origin, area, &mut self.cards[idx], hovered_id == Some(id), editing, revealed) {
                 actions.push((idx, a));
+            }
+        }
+
+        if let Some((hid, t)) = self.highlighted {
+            match self.cards.iter().find(|c| c.id == hid) {
+                Some(c) if t.elapsed() < HIGHLIGHT_FOR => {
+                    let fade = 1.0 - t.elapsed().as_secs_f32() / HIGHLIGHT_FOR.as_secs_f32();
+                    let rect = Rect::from_min_size(origin + c.pos.to_vec2(), c.size).expand(3.0);
+                    let stroke = Stroke::new(2.0, c.kind.accent().gamma_multiply(fade));
+                    ui.painter().rect_stroke(rect, CornerRadius::same(14), stroke, StrokeKind::Outside);
+                    ui.ctx().request_repaint();
+                }
+                _ => self.highlighted = None,
             }
         }
 
@@ -322,7 +326,7 @@ impl AmbientApp {
             ui.add_space(4.0);
             let (proc_ms, main_ms) = self.first_frame.unwrap_or((f64::NAN, f64::NAN));
             let (ws, private) = win::memory_mib();
-            let latency = self.capture.lock().unwrap().latency_ms;
+            let latency = self.bar.lock().unwrap().latency_ms;
             let row = |ui: &mut Ui, k: &str, v: String| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(k).size(13.0).color(TEXT_MUTED));
@@ -421,14 +425,17 @@ impl AmbientApp {
         }
     }
 
-    fn capture_viewport(&self, ui: &Ui) {
-        let visible = self.capture.lock().unwrap().visible;
-        let state = self.capture.clone();
+    fn bar_viewport(&self, ui: &Ui) {
+        let (visible, size) = {
+            let bar = self.bar.lock().unwrap();
+            (bar.visible, bar.size())
+        };
+        let state = self.bar.clone();
         ui.ctx().show_viewport_deferred(
-            capture_id(),
+            bar::viewport_id(),
             ViewportBuilder::default()
                 .with_title("Ambient Capture")
-                .with_inner_size(CAPTURE_SIZE)
+                .with_inner_size(size)
                 .with_decorations(false)
                 .with_transparent(true)
                 .with_resizable(false)
@@ -438,8 +445,39 @@ impl AmbientApp {
                 .with_always_on_top()
                 .with_taskbar(false)
                 .with_visible(visible),
-            move |ui, _class| capture_ui(ui, &state),
+            move |ui, _class| bar::ui(ui, &state),
         );
+    }
+
+    /// Shows a card on the layer: brings it to front, or restores it from the archive
+    /// into a free slot. Counts as viewed.
+    fn open_card(&mut self, ctx: &egui::Context, id: i64) {
+        self.set_layer_visible(ctx, true);
+        let idx = match self.cards.iter().position(|c| c.id == id) {
+            Some(idx) => idx,
+            None => {
+                let Ok(Some(mut card)) = self.store.card(id) else { return };
+                card.archived = false;
+                card.pos = card::free_slot(&self.cards, ctx.content_rect().size());
+                card.size = card.size.max(MIN_SIZE);
+                self.cards.push(card);
+                let idx = self.cards.len() - 1;
+                self.save(idx);
+                idx
+            }
+        };
+        let card = self.cards.remove(idx);
+        self.cards.push(card);
+        let _ = self.store.touch(id);
+        self.highlighted = Some((id, Instant::now()));
+        ctx.request_repaint();
+    }
+
+    fn reload_cards(&mut self) {
+        self.commit_edit();
+        if let Ok(cards) = self.store.load() {
+            self.cards = cards;
+        }
     }
 }
 
@@ -449,7 +487,8 @@ impl eframe::App for AmbientApp {
         let mut pressed = None;
         for event in self.shell.take_events() {
             match event {
-                Event::Capture(t) => pressed = Some(t),
+                Event::Capture(t) => pressed = Some((Mode::Capture, t)),
+                Event::Search(t) => pressed = Some((Mode::Search, t)),
                 Event::ToggleLayer => self.set_layer_visible(ctx, !self.layer_visible),
                 Event::ShowLayer => self.set_layer_visible(ctx, true),
                 Event::TogglePinBottom => {
@@ -467,40 +506,50 @@ impl eframe::App for AmbientApp {
             }
         }
 
-        let mut cap = self.capture.lock().unwrap();
-        if cap.hwnd.is_none() {
-            cap.hwnd = win::find_capture_window();
-            if let Some(h) = cap.hwnd {
+        let mut bar = self.bar.lock().unwrap();
+        if bar.hwnd.is_none() {
+            bar.hwnd = win::find_capture_window();
+            if let Some(h) = bar.hwnd {
                 win::apply_backdrop(h, Backdrop::AccentAcrylic);
                 win::install_window_rules(h, 0);
             }
         }
-        if let Some(t) = pressed {
-            if cap.visible {
-                cap.visible = false;
-                ctx.send_viewport_cmd_to(capture_id(), ViewportCommand::Visible(false));
-            } else {
-                if let Some(h) = cap.hwnd {
-                    win::move_near_cursor(h, (CAPTURE_SIZE.x * win::dpi_scale(h)) as i32);
+        if let Some((mode, t)) = pressed {
+            let id = bar::viewport_id();
+            match bar.press(mode, t) {
+                Press::Hide => ctx.send_viewport_cmd_to(id, ViewportCommand::Visible(false)),
+                press => {
+                    let size = bar.size();
+                    if let (Press::Show, Some(h)) = (&press, bar.hwnd) {
+                        win::move_near_cursor(h, (size.x * win::dpi_scale(h)) as i32);
+                    }
+                    // Explicit commands: with the layer hidden the root ui (which carries
+                    // the viewport builder) doesn't run until something is visible.
+                    ctx.send_viewport_cmd_to(id, ViewportCommand::InnerSize(size));
+                    ctx.send_viewport_cmd_to(id, ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd_to(id, ViewportCommand::Focus);
                 }
-                cap.visible = true;
-                cap.pressed_at = Some(t);
-                cap.latency_ms = None;
-                cap.request_focus = true;
-                // Explicit command: with the layer hidden the root ui (which carries
-                // the viewport builder) doesn't run until something is visible.
-                ctx.send_viewport_cmd_to(capture_id(), ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd_to(capture_id(), ViewportCommand::Focus);
             }
         }
-        let submitted = std::mem::take(&mut cap.submitted);
-        drop(cap);
+        let outbox = std::mem::take(&mut bar.outbox);
+        drop(bar);
 
-        if !submitted.is_empty() {
-            let area = ctx.content_rect().size();
-            for text in submitted {
-                self.add_from_capture(&text, area);
+        let mut changed = false;
+        for request in outbox {
+            match request {
+                Outbox::Captured(text) => {
+                    self.add_from_capture(&text, ctx.content_rect().size());
+                    changed = true;
+                }
+                Outbox::Open(id) => {
+                    self.open_card(ctx, id);
+                    changed = true;
+                }
+                Outbox::Changed => self.reload_cards(),
             }
+        }
+        if changed {
+            self.bar.lock().unwrap().invalidate();
         }
     }
 
@@ -526,13 +575,15 @@ impl eframe::App for AmbientApp {
             }
             if let Some(out) = crate::bench::path() {
                 let (shell, ctx) = (self.shell.clone(), ui.ctx().clone());
-                let capture = self.capture.clone();
+                let bar = self.bar.clone();
                 let hooks = crate::bench::Hooks {
-                    trigger: Some(Box::new(move || {
-                        shell.events.lock().unwrap().push(Event::Capture(Instant::now()));
+                    trigger: Some(Box::new(move |search| {
+                        let t = Instant::now();
+                        let event = if search { Event::Search(t) } else { Event::Capture(t) };
+                        shell.events.lock().unwrap().push(event);
                         ctx.request_repaint();
                     })),
-                    latency_ms: Box::new(move || capture.lock().unwrap().latency_ms),
+                    latency_ms: Box::new(move || bar.lock().unwrap().latency_ms),
                 };
                 let label = format!("ambient-{}", crate::renderer::NAME);
                 crate::bench::start(ui.ctx().clone(), out, label, proc_ms, main_ms, hooks);
@@ -573,7 +624,7 @@ impl eframe::App for AmbientApp {
         }
         // Created up front even while hidden: creating it on the first hotkey press
         // saves ~4 MiB but doubles the first-show latency and flashes without acrylic.
-        self.capture_viewport(ui);
+        self.bar_viewport(ui);
     }
 
     #[cfg(feature = "glow")]
@@ -845,92 +896,3 @@ fn card_ui(
     out
 }
 
-fn capture_ui(ui: &mut Ui, state: &Mutex<CaptureState>) {
-    let mut st = state.lock().unwrap();
-    if !st.visible {
-        return;
-    }
-    if st.latency_ms.is_none() {
-        if let Some(t) = st.pressed_at {
-            st.latency_ms = Some(t.elapsed().as_secs_f64() * 1000.0);
-        }
-    }
-
-    let (submit, cancel) = ui.input_mut(|i| {
-        (
-            i.consume_key(Modifiers::NONE, Key::Enter),
-            i.consume_key(Modifiers::NONE, Key::Escape),
-        )
-    });
-    let lost_focus = ui.input(|i| i.viewport().focused == Some(false))
-        && st.pressed_at.is_some_and(|t| t.elapsed() > Duration::from_millis(400));
-
-    let rect = ui.max_rect();
-    ui.painter().rect(
-        rect,
-        CornerRadius::same(12),
-        Color32::from_rgba_unmultiplied(22, 24, 30, 140),
-        Stroke::new(1.0, theme::glass_stroke()),
-        StrokeKind::Inside,
-    );
-
-    let parsed = parse_capture(&st.text);
-    let inner = rect.shrink2(vec2(18.0, 14.0));
-    let mut edit_resp = None;
-    ui.scope_builder(UiBuilder::new().max_rect(inner), |ui| {
-        ui.horizontal_top(|ui| {
-            ui.add_space(2.0);
-            ui.label(RichText::new("\u{E710}").font(theme::icons(16.0)).color(parsed.kind.accent()));
-            ui.add_space(6.0);
-            edit_resp = Some(
-                ui.add(
-                    egui::TextEdit::multiline(&mut st.text)
-                        .hint_text("Запиши мысль…")
-                        .font(FontId::proportional(18.0))
-                        .text_color(TEXT)
-                        .frame(egui::Frame::NONE)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(2),
-                ),
-            );
-        });
-        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(parsed.kind.icon()).font(theme::icons(11.0)).color(parsed.kind.accent()));
-                ui.label(RichText::new(parsed.kind.label()).size(12.0).color(TEXT_DIM));
-                for tag in &parsed.tags {
-                    ui.label(RichText::new(format!("#{tag}")).size(12.0).color(TEXT_MUTED));
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let hint = match st.latency_ms {
-                        Some(l) => format!("Enter — сохранить · Shift+Enter — строка · Esc   ·   {l:.0} мс"),
-                        None => "Enter — сохранить · Shift+Enter — строка · Esc".into(),
-                    };
-                    ui.label(RichText::new(hint).size(11.5).color(TEXT_MUTED));
-                });
-            });
-        });
-    });
-
-    if st.request_focus {
-        if let Some(r) = &edit_resp {
-            r.request_focus();
-        }
-        st.request_focus = false;
-    }
-
-    let mut changed = false;
-    if submit && !st.text.trim().is_empty() {
-        let text = std::mem::take(&mut st.text);
-        st.submitted.push(text);
-        st.visible = false;
-        changed = true;
-    } else if cancel || lost_focus {
-        st.visible = false;
-        changed = true;
-    }
-    if changed {
-        ui.ctx().send_viewport_cmd(ViewportCommand::Visible(false));
-        ui.ctx().request_repaint_of(ViewportId::ROOT);
-    }
-}

@@ -46,6 +46,7 @@ const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 pub enum Event {
     /// Capture hotkey (or tray/menu equivalent) pressed at this instant.
     Capture(Instant),
+    Search(Instant),
     ToggleLayer,
     ShowLayer,
     TogglePinBottom,
@@ -62,6 +63,7 @@ pub struct Shared {
     pub pin_bottom: AtomicBool,
     /// The capture hotkey that could be registered; set once the shell thread is up.
     pub hotkey_label: std::sync::OnceLock<Option<&'static str>>,
+    pub search_hotkey_label: std::sync::OnceLock<Option<&'static str>>,
     hwnd: AtomicIsize,
 }
 
@@ -125,10 +127,28 @@ const CAPTURE_HOTKEYS: &[(&str, HOT_KEY_MODIFIERS, u32)] = &[
     ("Ctrl+Alt+Space", HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_ALT.0), VK_SPACE.0 as u32),
 ];
 
+/// Search: the spec's Ctrl+Space collides with IDE completion, like capture's.
+const SEARCH_HOTKEYS: &[(&str, HOT_KEY_MODIFIERS, u32)] = &[
+    ("Win+Alt+F", HOT_KEY_MODIFIERS(MOD_WIN.0 | MOD_ALT.0), b'F' as u32),
+    ("Ctrl+Alt+F", HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_ALT.0), b'F' as u32),
+];
+/// `WM_HOTKEY` ids: capture candidates use 1.., search candidates 101...
+const SEARCH_ID_BASE: i32 = 101;
+
+/// Registers the first free combination; ids are `base + index`.
+unsafe fn register_first(hwnd: HWND, base: i32, candidates: &[(&'static str, HOT_KEY_MODIFIERS, u32)]) -> Option<&'static str> {
+    candidates
+        .iter()
+        .enumerate()
+        .find(|(i, (_, mods, vk))| unsafe { RegisterHotKey(Some(hwnd), base + *i as i32, *mods | MOD_NOREPEAT, *vk) }.is_ok())
+        .map(|(_, (name, ..))| *name)
+}
+
 struct ThreadState {
     ctx: egui::Context,
     shared: Arc<Shared>,
     hotkey_label: Option<&'static str>,
+    search_hotkey_label: Option<&'static str>,
     taskbar_created: u32,
 }
 
@@ -178,22 +198,22 @@ pub fn spawn(ctx: egui::Context, shared: Arc<Shared>) {
             );
             let Ok(hwnd) = hwnd else {
                 let _ = shared.hotkey_label.set(None);
+                let _ = shared.search_hotkey_label.set(None);
                 return;
             };
             shared.hwnd.store(hwnd.0 as isize, Ordering::Relaxed);
 
-            let hotkey_label = CAPTURE_HOTKEYS
-                .iter()
-                .enumerate()
-                .find(|(i, (_, mods, vk))| RegisterHotKey(Some(hwnd), *i as i32 + 1, *mods | MOD_NOREPEAT, *vk).is_ok())
-                .map(|(_, (name, ..))| *name);
+            let hotkey_label = register_first(hwnd, 1, CAPTURE_HOTKEYS);
+            let search_hotkey_label = register_first(hwnd, SEARCH_ID_BASE, SEARCH_HOTKEYS);
             let _ = shared.hotkey_label.set(hotkey_label);
+            let _ = shared.search_hotkey_label.set(search_hotkey_label);
             ctx.request_repaint();
 
             STATE.set(Some(ThreadState {
                 ctx,
                 shared,
                 hotkey_label,
+                search_hotkey_label,
                 taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
             }));
             add_tray_icon(hwnd);
@@ -209,6 +229,7 @@ pub fn spawn(ctx: egui::Context, shared: Arc<Shared>) {
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
+        WM_HOTKEY if wparam.0 as i32 >= SEARCH_ID_BASE => push(Event::Search(Instant::now())),
         WM_HOTKEY => push(Event::Capture(Instant::now())),
         WM_SHOW_LAYER => push(Event::ShowLayer),
         WM_QUIT_APP => push(Event::Exit),
@@ -239,28 +260,32 @@ unsafe fn tray_menu(hwnd: HWND, pt: POINT) {
     const BOTTOM: usize = 3;
     const AUTOSTART: usize = 4;
     const IMPORT: usize = 5;
+    const SEARCH: usize = 6;
     const EXIT: usize = 9;
 
-    let (visible, bottom, hotkey) = STATE.with_borrow(|s| {
+    let (visible, bottom, hotkey, search_hotkey) = STATE.with_borrow(|s| {
         let s = s.as_ref().unwrap();
         (
             s.shared.layer_visible.load(Ordering::Relaxed),
             s.shared.pin_bottom.load(Ordering::Relaxed),
             s.hotkey_label,
+            s.search_hotkey_label,
         )
     });
+    let with_hotkey = |label: &str, key: Option<&str>| match key {
+        Some(k) => format!("{label}\t{k}"),
+        None => label.to_owned(),
+    };
     // Tens of milliseconds of COM before the menu shows; acceptable on a right click.
     let autostart_on = matches!(autostart::status(), Ok(autostart::Status::On { .. }));
     let check = |on: bool| if on { MF_STRING | MF_CHECKED } else { MF_STRING };
 
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
-        let items: [(_, usize, Option<String>); 8] = [
+        let items: [(_, usize, Option<String>); 9] = [
             (MF_STRING, LAYER, Some(if visible { "Скрыть слой" } else { "Показать слой" }.into())),
-            (MF_STRING, CAPTURE, Some(match hotkey {
-                Some(h) => format!("Записать мысль\t{h}"),
-                None => "Записать мысль".into(),
-            })),
+            (MF_STRING, CAPTURE, Some(with_hotkey("Записать мысль", hotkey))),
+            (MF_STRING, SEARCH, Some(with_hotkey("Найти", search_hotkey))),
             (MF_SEPARATOR, 0, None),
             (check(bottom), BOTTOM, Some("Слой под окнами".into())),
             (check(autostart_on), AUTOSTART, Some("Запускать при входе в Windows".into())),
@@ -289,6 +314,7 @@ unsafe fn tray_menu(hwnd: HWND, pt: POINT) {
         match cmd.0 as usize {
             LAYER => push(Event::ToggleLayer),
             CAPTURE => push(Event::Capture(Instant::now())),
+            SEARCH => push(Event::Search(Instant::now())),
             BOTTOM => push(Event::TogglePinBottom),
             AUTOSTART => {
                 let result = if autostart_on { autostart::disable() } else { autostart::enable() };
