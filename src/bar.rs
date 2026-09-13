@@ -491,7 +491,7 @@ fn search_ui(ui: &mut Ui, st: &mut BarState) -> bool {
 }
 
 /// Text with search markers as a single-line job; matched words get a tinted background.
-fn highlighted(text: &str, size: f32, color: Color32, width: f32) -> LayoutJob {
+pub(crate) fn highlighted(text: &str, size: f32, color: Color32, width: f32) -> LayoutJob {
     let mut job = LayoutJob {
         wrap: TextWrapping { max_width: width, max_rows: 1, break_anywhere: true, overflow_character: Some('…') },
         ..Default::default()
@@ -569,7 +569,7 @@ fn hit_row(ui: &Ui, r: Rect, hit: &Hit, q: &search::Query, selected: bool, hover
     }
 }
 
-fn age(ts: i64) -> String {
+pub(crate) fn age(ts: i64) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
     let days = (now - ts).max(0) / 86_400;
     match days {

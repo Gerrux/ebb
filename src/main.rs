@@ -6,6 +6,7 @@ mod autostart;
 mod bench;
 mod card;
 mod import_ui;
+mod library;
 mod renderer;
 mod search;
 mod shell;

@@ -13,8 +13,8 @@ use std::sync::atomic::Ordering;
 
 use crate::bar::{self, BarState, Mode, Outbox, Press};
 use crate::import_ui::StickyImport;
+use crate::library::{self, LibraryState, Request, Tab};
 use crate::shell::{self, Event};
-use crate::autostart;
 use crate::card::{self, Card, Kind, MIN_SIZE, parse_capture};
 use crate::store::Store;
 use crate::theme::{self, TEXT, TEXT_DIM, TEXT_MUTED};
@@ -25,6 +25,12 @@ const FOOTER_H: f32 = 22.0;
 const REVEAL_FOR: Duration = Duration::from_secs(5);
 const HIGHLIGHT_FOR: Duration = Duration::from_millis(2500);
 const TOAST_FOR: Duration = Duration::from_secs(6);
+
+// Settings keys.
+const SET_MONITOR: &str = "layer.monitor";
+const SET_BACKDROP: &str = "layer.backdrop";
+const SET_TINT: &str = "layer.tint";
+const SET_PIN_BOTTOM: &str = "layer.pin_bottom";
 
 #[derive(Clone, Copy)]
 enum Undo {
@@ -42,30 +48,6 @@ impl Toast {
     fn new(text: impl Into<String>, undo: Option<Undo>) -> Self {
         Self { text: text.into(), undo, at: Instant::now() }
     }
-}
-
-#[derive(Default)]
-enum AutostartUi {
-    #[default]
-    Unknown,
-    Busy,
-    Known(Result<autostart::Status, String>),
-}
-
-/// Runs a Task Scheduler call off the UI thread, then refreshes the shown state.
-fn autostart_job(state: &Arc<Mutex<AutostartUi>>, ctx: &egui::Context, change: Option<bool>) {
-    *state.lock().unwrap() = AutostartUi::Busy;
-    let (state, ctx) = (state.clone(), ctx.clone());
-    std::thread::spawn(move || {
-        let changed = match change {
-            Some(true) => autostart::enable(),
-            Some(false) => autostart::disable(),
-            None => Ok(()),
-        };
-        let result = changed.and_then(|_| autostart::status()).map_err(|e| e.message());
-        *state.lock().unwrap() = AutostartUi::Known(result);
-        ctx.request_repaint();
-    });
 }
 
 enum Action {
@@ -88,8 +70,8 @@ pub struct AmbientApp {
     hwnd: Option<isize>,
     layer_visible: bool,
     backdrop: Backdrop,
-    monitor: usize,
     tint: u8,
+    library: Arc<Mutex<LibraryState>>,
 
     editing: Option<(i64, String)>,
     revealed: Option<(i64, Instant)>,
@@ -100,8 +82,6 @@ pub struct AmbientApp {
     sticky: StickyImport,
 
     show_debug: bool,
-    /// Autostart task state, filled in by a background query when the debug panel opens.
-    autostart: Arc<Mutex<AutostartUi>>,
     autostarted: bool,
     main_started: Instant,
     first_frame: Option<(f64, f64)>,
@@ -119,10 +99,18 @@ impl AmbientApp {
         theme::install(&cc.egui_ctx);
 
         let hwnd = win::hwnd_of(cc);
-        // DWM acrylic turns flat grey when the window is inactive; the accent one stays blurred.
-        let backdrop = Backdrop::AccentAcrylic;
+        // Saved layer settings. DWM acrylic turns flat grey when the window is
+        // inactive; the accent one stays blurred, hence the default.
+        let backdrop = store.setting(SET_BACKDROP).as_deref().and_then(Backdrop::from_key).unwrap_or(Backdrop::AccentAcrylic);
+        let tint = store.setting(SET_TINT).and_then(|v| v.parse().ok()).unwrap_or(70);
+        let pin_bottom = store.setting(SET_PIN_BOTTOM).is_none_or(|v| v != "0");
+        win::PIN_BOTTOM.store(pin_bottom, Ordering::Relaxed);
         if let Some(h) = hwnd {
-            if let Some(m) = win::monitors().first() {
+            let monitors = win::monitors();
+            let saved = store.setting(SET_MONITOR);
+            // The saved monitor if it's still connected, else the first secondary one.
+            let monitor = saved.as_deref().and_then(|d| monitors.iter().find(|m| m.matches_device(d))).or(monitors.first());
+            if let Some(m) = monitor {
                 win::place_on(h, m);
             }
             win::apply_backdrop(h, backdrop, false);
@@ -133,7 +121,7 @@ impl AmbientApp {
 
         let shell = Arc::new(shell::Shared::default());
         shell.layer_visible.store(true, Ordering::Relaxed);
-        shell.pin_bottom.store(win::PIN_BOTTOM.load(Ordering::Relaxed), Ordering::Relaxed);
+        shell.pin_bottom.store(pin_bottom, Ordering::Relaxed);
         shell::spawn(cc.egui_ctx.clone(), shell.clone());
 
         Self {
@@ -144,15 +132,14 @@ impl AmbientApp {
             hwnd,
             layer_visible: true,
             backdrop,
-            monitor: 0,
-            tint: 70,
+            tint,
+            library: Arc::default(),
             editing: None,
             revealed: None,
             highlighted: None,
             toast: None,
             sticky: StickyImport::default(),
             show_debug: false,
-            autostart: Arc::default(),
             autostarted,
             main_started,
             first_frame: None,
@@ -200,13 +187,11 @@ impl AmbientApp {
     }
 
     fn cycle_monitor(&mut self) {
-        let mons = win::monitors();
-        if mons.is_empty() {
-            return;
-        }
-        self.monitor = (self.monitor + 1) % mons.len();
-        if let Some(h) = self.hwnd {
-            win::place_on(h, &mons[self.monitor]);
+        let monitors = win::monitors();
+        let current = self.hwnd.and_then(win::monitor_of).map(|m| m.handle);
+        let idx = monitors.iter().position(|m| Some(m.handle) == current).map_or(0, |i| (i + 1) % monitors.len());
+        if let Some(device) = monitors.get(idx).and_then(|m| m.device_ids.first()).cloned() {
+            self.set_monitor(&device);
         }
     }
 
@@ -325,6 +310,8 @@ impl AmbientApp {
         }
         if let Some(idx) = remove {
             self.cards.remove(idx);
+            self.library.lock().unwrap().invalidate();
+            self.bar.lock().unwrap().invalidate();
         } else if let Some(idx) = to_front {
             if idx + 1 != self.cards.len() {
                 let c = self.cards.remove(idx);
@@ -376,14 +363,14 @@ impl AmbientApp {
             self.toast = None;
             self.reload_cards();
             self.bar.lock().unwrap().invalidate();
+            self.library.lock().unwrap().invalidate();
         }
     }
 
     fn debug_ui(&mut self, ui: &mut Ui) {
         let rect = Rect::from_min_size(ui.max_rect().right_bottom() - vec2(420.0, 300.0), vec2(396.0, 276.0));
         glass_panel(ui, rect, false);
-        let mut backdrop_clicked = false;
-        let mut monitor_clicked = false;
+        let mut settings_clicked = false;
         ui.scope_builder(UiBuilder::new().max_rect(rect.shrink(16.0)), |ui| {
             ui.label(RichText::new("Debug").font(theme::semibold(15.0)).color(TEXT));
             ui.add_space(4.0);
@@ -407,56 +394,98 @@ impl AmbientApp {
             );
             row(ui, "Память: working set / private", format!("{ws:.1} / {private:.1} MiB"));
             row(ui, "Кадров отрисовано", self.frames.to_string());
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Тонировка").size(13.0).color(TEXT_MUTED));
-                ui.add(egui::Slider::new(&mut self.tint, 0..=220).show_value(false));
-            });
-            ui.horizontal(|ui| {
-                backdrop_clicked = ui.button(format!("F2: {}", self.backdrop.label())).clicked();
-            });
-            monitor_clicked = ui.button(format!("F3: монитор {}", self.monitor)).clicked();
-            self.autostart_ui(ui);
+            row(ui, "Фон (F2) / монитор (F3)", self.backdrop.key().to_owned());
+            ui.add_space(4.0);
+            settings_clicked = ui.button("Настройки…").clicked();
         });
-        if backdrop_clicked {
-            self.cycle_backdrop();
-        }
-        if monitor_clicked {
-            self.cycle_monitor();
+        if settings_clicked {
+            self.library.lock().unwrap().open(Tab::Settings);
         }
         ui.ctx().request_repaint_after(Duration::from_secs(1));
     }
 
-    fn autostart_ui(&self, ui: &mut Ui) {
-        let mut state = self.autostart.lock().unwrap();
-        if matches!(*state, AutostartUi::Unknown) {
-            drop(state);
-            autostart_job(&self.autostart, ui.ctx(), None);
-            state = self.autostart.lock().unwrap();
+    fn layer_settings(&self) -> library::LayerSettings {
+        library::LayerSettings {
+            monitor_device: self.hwnd.and_then(win::monitor_of).and_then(|m| m.device_ids.first().cloned()),
+            backdrop: self.backdrop,
+            tint: self.tint,
+            pin_bottom: win::PIN_BOTTOM.load(Ordering::Relaxed),
+            capture_hotkey: self.shell.hotkey_label.get().copied().flatten(),
+            search_hotkey: self.shell.search_hotkey_label.get().copied().flatten(),
         }
-        // (checked, short note, full detail on hover)
-        let (mut on, note, detail) = match &*state {
-            AutostartUi::Unknown | AutostartUi::Busy => (false, Some("…"), None),
-            AutostartUi::Known(Ok(autostart::Status::Off)) => (false, None, None),
-            AutostartUi::Known(Ok(autostart::Status::On { current_exe: true, .. })) => (true, None, None),
-            AutostartUi::Known(Ok(autostart::Status::On { command, .. })) => {
-                (true, Some("другой exe"), Some(command.clone()))
+    }
+
+    fn set_monitor(&mut self, device: &str) {
+        let monitors = win::monitors();
+        if let (Some(m), Some(h)) = (monitors.iter().find(|m| m.matches_device(device)), self.hwnd) {
+            win::place_on(h, m);
+            let _ = self.store.set_setting(SET_MONITOR, device);
+        }
+    }
+
+    fn set_backdrop(&mut self, backdrop: Backdrop) {
+        self.backdrop = backdrop;
+        if let Some(h) = self.hwnd {
+            win::apply_backdrop(h, backdrop, false);
+        }
+        let _ = self.store.set_setting(SET_BACKDROP, backdrop.key());
+    }
+
+    fn set_pin_bottom(&mut self, on: bool) {
+        if let Some(h) = self.hwnd {
+            win::set_pin_bottom(h, on);
+        }
+        self.shell.pin_bottom.store(on, Ordering::Relaxed);
+        let _ = self.store.set_setting(SET_PIN_BOTTOM, if on { "1" } else { "0" });
+    }
+
+    fn apply_library_request(&mut self, ctx: &egui::Context, request: Request) {
+        match request {
+            Request::Open(id) => self.open_card(ctx, id),
+            Request::Changed => {
+                self.reload_cards();
+                self.bar.lock().unwrap().invalidate();
             }
-            AutostartUi::Known(Err(e)) => (false, Some("ошибка"), Some(e.clone())),
+            Request::SetMonitor(device) => self.set_monitor(&device),
+            Request::SetBackdrop(b) => self.set_backdrop(b),
+            Request::SetTint(t) => {
+                self.tint = t;
+                let _ = self.store.set_setting(SET_TINT, &t.to_string());
+                ctx.request_repaint_of(ViewportId::ROOT);
+            }
+            Request::SetPinBottom(on) => self.set_pin_bottom(on),
+            Request::ImportSticky => {
+                self.set_layer_visible(ctx, true);
+                self.sticky.scan(ctx, &self.store, self.hwnd, true);
+            }
+        }
+    }
+
+    fn library_viewport(&self, ui: &Ui) {
+        let (open, placed) = {
+            let lib = self.library.lock().unwrap();
+            (lib.open, lib.placed)
         };
-        let busy = matches!(*state, AutostartUi::Busy | AutostartUi::Unknown);
-        drop(state);
-        ui.horizontal(|ui| {
-            let resp = ui.add_enabled(!busy, egui::Checkbox::new(&mut on, "Запускать при входе в Windows"));
-            if resp.changed() {
-                autostart_job(&self.autostart, ui.ctx(), Some(on));
-            }
-            if let Some(note) = note {
-                let label = ui.label(RichText::new(note).size(11.5).color(TEXT_MUTED));
-                if let Some(detail) = detail {
-                    label.on_hover_text(detail);
-                }
-            }
-        });
+        if !open {
+            // Not shown this frame: egui drops the viewport and eframe destroys the window.
+            return;
+        }
+        let state = self.library.clone();
+        ui.ctx().show_viewport_deferred(
+            library::viewport_id(),
+            ViewportBuilder::default()
+                .with_title("Ambient Library")
+                .with_inner_size(library::SIZE)
+                .with_decorations(false)
+                .with_transparent(true)
+                .with_resizable(false)
+                .with_minimize_button(false)
+                .with_maximize_button(false)
+                .with_taskbar(true)
+                // Hidden until moved onto the cursor's monitor (see logic()).
+                .with_visible(placed),
+            move |ui, _class| library::ui(ui, &state),
+        );
     }
 
     fn shutdown(&mut self) {
@@ -482,10 +511,7 @@ impl AmbientApp {
     }
 
     fn cycle_backdrop(&mut self) {
-        self.backdrop = self.backdrop.next();
-        if let Some(h) = self.hwnd {
-            win::apply_backdrop(h, self.backdrop, false);
-        }
+        self.set_backdrop(self.backdrop.next());
     }
 
     fn bar_viewport(&self, ui: &Ui) {
@@ -554,19 +580,43 @@ impl eframe::App for AmbientApp {
                 Event::Search(t) => pressed = Some((Mode::Search, t)),
                 Event::ToggleLayer => self.set_layer_visible(ctx, !self.layer_visible),
                 Event::ShowLayer => self.set_layer_visible(ctx, true),
-                Event::TogglePinBottom => {
-                    let on = !win::PIN_BOTTOM.load(Ordering::Relaxed);
-                    if let Some(h) = self.hwnd {
-                        win::set_pin_bottom(h, on);
-                    }
-                    self.shell.pin_bottom.store(on, Ordering::Relaxed);
-                }
+                Event::TogglePinBottom => self.set_pin_bottom(!win::PIN_BOTTOM.load(Ordering::Relaxed)),
                 Event::Exit => ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close),
-                Event::ImportSticky => {
-                    self.set_layer_visible(ctx, true);
-                    self.sticky.scan(ctx, &self.store, self.hwnd, true);
+                Event::ImportSticky => self.apply_library_request(ctx, Request::ImportSticky),
+                Event::OpenLibrary(settings) => {
+                    let mut lib = self.library.lock().unwrap();
+                    lib.settings = self.layer_settings();
+                    lib.open(if settings { Tab::Settings } else { Tab::Archive });
+                    ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::Focus);
                 }
             }
+        }
+
+        // Library window: place it once created, apply its requests.
+        let requests = {
+            let mut lib = self.library.lock().unwrap();
+            if lib.open && lib.hwnd.is_none() {
+                lib.hwnd = win::find_library_window();
+                if let Some(h) = lib.hwnd {
+                    let scale = win::dpi_scale(h);
+                    win::center_near_cursor(h, (library::SIZE.x * scale) as i32, (library::SIZE.y * scale) as i32);
+                    win::apply_backdrop(h, Backdrop::AccentAcrylic, true);
+                    win::install_window_rules(h, 0);
+                    lib.placed = true;
+                    ctx.request_repaint();
+                }
+            }
+            if !lib.open && lib.hwnd.take().is_some() {
+                // Just closed: the window and its surface are gone; drop their pages.
+                std::thread::spawn(|| {
+                    std::thread::sleep(Duration::from_millis(800));
+                    win::trim_working_set();
+                });
+            }
+            std::mem::take(&mut lib.outbox)
+        };
+        for request in requests {
+            self.apply_library_request(ctx, request);
         }
 
         let mut bar = self.bar.lock().unwrap();
@@ -608,11 +658,15 @@ impl eframe::App for AmbientApp {
                     self.open_card(ctx, id);
                     changed = true;
                 }
-                Outbox::Changed => self.reload_cards(),
+                Outbox::Changed => {
+                    self.reload_cards();
+                    changed = true;
+                }
             }
         }
         if changed {
             self.bar.lock().unwrap().invalidate();
+            self.library.lock().unwrap().invalidate();
         }
     }
 
@@ -688,6 +742,7 @@ impl eframe::App for AmbientApp {
         // Created up front even while hidden: creating it on the first hotkey press
         // saves ~4 MiB but doubles the first-show latency and flashes without acrylic.
         self.bar_viewport(ui);
+        self.library_viewport(ui);
     }
 
     #[cfg(feature = "glow")]

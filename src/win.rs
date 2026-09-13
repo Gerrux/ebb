@@ -43,6 +43,10 @@ pub fn find_capture_window() -> Option<isize> {
     find_window(w!("Ambient Capture"))
 }
 
+pub fn find_library_window() -> Option<isize> {
+    find_window(w!("Ambient Library"))
+}
+
 fn hwnd(raw: isize) -> HWND {
     HWND(raw as *mut c_void)
 }
@@ -63,19 +67,35 @@ pub enum Backdrop {
 }
 
 impl Backdrop {
+    pub const ALL: [Backdrop; 3] = [Backdrop::AccentAcrylic, Backdrop::DwmAcrylic, Backdrop::Off];
+
+    /// Stable name for settings.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::DwmAcrylic => "dwm",
+            Self::AccentAcrylic => "accent",
+            Self::Off => "off",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|b| b.key() == key)
+    }
+
+    /// For the settings UI.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::AccentAcrylic => "Размытие фона",
+            Self::DwmAcrylic => "Размытие Windows (серое, когда слой неактивен)",
+            Self::Off => "Без размытия",
+        }
+    }
+
     pub fn next(self) -> Self {
         match self {
             Self::DwmAcrylic => Self::AccentAcrylic,
             Self::AccentAcrylic => Self::Off,
             Self::Off => Self::DwmAcrylic,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::DwmAcrylic => "DWM acrylic (DWMSBT_TRANSIENTWINDOW)",
-            Self::AccentAcrylic => "Accent acrylic (SetWindowCompositionAttribute)",
-            Self::Off => "off",
         }
     }
 }
@@ -263,6 +283,22 @@ pub fn dpi_scale(raw: isize) -> f32 {
 }
 
 /// Center a window horizontally in the upper third of the monitor under the cursor.
+/// Center a window of the given size on the work area of the monitor under the cursor.
+pub fn center_near_cursor(raw: isize, width_px: i32, height_px: i32) {
+    unsafe {
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if !GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mut info).as_bool() {
+            return;
+        }
+        let r = info.rcWork;
+        let x = r.left + ((r.right - r.left) - width_px) / 2;
+        let y = r.top + ((r.bottom - r.top) - height_px) / 2;
+        let _ = SetWindowPos(hwnd(raw), None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
 pub fn move_near_cursor(raw: isize, width_px: i32) {
     unsafe {
         let mut pt = POINT::default();

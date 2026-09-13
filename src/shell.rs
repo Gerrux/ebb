@@ -60,6 +60,8 @@ pub enum Event {
     ShowLayer,
     TogglePinBottom,
     ImportSticky,
+    /// Open the library window; `true` = on the settings tab.
+    OpenLibrary(bool),
     Exit,
 }
 
@@ -142,8 +144,11 @@ const SEARCH_HOTKEYS: &[(&str, HOT_KEY_MODIFIERS, u32)] = &[
     ("Win+Alt+F", HOT_KEY_MODIFIERS(MOD_WIN.0 | MOD_ALT.0), b'F' as u32),
     ("Ctrl+Alt+F", HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_ALT.0), b'F' as u32),
 ];
-/// `WM_HOTKEY` ids: capture candidates use 1.., search candidates 101...
+/// Library (archive, trash, settings).
+const LIBRARY_HOTKEYS: &[(&str, HOT_KEY_MODIFIERS, u32)] = &[("Win+Alt+L", HOT_KEY_MODIFIERS(MOD_WIN.0 | MOD_ALT.0), b'L' as u32)];
+/// `WM_HOTKEY` ids: capture candidates use 1.., search 101.., library 201...
 const SEARCH_ID_BASE: i32 = 101;
+const LIBRARY_ID_BASE: i32 = 201;
 
 /// Registers the first free combination; ids are `base + index`.
 unsafe fn register_first(hwnd: HWND, base: i32, candidates: &[(&'static str, HOT_KEY_MODIFIERS, u32)]) -> Option<&'static str> {
@@ -215,6 +220,7 @@ pub fn spawn(ctx: egui::Context, shared: Arc<Shared>) {
 
             let hotkey_label = register_first(hwnd, 1, CAPTURE_HOTKEYS);
             let search_hotkey_label = register_first(hwnd, SEARCH_ID_BASE, SEARCH_HOTKEYS);
+            let _ = register_first(hwnd, LIBRARY_ID_BASE, LIBRARY_HOTKEYS);
             let _ = shared.hotkey_label.set(hotkey_label);
             let _ = shared.search_hotkey_label.set(search_hotkey_label);
             ctx.request_repaint();
@@ -239,6 +245,7 @@ pub fn spawn(ctx: egui::Context, shared: Arc<Shared>) {
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
+        WM_HOTKEY if wparam.0 as i32 >= LIBRARY_ID_BASE => push(Event::OpenLibrary(false)),
         WM_HOTKEY if wparam.0 as i32 >= SEARCH_ID_BASE => push(Event::Search(Instant::now())),
         WM_HOTKEY => push(Event::Capture(Instant::now())),
         WM_SHOW_LAYER => push(Event::ShowLayer),
@@ -271,6 +278,8 @@ unsafe fn tray_menu(hwnd: HWND, pt: POINT) {
     const AUTOSTART: usize = 4;
     const IMPORT: usize = 5;
     const SEARCH: usize = 6;
+    const LIBRARY: usize = 7;
+    const SETTINGS: usize = 8;
     const EXIT: usize = 9;
 
     let (visible, bottom, hotkey, search_hotkey) = STATE.with_borrow(|s| {
@@ -292,14 +301,16 @@ unsafe fn tray_menu(hwnd: HWND, pt: POINT) {
 
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
-        let items: [(_, usize, Option<String>); 9] = [
+        let items: [(_, usize, Option<String>); 11] = [
             (MF_STRING, LAYER, Some(if visible { "Скрыть слой" } else { "Показать слой" }.into())),
             (MF_STRING, CAPTURE, Some(with_hotkey("Записать мысль", hotkey))),
             (MF_STRING, SEARCH, Some(with_hotkey("Найти", search_hotkey))),
+            (MF_STRING, LIBRARY, Some(with_hotkey("Архив и корзина…", Some("Win+Alt+L")))),
             (MF_SEPARATOR, 0, None),
             (check(bottom), BOTTOM, Some("Слой под окнами".into())),
             (check(autostart_on), AUTOSTART, Some("Запускать при входе в Windows".into())),
             (MF_STRING, IMPORT, Some("Импорт из Sticky Notes…".into())),
+            (MF_STRING, SETTINGS, Some("Настройки…".into())),
             (MF_SEPARATOR, 0, None),
             (MF_STRING, EXIT, Some("Выход".into())),
         ];
@@ -333,6 +344,8 @@ unsafe fn tray_menu(hwnd: HWND, pt: POINT) {
                 }
             }
             IMPORT => push(Event::ImportSticky),
+            LIBRARY => push(Event::OpenLibrary(false)),
+            SETTINGS => push(Event::OpenLibrary(true)),
             EXIT => push(Event::Exit),
             _ => {}
         }
