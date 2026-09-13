@@ -22,7 +22,7 @@ use windows::Win32::UI::Shell::{
     NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW,
+    AllowSetForegroundWindow, AppendMenuW, GetWindowThreadProcessId, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW,
     FindWindowW, GetMessageW, HICON, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW,
     RegisterClassExW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_NONOTIFY,
     TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_HOTKEY, WM_NULL,
@@ -54,7 +54,10 @@ pub enum Event {
     Capture(Instant),
     Search(Instant),
     ToggleLayer,
-    ShowLayer,
+    /// Left click on the tray icon: summon the layer over the windows, or dismiss it.
+    TrayClick,
+    /// Ebb was started again (a shortcut) while running.
+    Launched,
     TogglePinBottom,
     ImportSticky,
     /// Open the library window; `true` = on the settings tab.
@@ -117,6 +120,13 @@ pub fn send_to_existing(request: Request) -> bool {
     };
     for _ in 0..40 {
         if let Ok(hwnd) = unsafe { FindWindowW(PCWSTR(class_name().as_ptr()), PCWSTR::null()) } {
+            unsafe {
+                // A process the user just started may take the foreground; pass that
+                // right on, or the running instance can't bring its windows up.
+                let mut pid = 0;
+                GetWindowThreadProcessId(hwnd, Some(&mut pid));
+                let _ = AllowSetForegroundWindow(pid);
+            }
             return unsafe { PostMessageW(Some(hwnd), msg, WPARAM(0), LPARAM(0)) }.is_ok();
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -245,10 +255,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_HOTKEY if wparam.0 as i32 >= LIBRARY_ID_BASE => push(Event::OpenLibrary(false)),
         WM_HOTKEY if wparam.0 as i32 >= SEARCH_ID_BASE => push(Event::Search(Instant::now())),
         WM_HOTKEY => push(Event::Capture(Instant::now())),
-        WM_SHOW_LAYER => push(Event::ShowLayer),
+        WM_SHOW_LAYER => push(Event::Launched),
         WM_QUIT_APP => push(Event::Exit),
         WM_TRAY => match (lparam.0 & 0xFFFF) as u32 {
-            NIN_SELECT | NIN_KEYSELECT => push(Event::ToggleLayer),
+            NIN_SELECT | NIN_KEYSELECT => push(Event::TrayClick),
             WM_CONTEXTMENU => {
                 // Version 4: the anchor point comes in wparam (screen coordinates).
                 let pt = POINT { x: (wparam.0 & 0xFFFF) as i16 as i32, y: ((wparam.0 >> 16) & 0xFFFF) as i16 as i32 };

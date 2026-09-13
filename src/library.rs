@@ -21,6 +21,7 @@ use crate::theme::{self, TEXT, TEXT_DIM, TEXT_MUTED};
 use crate::win::{self, Backdrop};
 
 pub const SIZE: Vec2 = vec2(800.0, 600.0);
+pub const SETTINGS_SIZE: Vec2 = vec2(600.0, 680.0);
 const ROW_H: f32 = 58.0;
 const HEADER_H: f32 = 52.0;
 const RESULTS: usize = 200;
@@ -46,6 +47,11 @@ pub struct LayerSettings {
     pub pin_bottom: bool,
     pub capture_hotkey: Option<&'static str>,
     pub search_hotkey: Option<&'static str>,
+    /// Esc / tray click on a summoned layer hides it instead of sending it back.
+    pub dismiss_hides: bool,
+    pub settings_on_launch: bool,
+    /// Cards stick to each other's edges while dragged.
+    pub snap: bool,
 }
 
 impl Default for LayerSettings {
@@ -57,6 +63,9 @@ impl Default for LayerSettings {
             pin_bottom: true,
             capture_hotkey: None,
             search_hotkey: None,
+            dismiss_hides: false,
+            settings_on_launch: true,
+            snap: true,
         }
     }
 }
@@ -71,6 +80,9 @@ pub enum Request {
     SetBackdrop(Backdrop),
     SetTint(u8),
     SetPinBottom(bool),
+    SetDismissHides(bool),
+    SetSettingsOnLaunch(bool),
+    SetSnap(bool),
     ImportSticky,
 }
 
@@ -95,6 +107,10 @@ pub struct LibraryState {
     pub placed: bool,
     pub hwnd: Option<isize>,
     pub tab: Tab,
+    /// Opened as the settings window: no archive and trash tabs.
+    pub settings_only: bool,
+    /// First run: the settings window greets the user.
+    pub welcome: bool,
     pub settings: LayerSettings,
     pub outbox: Vec<Request>,
 
@@ -123,12 +139,18 @@ impl LibraryState {
         }
         self.open = true;
         self.tab = tab;
+        self.settings_only = tab == Tab::Settings;
         self.searched = None;
         self.request_focus = true;
     }
 
+    pub fn size(&self) -> Vec2 {
+        if self.settings_only { SETTINGS_SIZE } else { SIZE }
+    }
+
     fn close(&mut self) {
         self.open = false;
+        self.welcome = false;
         // Drop the connection and results with the window.
         self.store = None;
         self.hits = Vec::new();
@@ -163,7 +185,7 @@ pub fn ui(ui: &mut Ui, state: &Mutex<LibraryState>) {
         return;
     }
     let (close_requested, esc) = ui.input(|i| (i.viewport().close_requested(), i.key_pressed(Key::Escape)));
-    let next_tab = ui.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Tab));
+    let next_tab = !st.settings_only && ui.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Tab));
     if next_tab {
         st.tab = match st.tab {
             Tab::Archive => Tab::Trash,
@@ -221,14 +243,24 @@ fn header(ui: &mut Ui, st: &mut LibraryState) -> bool {
 
     let mut close = false;
     ui.scope_builder(UiBuilder::new().max_rect(bar.shrink2(vec2(20.0, 10.0))).layout(Layout::left_to_right(Align::Center)), |ui| {
-        ui.label(RichText::new("Библиотека").font(theme::semibold(17.0)).color(TEXT));
+        let title = match (st.settings_only, st.welcome) {
+            (false, _) => "Библиотека",
+            (true, false) => "Настройки Ebb",
+            (true, true) => "Добро пожаловать в Ebb",
+        };
+        ui.label(RichText::new(title).font(theme::semibold(17.0)).color(TEXT));
         ui.add_space(18.0);
         let (_, archived, trashed) = st.counts;
-        for (tab, label) in [
-            (Tab::Archive, format!("Архив {archived}")),
-            (Tab::Trash, format!("Корзина {trashed}")),
-            (Tab::Settings, "Настройки".to_owned()),
-        ] {
+        let tabs = if st.settings_only {
+            Vec::new()
+        } else {
+            vec![
+                (Tab::Archive, format!("Архив {archived}")),
+                (Tab::Trash, format!("Корзина {trashed}")),
+                (Tab::Settings, "Настройки".to_owned()),
+            ]
+        };
+        for (tab, label) in tabs {
             let on = st.tab == tab;
             let galley = ui.painter().layout_no_wrap(label.clone(), FontId::proportional(14.0), TEXT);
             let (r, resp) = ui.allocate_exact_size(galley.size() + vec2(20.0, 12.0), Sense::click());
@@ -564,6 +596,49 @@ fn note(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).size(12.0).color(TEXT_MUTED));
 }
 
+/// The monitors as Windows arranges them, to scale; returns the clicked one's
+/// device id when it isn't the current monitor.
+fn monitor_map(ui: &mut Ui, monitors: &[win::Monitor], current: Option<&str>) -> Option<String> {
+    let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), 150.0), Sense::hover());
+    let first = monitors.first()?;
+    let (mut l, mut t, mut r, mut b) = (first.rect.left, first.rect.top, first.rect.right, first.rect.bottom);
+    for m in monitors {
+        (l, t, r, b) = (l.min(m.rect.left), t.min(m.rect.top), r.max(m.rect.right), b.max(m.rect.bottom));
+    }
+    let (w, h) = ((r - l).max(1) as f32, (b - t).max(1) as f32);
+    let scale = ((area.width() - 8.0) / w).min((area.height() - 8.0) / h);
+    let offset = area.center() - vec2(w, h) * scale / 2.0;
+
+    let mut chosen = None;
+    for (i, m) in monitors.iter().enumerate() {
+        let min = offset + vec2((m.rect.left - l) as f32, (m.rect.top - t) as f32) * scale;
+        let max = offset + vec2((m.rect.right - l) as f32, (m.rect.bottom - t) as f32) * scale;
+        let rect = Rect::from_min_max(min, max).shrink(3.0);
+        let (pw, ph) = (m.rect.right - m.rect.left, m.rect.bottom - m.rect.top);
+        let name = format!("Монитор {}", i + 1);
+        let on = current.is_some_and(|d| m.matches_device(d));
+        let resp = ui.interact(rect, Id::new(("monitor", i)), Sense::click());
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, &name));
+        let accent = Color32::from_rgb(96, 165, 250);
+        let fill = match (on, resp.hovered()) {
+            (true, _) => accent.gamma_multiply(0.35),
+            (false, true) => Color32::from_white_alpha(26),
+            (false, false) => Color32::from_white_alpha(10),
+        };
+        let stroke = if on { Stroke::new(2.0, accent) } else { Stroke::new(1.0, theme::glass_stroke()) };
+        let painter = ui.painter();
+        painter.rect(rect, CornerRadius::same(6), fill, stroke, StrokeKind::Inside);
+        let color = if on { TEXT } else { TEXT_DIM };
+        painter.text(rect.center() - vec2(0.0, 8.0), Align2::CENTER_CENTER, (i + 1).to_string(), theme::semibold(20.0), color);
+        let detail = format!("{pw}×{ph}{}", if m.primary { " · основной" } else { "" });
+        painter.text(rect.center() + vec2(0.0, 13.0), Align2::CENTER_CENTER, detail, FontId::proportional(11.5), TEXT_MUTED);
+        if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() && !on {
+            chosen = m.device_ids.first().cloned();
+        }
+    }
+    chosen
+}
+
 fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
     if st.store.is_none() {
         st.store = Store::open().ok();
@@ -574,7 +649,52 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 6.0;
 
+        if st.welcome {
+            ui.label(
+                RichText::new("Ebb кладёт заметки на отдельный экран — под окнами, как обои. Выберите, где им лежать; остальное можно не трогать.")
+                    .size(13.5)
+                    .color(TEXT_DIM),
+            );
+            note(ui, "Настройки всегда открываются из меню значка Ebb в трее.");
+        }
+
+        section(ui, "Экран слоя");
+        if let Some(device) = monitor_map(ui, &st.monitors, st.settings.monitor_device.as_deref()) {
+            st.settings.monitor_device = Some(device.clone());
+            st.outbox.push(Request::SetMonitor(device));
+        }
+        note(ui, "Кликните по монитору — слой переедет туда сразу.");
+
+        section(ui, "Слой");
+        let mut pin = st.settings.pin_bottom;
+        if ui.checkbox(&mut pin, "Держать слой под окнами").changed() {
+            st.settings.pin_bottom = pin;
+            st.outbox.push(Request::SetPinBottom(pin));
+        }
+        note(ui, "Клик по значку в трее поднимает слой поверх всех окон; Esc, повторный клик или переход в другое окно возвращают его.");
+        ui.label(RichText::new("Esc и повторный клик в трее").size(13.0).color(TEXT_DIM));
+        let mut hides = st.settings.dismiss_hides;
+        let a = ui.radio_value(&mut hides, false, "Убрать слой на фон");
+        let b = ui.radio_value(&mut hides, true, "Скрыть слой");
+        if (a.changed() || b.changed()) && hides != st.settings.dismiss_hides {
+            st.settings.dismiss_hides = hides;
+            st.outbox.push(Request::SetDismissHides(hides));
+        }
+
+        section(ui, "Карточки");
+        let mut snap = st.settings.snap;
+        if ui.checkbox(&mut snap, "Магнит: прилипать к краям соседних карточек").changed() {
+            st.settings.snap = snap;
+            st.outbox.push(Request::SetSnap(snap));
+        }
+        note(ui, "Удерживайте Alt при перетаскивании, чтобы поставить карточку свободно.");
+
         section(ui, "Запуск");
+        let mut on_launch = st.settings.settings_on_launch;
+        if ui.checkbox(&mut on_launch, "Открывать это окно при запуске Ebb из ярлыка").changed() {
+            st.settings.settings_on_launch = on_launch;
+            st.outbox.push(Request::SetSettingsOnLaunch(on_launch));
+        }
         {
             let mut state = st.autostart.lock().unwrap();
             if matches!(*state, AutostartUi::Unknown) {
@@ -600,31 +720,7 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
             }
         }
 
-        section(ui, "Слой");
-        ui.label(RichText::new("Монитор").size(13.0).color(TEXT_DIM));
-        let current = st.settings.monitor_device.clone();
-        let mut chosen = None;
-        for (i, m) in st.monitors.iter().enumerate() {
-            let (w, h) = (m.rect.right - m.rect.left, m.rect.bottom - m.rect.top);
-            let label = format!("Монитор {} — {w}×{h}{}", i + 1, if m.primary { ", основной" } else { "" });
-            let on = current.as_deref().is_some_and(|d| m.matches_device(d));
-            if ui.radio(on, label).clicked() && !on {
-                chosen = m.device_ids.first().cloned();
-            }
-        }
-        if let Some(device) = chosen {
-            st.settings.monitor_device = Some(device.clone());
-            st.outbox.push(Request::SetMonitor(device));
-        }
-
-        let mut pin = st.settings.pin_bottom;
-        if ui.checkbox(&mut pin, "Слой под окнами").changed() {
-            st.settings.pin_bottom = pin;
-            st.outbox.push(Request::SetPinBottom(pin));
-        }
-        note(ui, "Клик по карточке не поднимает слой поверх других окон.");
-
-        ui.add_space(4.0);
+        section(ui, "Внешний вид");
         ui.label(RichText::new("Фон").size(13.0).color(TEXT_DIM));
         for backdrop in Backdrop::ALL {
             if ui.radio(st.settings.backdrop == backdrop, backdrop.title()).clicked() && st.settings.backdrop != backdrop {

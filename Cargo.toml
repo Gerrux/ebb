@@ -1,6 +1,6 @@
 [package]
 name = "ebb"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Notes that ebb away and come back: a calm second-screen layer for Windows"
 repository = "https://github.com/Gerrux/ebb"

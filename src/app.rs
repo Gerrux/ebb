@@ -15,7 +15,7 @@ use crate::bar::{self, BarState, Mode, Outbox, Press};
 use crate::import_ui::StickyImport;
 use crate::library::{self, LibraryState, Request, Tab};
 use crate::shell::{self, Event};
-use crate::card::{self, Card, Kind, MIN_SIZE, parse_capture};
+use crate::card::{self, Card, Kind, MIN_SIZE, Sides, parse_capture};
 use crate::store::Store;
 use crate::theme::{self, TEXT, TEXT_DIM, TEXT_MUTED};
 use crate::win::{self, Backdrop};
@@ -25,6 +25,8 @@ const FOOTER_H: f32 = 22.0;
 const REVEAL_FOR: Duration = Duration::from_secs(5);
 const HIGHLIGHT_FOR: Duration = Duration::from_millis(2500);
 const TOAST_FOR: Duration = Duration::from_secs(6);
+/// How long the copy button shows its check mark.
+const COPIED_FOR: Duration = Duration::from_millis(1500);
 const LAYER_FADE_IN: Duration = Duration::from_millis(220);
 const CARD_APPEAR: Duration = Duration::from_millis(220);
 const CARD_LEAVE: Duration = Duration::from_millis(160);
@@ -42,6 +44,14 @@ const SET_MONITOR: &str = "layer.monitor";
 const SET_BACKDROP: &str = "layer.backdrop";
 const SET_TINT: &str = "layer.tint";
 const SET_PIN_BOTTOM: &str = "layer.pin_bottom";
+/// "hide" or "back": what Esc / a second tray click does to a summoned layer.
+const SET_DISMISS: &str = "layer.dismiss";
+const SET_SETTINGS_ON_LAUNCH: &str = "app.settings_on_launch";
+const SET_ONBOARDED: &str = "app.onboarded";
+const SET_SNAP: &str = "cards.snap";
+/// A tray click this soon after another app took the focus from a summoned layer
+/// (the taskbar does, on mouse down) counts as a click on the summoned layer.
+const TRAY_CLICK_AFTER_LOWER_MS: u64 = 500;
 
 #[derive(Clone, Copy)]
 enum Undo {
@@ -61,11 +71,23 @@ impl Toast {
     }
 }
 
+#[derive(Clone, Copy)]
+enum MenuItem {
+    Capture,
+    Search,
+    Library,
+    Import,
+    Settings,
+    Dismiss,
+    Exit,
+}
+
 enum Action {
     Front,
     Moved,
     TogglePin,
     Copy,
+    Duplicate,
     Archive,
     Delete,
     StartEdit,
@@ -85,9 +107,16 @@ pub struct EbbApp {
     layer_visible: bool,
     backdrop: Backdrop,
     tint: u8,
+    dismiss_hides: bool,
+    settings_on_launch: bool,
+    snap: bool,
+    /// Started by the user (not at logon): bring the layer up, maybe open settings.
+    manual_start: bool,
     library: Arc<Mutex<LibraryState>>,
 
     editing: Option<(i64, String)>,
+    /// Last card clicked or dragged: shows its details until something else is clicked.
+    active: Option<i64>,
     revealed: Option<(i64, Instant)>,
     /// Card just opened from search: outlined for a moment.
     highlighted: Option<(i64, Instant)>,
@@ -122,6 +151,12 @@ impl EbbApp {
         let tint = store.setting(SET_TINT).and_then(|v| v.parse().ok()).unwrap_or(70);
         let pin_bottom = store.setting(SET_PIN_BOTTOM).is_none_or(|v| v != "0");
         win::PIN_BOTTOM.store(pin_bottom, Ordering::Relaxed);
+        let dismiss_hides = store.setting(SET_DISMISS).is_some_and(|v| v == "hide");
+        let settings_on_launch = store.setting(SET_SETTINGS_ON_LAUNCH).is_none_or(|v| v != "0");
+        let snap = store.setting(SET_SNAP).is_none_or(|v| v != "0");
+        let manual_start = !autostarted && crate::bench::path().is_none();
+        // Launched from a shortcut: shown over the windows, not under them.
+        win::RAISED.store(manual_start, Ordering::Relaxed);
         if let Some(h) = hwnd {
             let monitors = win::monitors();
             let saved = store.setting(SET_MONITOR);
@@ -154,8 +189,13 @@ impl EbbApp {
             layer_visible: true,
             backdrop,
             tint,
+            dismiss_hides,
+            settings_on_launch,
+            snap,
+            manual_start,
             library: Arc::default(),
             editing: None,
+            active: None,
             revealed: None,
             highlighted: None,
             toast: None,
@@ -248,9 +288,69 @@ impl EbbApp {
         );
     }
 
+    /// "⋯" in the top right corner of the layer: what the tray menu offers, without the tray.
+    fn menu_ui(&mut self, ui: &mut Ui) {
+        let full = ui.max_rect();
+        let rect = Rect::from_min_size(pos2(full.right() - 32.0 - 40.0, full.top() + 16.0), vec2(40.0, 36.0));
+        let button = ui.interact(rect, Id::new("layer-menu"), Sense::click());
+        button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Меню"));
+        let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&button));
+        let fill = if open || button.hovered() { theme::glass_fill_hover() } else { theme::glass_fill() };
+        ui.painter().rect(rect, CornerRadius::same(10), fill, Stroke::new(1.0, theme::glass_stroke()), StrokeKind::Inside);
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, "\u{E712}", theme::icons(16.0), if open { TEXT } else { TEXT_DIM });
+        let button = button.on_hover_cursor(CursorIcon::PointingHand);
+
+        let hotkey = |l: &std::sync::OnceLock<Option<&'static str>>| l.get().copied().flatten().unwrap_or("");
+        let (capture_key, search_key) = (hotkey(&self.shell.hotkey_label), hotkey(&self.shell.search_hotkey_label));
+        let dismiss_label = if self.dismiss_hides { "Скрыть слой" } else { "Убрать на фон" };
+        let mut chosen = None;
+        egui::Popup::menu(&button)
+            .align(egui::RectAlign::BOTTOM_END)
+            .gap(6.0)
+            .width(250.0)
+            .show(|ui| {
+                ui.spacing_mut().button_padding = vec2(10.0, 6.0);
+                let mut item = |ui: &mut Ui, label: &str, key: &str, event: MenuItem| {
+                    let button = egui::Button::new(RichText::new(label).size(14.0)).shortcut_text(RichText::new(key).size(12.5));
+                    if ui.add(button.min_size(vec2(ui.available_width(), 0.0))).clicked() {
+                        chosen = Some(event);
+                    }
+                };
+                item(ui, "Записать мысль", capture_key, MenuItem::Capture);
+                item(ui, "Найти", search_key, MenuItem::Search);
+                item(ui, "Архив и корзина", "Win+Alt+L", MenuItem::Library);
+                ui.separator();
+                item(ui, "Импорт из Sticky Notes…", "", MenuItem::Import);
+                item(ui, "Настройки…", "", MenuItem::Settings);
+                ui.separator();
+                item(ui, dismiss_label, "Esc", MenuItem::Dismiss);
+                item(ui, "Выход", "", MenuItem::Exit);
+            });
+
+        let Some(chosen) = chosen else { return };
+        let event = match chosen {
+            MenuItem::Capture => Event::Capture(Instant::now()),
+            MenuItem::Search => Event::Search(Instant::now()),
+            MenuItem::Library => Event::OpenLibrary(false),
+            MenuItem::Import => Event::ImportSticky,
+            MenuItem::Settings => Event::OpenLibrary(true),
+            MenuItem::Exit => Event::Exit,
+            MenuItem::Dismiss => {
+                self.dismiss(ui.ctx());
+                return;
+            }
+        };
+        // Handled in logic() like the tray's, on the next pass.
+        self.shell.events.lock().unwrap().push(event);
+        ui.ctx().request_repaint();
+    }
+
     fn cards_ui(&mut self, ui: &mut Ui) {
         let origin = ui.max_rect().min;
-        let pointer = ui.input(|i| i.pointer.hover_pos());
+        // Not over a card while it's over the menu or another popup above the layer.
+        let pointer = ui
+            .input(|i| i.pointer.hover_pos())
+            .filter(|&p| ui.ctx().layer_id_at(p).is_none_or(|l| l.order == egui::Order::Background));
         let hovered_id = pointer.and_then(|p| {
             self.cards
                 .iter()
@@ -276,6 +376,9 @@ impl EbbApp {
             ui.ctx().request_repaint();
         }
 
+        // Where cards are (layer coordinates), for the magnet; None with it off.
+        let rects: Vec<(i64, Rect)> = self.cards.iter().map(|c| (c.id, Rect::from_min_size(c.pos, c.size))).collect();
+        let magnet = self.snap.then_some(rects.as_slice());
         let mut actions: Vec<(usize, Action)> = Vec::new();
         for idx in 0..self.cards.len() {
             let id = self.cards[idx].id;
@@ -286,12 +389,13 @@ impl EbbApp {
                 .iter()
                 .find(|(aid, _)| *aid == id)
                 .map_or(1.0, |(_, at)| ease(at.elapsed().as_secs_f32() / CARD_APPEAR.as_secs_f32()));
+            let active = self.active == Some(id) || self.highlighted.is_some_and(|(hid, _)| hid == id);
             let card = &mut self.cards[idx];
             let hovered = hovered_id == Some(id);
             let produced = ui
                 .scope(|ui| {
                     ui.multiply_opacity(appear);
-                    card_ui(ui, origin + vec2(0.0, (1.0 - appear) * 10.0), area, card, hovered, editing, revealed)
+                    card_ui(ui, origin + vec2(0.0, (1.0 - appear) * 10.0), area, card, hovered, editing, revealed, active, magnet)
                 })
                 .inner;
             for a in produced {
@@ -303,7 +407,7 @@ impl EbbApp {
             ui.scope(|ui| {
                 ui.disable();
                 ui.multiply_opacity(1.0 - t);
-                let _ = card_ui(ui, origin + vec2(0.0, t * 6.0), area, card, false, None, false);
+                let _ = card_ui(ui, origin + vec2(0.0, t * 6.0), area, card, false, None, false, false, None);
             });
         }
 
@@ -320,16 +424,20 @@ impl EbbApp {
             }
         }
 
-        // Clicking empty space ends editing.
-        if self.editing.is_some() && hovered_id.is_none() && ui.input(|i| i.pointer.any_pressed()) {
+        // Clicking empty space ends editing and deselects.
+        if hovered_id.is_none() && ui.input(|i| i.pointer.any_pressed()) {
             self.commit_edit();
+            self.active = None;
         }
 
         let mut to_front = None;
         let mut remove = None;
         for (idx, action) in actions {
             match action {
-                Action::Front => to_front = Some(idx),
+                Action::Front => {
+                    to_front = Some(idx);
+                    self.active = Some(self.cards[idx].id);
+                }
                 Action::Moved => self.save(idx),
                 Action::TogglePin => {
                     self.cards[idx].pinned ^= true;
@@ -339,6 +447,22 @@ impl EbbApp {
                     let c = &self.cards[idx];
                     let text = if c.title.is_empty() { c.body.clone() } else { format!("{}\n{}", c.title, c.body) };
                     ui.ctx().copy_text(text);
+                }
+                Action::Duplicate => {
+                    let src = self.cards[idx].clone();
+                    let pos = card::beside(&self.cards, &src, area);
+                    let parsed = card::Parsed { kind: src.kind, title: src.title, body: src.body, tags: src.tags };
+                    match self.store.insert(&parsed, pos) {
+                        Ok(mut copy) => {
+                            copy.size = src.size;
+                            self.appearing.push((copy.id, Instant::now()));
+                            self.cards.push(copy);
+                            self.save(self.cards.len() - 1);
+                            self.library.lock().unwrap().invalidate();
+                            self.bar.lock().unwrap().invalidate();
+                        }
+                        Err(e) => eprintln!("duplicate failed: {e}"),
+                    }
                 }
                 Action::Archive => {
                     self.cards[idx].archived = true;
@@ -479,7 +603,66 @@ impl EbbApp {
             pin_bottom: win::PIN_BOTTOM.load(Ordering::Relaxed),
             capture_hotkey: self.shell.hotkey_label.get().copied().flatten(),
             search_hotkey: self.shell.search_hotkey_label.get().copied().flatten(),
+            dismiss_hides: self.dismiss_hides,
+            settings_on_launch: self.settings_on_launch,
+            snap: self.snap,
         }
+    }
+
+    /// Opens the settings window; `welcome` on the first run.
+    fn open_settings(&mut self, ctx: &egui::Context, welcome: bool) {
+        let mut lib = self.library.lock().unwrap();
+        lib.settings = self.layer_settings();
+        lib.open(Tab::Settings);
+        lib.welcome |= welcome;
+        ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::InnerSize(lib.size()));
+        ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::Focus);
+        ctx.request_repaint();
+    }
+
+    /// Shows the layer over the other windows.
+    fn summon(&mut self, ctx: &egui::Context) {
+        let already_up = self.layer_visible && win::RAISED.load(Ordering::Relaxed);
+        let was_visible = self.layer_visible;
+        // Fades in when it was hidden.
+        self.set_layer_visible(ctx, true);
+        let Some(h) = self.hwnd else { return };
+        if already_up {
+            win::raise(h);
+            return;
+        }
+        if was_visible {
+            // Was under the windows: come up the same way it appears when shown.
+            // Alpha goes to 0 before the raise, so it never pops in at full opacity.
+            win::fade(h, 0, 255, LAYER_FADE_IN, || {});
+        }
+        win::raise(h);
+        let now = Instant::now();
+        self.appearing = self.cards.iter().map(|c| (c.id, now)).collect();
+        ctx.request_repaint();
+    }
+
+    /// Esc / second tray click: back under the windows, or hidden (a setting).
+    fn dismiss(&mut self, ctx: &egui::Context) {
+        if self.dismiss_hides {
+            win::RAISED.store(false, Ordering::Relaxed);
+            self.set_layer_visible(ctx, false);
+        } else if let Some(h) = self.hwnd {
+            win::lower(h);
+        }
+    }
+
+    fn tray_click(&mut self, ctx: &egui::Context) {
+        let summoned = win::RAISED.load(Ordering::Relaxed) || win::ms_since_auto_lowered() < TRAY_CLICK_AFTER_LOWER_MS;
+        if self.layer_visible && summoned {
+            self.dismiss(ctx);
+        } else {
+            self.summon(ctx);
+        }
+    }
+
+    fn set_flag(&self, key: &str, on: bool) {
+        let _ = self.store.set_setting(key, if on { "1" } else { "0" });
     }
 
     fn set_monitor(&mut self, device: &str) {
@@ -521,6 +704,18 @@ impl EbbApp {
                 ctx.request_repaint_of(ViewportId::ROOT);
             }
             Request::SetPinBottom(on) => self.set_pin_bottom(on),
+            Request::SetDismissHides(on) => {
+                self.dismiss_hides = on;
+                let _ = self.store.set_setting(SET_DISMISS, if on { "hide" } else { "back" });
+            }
+            Request::SetSettingsOnLaunch(on) => {
+                self.settings_on_launch = on;
+                self.set_flag(SET_SETTINGS_ON_LAUNCH, on);
+            }
+            Request::SetSnap(on) => {
+                self.snap = on;
+                self.set_flag(SET_SNAP, on);
+            }
             Request::ImportSticky => {
                 self.set_layer_visible(ctx, true);
                 self.sticky.scan(ctx, &self.store, self.hwnd, true);
@@ -529,9 +724,9 @@ impl EbbApp {
     }
 
     fn library_viewport(&self, ui: &Ui) {
-        let (open, placed) = {
+        let (open, placed, size) = {
             let lib = self.library.lock().unwrap();
-            (lib.open, lib.placed)
+            (lib.open, lib.placed, lib.size())
         };
         if !open {
             // Not shown this frame: egui drops the viewport and eframe destroys the window.
@@ -542,7 +737,7 @@ impl EbbApp {
             library::viewport_id(),
             ViewportBuilder::default()
                 .with_title("Ebb Library")
-                .with_inner_size(library::SIZE)
+                .with_inner_size(size)
                 .with_decorations(false)
                 .with_transparent(true)
                 .with_resizable(false)
@@ -666,15 +861,24 @@ impl eframe::App for EbbApp {
             match event {
                 Event::Capture(t) => pressed = Some((Mode::Capture, t)),
                 Event::Search(t) => pressed = Some((Mode::Search, t)),
-                Event::ToggleLayer => self.set_layer_visible(ctx, !self.layer_visible),
-                Event::ShowLayer => self.set_layer_visible(ctx, true),
+                Event::ToggleLayer if self.layer_visible => self.set_layer_visible(ctx, false),
+                Event::ToggleLayer => self.summon(ctx),
+                Event::TrayClick => self.tray_click(ctx),
+                Event::Launched => {
+                    self.summon(ctx);
+                    if self.settings_on_launch {
+                        self.open_settings(ctx, false);
+                    }
+                }
                 Event::TogglePinBottom => self.set_pin_bottom(!win::PIN_BOTTOM.load(Ordering::Relaxed)),
                 Event::Exit => ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close),
                 Event::ImportSticky => self.apply_library_request(ctx, Request::ImportSticky),
-                Event::OpenLibrary(settings) => {
+                Event::OpenLibrary(true) => self.open_settings(ctx, false),
+                Event::OpenLibrary(false) => {
                     let mut lib = self.library.lock().unwrap();
                     lib.settings = self.layer_settings();
-                    lib.open(if settings { Tab::Settings } else { Tab::Archive });
+                    lib.open(Tab::Archive);
+                    ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::InnerSize(lib.size()));
                     ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::Focus);
                 }
             }
@@ -690,11 +894,13 @@ impl eframe::App for EbbApp {
             if lib.open && lib.hwnd.is_none() {
                 lib.hwnd = win::find_library_window();
                 if let Some(h) = lib.hwnd {
-                    let scale = win::dpi_scale(h);
-                    win::center_near_cursor(h, (library::SIZE.x * scale) as i32, (library::SIZE.y * scale) as i32);
+                    let (scale, size) = (win::dpi_scale(h), lib.size());
+                    win::center_near_cursor(h, (size.x * scale) as i32, (size.y * scale) as i32);
                     win::apply_backdrop(h, Backdrop::AccentAcrylic, true);
                     win::install_window_rules(h, 0);
                     lib.placed = true;
+                    // Above a layer that was just summoned in the same moment.
+                    ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::Focus);
                     ctx.request_repaint();
                 }
             }
@@ -770,6 +976,8 @@ impl eframe::App for EbbApp {
                     changed = true;
                 }
                 Outbox::Open(id) => {
+                    // From search the layer is usually under windows: bring it up.
+                    self.summon(ctx);
                     self.open_card(ctx, id);
                     changed = true;
                 }
@@ -808,6 +1016,15 @@ impl eframe::App for EbbApp {
             // Out of the way of logon and the first frames; not during benchmarks.
             if crate::bench::path().is_none() {
                 self.sticky.maybe_offer(ui.ctx(), &self.store, self.hwnd);
+                let first_run = self.store.setting(SET_ONBOARDED).is_none();
+                if first_run || (self.manual_start && self.settings_on_launch) {
+                    let _ = self.store.set_setting(SET_ONBOARDED, "1");
+                    self.open_settings(ui.ctx(), first_run);
+                }
+            }
+            if self.manual_start {
+                // eframe shows the window after this frame; take the focus on the next.
+                ui.ctx().request_repaint();
             }
             if let Some(out) = crate::bench::path() {
                 let (shell, ctx) = (self.shell.clone(), ui.ctx().clone());
@@ -823,6 +1040,13 @@ impl eframe::App for EbbApp {
                 };
                 let label = format!("ebb-{}", crate::renderer::NAME);
                 crate::bench::start(ui.ctx().clone(), out, label, proc_ms, main_ms, hooks);
+            }
+        } else if self.frames == 2 && self.manual_start && win::RAISED.load(Ordering::Relaxed) {
+            if let Some(h) = self.hwnd {
+                win::raise(h);
+            }
+            if self.library.lock().unwrap().placed {
+                ui.ctx().send_viewport_cmd_to(library::viewport_id(), ViewportCommand::Focus);
             }
         }
 
@@ -844,7 +1068,13 @@ impl eframe::App for EbbApp {
             self.cycle_monitor();
         }
         if esc {
-            self.commit_edit();
+            if self.editing.is_some() {
+                self.commit_edit();
+            } else if egui::Popup::is_any_open(ui.ctx()) {
+                // The menu closes itself on Esc; the layer stays.
+            } else {
+                self.dismiss(ui.ctx());
+            }
         }
 
         let full = ui.max_rect();
@@ -855,6 +1085,7 @@ impl eframe::App for EbbApp {
         self.cards_ui(ui);
         self.sticky.ui(ui, &mut self.store, &mut self.cards, self.hwnd);
         self.toast_ui(ui);
+        self.menu_ui(ui);
         if self.show_debug {
             self.debug_ui(ui);
         }
@@ -971,6 +1202,41 @@ fn age_label(created_at: i64) -> String {
     }
 }
 
+/// Text of a card, or its editor.
+fn card_body(ui: &mut Ui, card: &Card, editing: Option<&mut String>, revealed: bool) {
+    if let Some(buf) = editing {
+        let resp = ui.add(
+            egui::TextEdit::multiline(buf)
+                .font(FontId::proportional(14.0))
+                .text_color(TEXT)
+                .frame(egui::Frame::NONE)
+                .desired_width(f32::INFINITY)
+                .desired_rows(3),
+        );
+        if !resp.has_focus() && !resp.lost_focus() {
+            resp.request_focus();
+        }
+        return;
+    }
+    let hidden = card.kind == Kind::Private && !revealed;
+    // A hidden Private card still says what it is (see card::private_label).
+    let heading = if hidden { card::private_label(&card.title, &card.body) } else { None };
+    let heading = heading.as_deref().or((!card.title.is_empty()).then_some(card.title.as_str()));
+    if let Some(heading) = heading {
+        ui.add(
+            egui::Label::new(RichText::new(heading).font(theme::semibold(15.0)).color(TEXT))
+                .wrap()
+                .selectable(false),
+        );
+    }
+    let text = if hidden { "••••••••••".to_owned() } else { without_tags(&card.body) };
+    let color = if heading.is_none() { TEXT } else { TEXT_DIM };
+    let size = if heading.is_none() { 14.5 } else { 13.5 };
+    ui.add(egui::Label::new(RichText::new(text).size(size).color(color)).wrap().selectable(false));
+}
+
+/// `magnet`: every card's rect on the layer, to stick to while dragging.
+#[allow(clippy::too_many_arguments)]
 fn card_ui(
     ui: &mut Ui,
     origin: Pos2,
@@ -979,6 +1245,8 @@ fn card_ui(
     hovered: bool,
     editing: Option<&mut String>,
     revealed: bool,
+    active: bool,
+    magnet: Option<&[(i64, Rect)]>,
 ) -> Vec<Action> {
     let mut out = Vec::new();
     let id = Id::new(("card", card.id));
@@ -987,41 +1255,129 @@ fn card_ui(
     // Registration order = hit-test priority: later widgets sit on top.
     let bg = ui.interact(rect, id.with("bg"), Sense::click());
     let header_rect = Rect::from_min_size(rect.min, vec2(rect.width(), HEADER_H + 6.0));
-    let drag = ui.interact(header_rect, id.with("drag"), Sense::drag());
-    let grip_rect = Rect::from_min_max(rect.max - vec2(18.0, 18.0), rect.max);
-    let grip = ui.interact(grip_rect, id.with("grip"), Sense::drag());
+    // A pinned card is locked in place: no moving, no resizing.
+    let locked = card.pinned;
+    let drag = ui.interact(header_rect, id.with("drag"), if locked { Sense::hover() } else { Sense::drag() });
+    // Resize handles on every edge and corner; corners last so they win where they overlap.
+    const EDGE: f32 = 6.0;
+    const CORNER: f32 = 16.0;
+    let (l, r, t, b) = (rect.left(), rect.right(), rect.top(), rect.bottom());
+    let side = |left, right, top, bottom| Sides { left, right, top, bottom };
+    let handles = [
+        (side(true, false, false, false), Rect::from_min_max(pos2(l, t), pos2(l + EDGE, b))),
+        (side(false, true, false, false), Rect::from_min_max(pos2(r - EDGE, t), pos2(r, b))),
+        (side(false, false, true, false), Rect::from_min_max(pos2(l, t), pos2(r, t + EDGE))),
+        (side(false, false, false, true), Rect::from_min_max(pos2(l, b - EDGE), pos2(r, b))),
+        (side(true, false, true, false), Rect::from_min_max(pos2(l, t), pos2(l + CORNER, t + CORNER))),
+        (side(false, true, true, false), Rect::from_min_max(pos2(r - CORNER, t), pos2(r, t + CORNER))),
+        (side(true, false, false, true), Rect::from_min_max(pos2(l, b - CORNER), pos2(l + CORNER, b))),
+        (side(false, true, false, true), Rect::from_min_max(pos2(r - CORNER, b - CORNER), pos2(r, b))),
+    ];
+    let handles: Vec<(Sides, egui::Response)> = handles
+        .into_iter()
+        .filter(|_| !locked)
+        .enumerate()
+        .map(|(i, (sides, area))| (sides, ui.interact(area, id.with(("resize", i)), Sense::drag())))
+        .collect();
+    // The last registered handle under the pointer is the one egui hit.
+    let resize = handles.iter().rev().find(|(_, h)| h.dragged() || h.drag_started() || h.drag_stopped());
+    let resize_hover = handles.iter().rev().find(|(_, h)| h.hovered()).map(|(s, _)| *s);
+    let corner_hovered = resize_hover.is_some_and(|s| s.right && s.bottom);
 
-    if bg.clicked() || bg.double_clicked() || drag.drag_started() || grip.drag_started() {
+    if bg.clicked() || bg.double_clicked() || drag.drag_started() || resize.is_some_and(|(_, h)| h.drag_started()) {
         out.push(Action::Front);
     }
     if bg.double_clicked() && editing.is_none() && card.kind != Kind::Private {
         out.push(Action::StartEdit);
     }
 
-    if drag.dragged() {
-        card.pos += drag.drag_delta();
-        card.pos.x = card.pos.x.clamp(0.0, (area.x - 80.0).max(0.0));
-        card.pos.y = card.pos.y.clamp(0.0, (area.y - HEADER_H).max(0.0));
+    // The rect at the start of the gesture and the pointer's total movement live in
+    // memory, so a stuck edge follows the pointer again once it moves past the snap
+    // distance, and shrinking below the minimum doesn't lose track of the pointer.
+    let raw_id = id.with("raw");
+    let started = drag.drag_started() || resize.is_some_and(|(_, h)| h.drag_started());
+    if started {
+        ui.data_mut(|d| d.insert_temp(raw_id, (Rect::from_min_size(card.pos, card.size), Vec2::ZERO)));
     }
-    if grip.dragged() {
-        card.size = (card.size + grip.drag_delta()).max(MIN_SIZE);
+    // Alt places the card freely.
+    let snapping = magnet.is_some() && !ui.input(|i| i.modifiers.alt);
+    let bounds = Rect::from_min_size(Pos2::ZERO, area);
+    let others: Vec<Rect> = match magnet {
+        Some(all) if snapping && (drag.dragged() || drag.drag_stopped() || resize.is_some()) => {
+            all.iter().filter(|(cid, _)| *cid != card.id).map(|(_, r)| *r).collect()
+        }
+        _ => Vec::new(),
+    };
+    let mut snapped: Option<card::Snapped> = None;
+    let resizing = resize.filter(|(_, h)| h.dragged()).map(|(s, h)| (*s, h.drag_delta()));
+    if drag.dragged() || resizing.is_some() {
+        let (start, mut total) =
+            ui.data(|d| d.get_temp::<(Rect, Vec2)>(raw_id)).unwrap_or((Rect::from_min_size(card.pos, card.size), Vec2::ZERO));
+        total += resizing.map_or(drag.drag_delta(), |(_, d)| d);
+        ui.data_mut(|d| d.insert_temp(raw_id, (start, total)));
+        let raw = match resizing {
+            None => {
+                let moved = start.translate(total);
+                let min = pos2(moved.min.x.clamp(0.0, (area.x - 80.0).max(0.0)), moved.min.y.clamp(0.0, (area.y - HEADER_H).max(0.0)));
+                Rect::from_min_size(min, moved.size())
+            }
+            Some((sides, _)) => sides.resize(start, total, bounds),
+        };
+        let s = match (snapping, resizing) {
+            (false, _) => card::Snapped { rect: raw, guides: Vec::new(), x: false, y: false },
+            (true, None) => card::snap_move(raw, &others, bounds),
+            (true, Some((sides, _))) => card::snap_resize(raw, &others, bounds, sides),
+        };
+        card.pos = s.rect.min;
+        card.size = s.rect.size();
+        snapped = Some(s);
     }
-    if drag.drag_stopped() || grip.drag_stopped() {
-        card.pos = (card.pos.to_vec2() / 8.0).round().to_pos2() * 8.0;
-        card.size = ((card.size / 8.0).round() * 8.0).max(MIN_SIZE);
+    let stopped_resize = resize.filter(|(_, h)| h.drag_stopped()).map(|(s, _)| *s);
+    if drag.drag_stopped() || stopped_resize.is_some() {
+        // Edges that stuck stay put; the rest go to the 8 pt grid.
+        let rect = Rect::from_min_size(card.pos, card.size);
+        let s = match (snapping, stopped_resize) {
+            (false, _) => None,
+            (true, None) => Some(card::snap_move(rect, &others, bounds)),
+            (true, Some(sides)) => Some(card::snap_resize(rect, &others, bounds, sides)),
+        };
+        let (sx, sy) = s.as_ref().map_or((false, false), |s| (s.x, s.y));
+        let grid = |v: f32, stuck: bool| if stuck { v } else { (v / 8.0).round() * 8.0 };
+        let rect = match stopped_resize {
+            None => Rect::from_min_size(pos2(grid(rect.min.x, sx), grid(rect.min.y, sy)), rect.size()),
+            Some(sides) => {
+                let mut g = rect;
+                if sides.left { g.min.x = grid(g.min.x, sx).min(g.max.x - MIN_SIZE.x) }
+                if sides.right { g.max.x = grid(g.max.x, sx).max(g.min.x + MIN_SIZE.x) }
+                if sides.top { g.min.y = grid(g.min.y, sy).min(g.max.y - MIN_SIZE.y) }
+                if sides.bottom { g.max.y = grid(g.max.y, sy).max(g.min.y + MIN_SIZE.y) }
+                g
+            }
+        };
+        card.pos = rect.min;
+        card.size = rect.size();
+        ui.data_mut(|d| d.remove::<(Rect, Vec2)>(raw_id));
         out.push(Action::Moved);
     }
     if drag.dragged() {
         ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-    } else if drag.hovered() {
+    } else if drag.hovered() && resize_hover.is_none() && !locked {
         ui.ctx().set_cursor_icon(CursorIcon::Grab);
     }
-    if grip.hovered() || grip.dragged() {
-        ui.ctx().set_cursor_icon(CursorIcon::ResizeNwSe);
+    if let Some(sides) = resize.map(|(s, _)| *s).or(resize_hover) {
+        ui.ctx().set_cursor_icon(sides.cursor());
     }
 
     let rect = Rect::from_min_size(origin + card.pos.to_vec2(), card.size);
     glass_panel(ui, rect, hovered);
+    if let Some(s) = &snapped {
+        // Above every card, not just the ones painted before this one.
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, id.with("guides")));
+        let stroke = Stroke::new(1.0, card.kind.accent().gamma_multiply(0.8));
+        for [a, b] in &s.guides {
+            painter.line_segment([origin + a.to_vec2(), origin + b.to_vec2()], stroke);
+        }
+    }
 
     let inner = rect.shrink2(vec2(14.0, 8.0));
     let header = Rect::from_min_size(inner.min, vec2(inner.width(), HEADER_H - 4.0));
@@ -1029,22 +1385,44 @@ fn card_ui(
     let body = Rect::from_min_max(pos2(inner.left(), header.bottom() + 2.0), pos2(inner.right(), footer.top() - 2.0));
     let accent = card.kind.accent();
 
+    // Kind, tags and age only while the card is hovered, edited or selected: at rest
+    // a card is just its text.
+    let details = ui.ctx().animate_bool_with_time(id.with("details"), hovered || active || editing.is_some(), 0.15);
+
     // Header: kind + hover actions.
     ui.scope_builder(
         UiBuilder::new().max_rect(header).layout(Layout::left_to_right(Align::Center)),
         |ui| {
-            ui.label(RichText::new(card.kind.icon()).font(theme::icons(12.0)).color(accent));
-            ui.add(egui::Label::new(RichText::new(card.kind.label()).size(12.0).color(TEXT_MUTED)).selectable(false));
+            ui.scope(|ui| {
+                ui.multiply_opacity(details);
+                ui.label(RichText::new(card.kind.icon()).font(theme::icons(12.0)).color(accent));
+                ui.add(egui::Label::new(RichText::new(card.kind.label()).size(12.0).color(TEXT_MUTED)).selectable(false));
+            });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 if hovered {
-                    if icon_button(ui, "\u{E74D}", "Удалить", TEXT_MUTED).clicked() {
+                    // Pinned: nothing that takes the card off the layer by accident.
+                    if !locked && icon_button(ui, "\u{E74D}", "Удалить", TEXT_MUTED).clicked() {
                         out.push(Action::Delete);
                     }
-                    if icon_button(ui, "\u{E7B8}", "В архив", TEXT_DIM).clicked() {
+                    if !locked && icon_button(ui, "\u{E7B8}", "В архив", TEXT_DIM).clicked() {
                         out.push(Action::Archive);
                     }
-                    if icon_button(ui, "\u{E8C8}", "Копировать", TEXT_DIM).clicked() {
+                    if icon_button(ui, "\u{E8C8}", "Дублировать", TEXT_DIM).clicked() {
+                        out.push(Action::Duplicate);
+                    }
+                    // The check mark says the text is on the clipboard.
+                    let copied_id = id.with("copied");
+                    let copied = ui.data(|d| d.get_temp::<Instant>(copied_id)).filter(|t| t.elapsed() < COPIED_FOR);
+                    if let Some(t) = copied {
+                        ui.ctx().request_repaint_after(COPIED_FOR.saturating_sub(t.elapsed()));
+                    }
+                    let (glyph, tip, color) = match copied {
+                        Some(_) => ("\u{E73E}", "Текст скопирован", theme::SUCCESS),
+                        None => ("\u{E77F}", "Копировать текст", TEXT_DIM),
+                    };
+                    if icon_button(ui, glyph, tip, color).clicked() {
+                        ui.data_mut(|d| d.insert_temp(copied_id, Instant::now()));
                         out.push(Action::Copy);
                     }
                     if card.kind == Kind::Private
@@ -1055,7 +1433,7 @@ fn card_ui(
                 }
                 if card.pinned || hovered {
                     let (glyph, color) = if card.pinned { ("\u{E841}", accent) } else { ("\u{E718}", TEXT_DIM) };
-                    if icon_button(ui, glyph, if card.pinned { "Открепить" } else { "Закрепить" }, color).clicked() {
+                    if icon_button(ui, glyph, if card.pinned { "Открепить" } else { "Закрепить на месте" }, color).clicked() {
                         out.push(Action::TogglePin);
                     }
                 }
@@ -1063,45 +1441,22 @@ fn card_ui(
         },
     );
 
-    // Body.
+    // Body: scrolls when the text doesn't fit; the floating bar shows only on hover.
     ui.scope_builder(
         UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Min)),
         |ui| {
             ui.set_clip_rect(body.intersect(ui.clip_rect()));
-            if let Some(buf) = editing {
-                let resp = ui.add(
-                    egui::TextEdit::multiline(buf)
-                        .font(FontId::proportional(14.0))
-                        .text_color(TEXT)
-                        .frame(egui::Frame::NONE)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(3),
-                );
-                if !resp.has_focus() && !resp.lost_focus() {
-                    resp.request_focus();
-                }
-                return;
-            }
-            let hidden = card.kind == Kind::Private && !revealed;
-            // A hidden Private card still says what it is (see card::private_label).
-            let heading = if hidden { card::private_label(&card.title, &card.body) } else { None };
-            let heading = heading.as_deref().or((!card.title.is_empty()).then_some(card.title.as_str()));
-            if let Some(heading) = heading {
-                ui.add(
-                    egui::Label::new(RichText::new(heading).font(theme::semibold(15.0)).color(TEXT))
-                        .wrap()
-                        .selectable(false),
-                );
-            }
-            let text = if hidden { "••••••••••".to_owned() } else { without_tags(&card.body) };
-            let color = if heading.is_none() { TEXT } else { TEXT_DIM };
-            let size = if heading.is_none() { 14.5 } else { 13.5 };
-            ui.add(egui::Label::new(RichText::new(text).size(size).color(color)).wrap().selectable(false));
+            egui::ScrollArea::vertical()
+                .id_salt(id.with("scroll"))
+                .auto_shrink([false, false])
+                .max_height(body.height())
+                .show(ui, |ui| card_body(ui, card, editing, revealed));
         },
     );
 
     // Footer: tags + age.
-    let painter = ui.painter().with_clip_rect(footer);
+    let mut painter = ui.painter().with_clip_rect(footer);
+    painter.multiply_opacity(details);
     let age = painter.text(
         pos2(footer.right(), footer.center().y),
         Align2::RIGHT_CENTER,
@@ -1127,7 +1482,7 @@ fn card_ui(
     if hovered {
         let p = ui.painter();
         let c = rect.max - vec2(6.0, 6.0);
-        let stroke = Stroke::new(1.2, Color32::from_white_alpha(if grip.hovered() { 120 } else { 50 }));
+        let stroke = Stroke::new(1.2, Color32::from_white_alpha(if corner_hovered { 120 } else { 50 }));
         p.line_segment([c - vec2(8.0, 0.0), c - vec2(0.0, 8.0)], stroke);
         p.line_segment([c - vec2(4.0, 0.0), c - vec2(0.0, 4.0)], stroke);
     }

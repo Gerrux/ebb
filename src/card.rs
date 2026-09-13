@@ -221,9 +221,284 @@ pub fn free_slot(cards: &[Card], area: Vec2) -> Pos2 {
     origin + vec2(24.0, 24.0) * (cards.len() % 10) as f32
 }
 
+/// Where a copy of `of` goes: right against it, else below, left or above, the
+/// first spot that is on the layer and free; else the first free slot.
+pub fn beside(cards: &[Card], of: &Card, area: Vec2) -> Pos2 {
+    let layer = egui::Rect::from_min_size(Pos2::ZERO, area);
+    let (w, h) = (of.size.x, of.size.y);
+    [vec2(w, 0.0), vec2(0.0, h), vec2(-w, 0.0), vec2(0.0, -h)]
+        .into_iter()
+        .map(|d| of.pos + d)
+        .find(|&p| {
+            // Shrunk a little: touching a neighbour's edge is fine.
+            let slot = egui::Rect::from_min_size(p, of.size).shrink(0.5);
+            layer.contains_rect(slot)
+                && !cards
+                    .iter()
+                    .filter(|c| !c.archived)
+                    .any(|c| egui::Rect::from_min_size(c.pos, c.size).intersects(slot))
+        })
+        .unwrap_or_else(|| free_slot(cards, area))
+}
+
+/// Space between cards that stick side by side: none, they sit edge to edge.
+pub const SNAP_GAP: f32 = 0.0;
+/// How close an edge has to come before it sticks.
+pub const SNAP_DISTANCE: f32 = 10.0;
+/// Cards at most this far apart (across the snapping axis) align their edges.
+const ALIGN_REACH: f32 = 64.0;
+/// Margins of the layer that edges stick to (the header takes the top).
+const LAYER_MARGIN: egui::Margin = egui::Margin { left: 32, right: 32, top: 72, bottom: 32 };
+
+/// A card rect after snapping, with a guide line per axis that stuck.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Snapped {
+    pub rect: egui::Rect,
+    pub guides: Vec<[Pos2; 2]>,
+    pub x: bool,
+    pub y: bool,
+}
+
+/// Best candidate on one axis: (offset to apply, guide line).
+type Candidate = Option<(f32, [Pos2; 2])>;
+
+fn consider(best: &mut Candidate, from: f32, to: f32, guide: impl FnOnce(f32) -> [Pos2; 2]) {
+    let d = to - from;
+    if d.abs() <= SNAP_DISTANCE && best.is_none_or(|(b, _)| d.abs() < b.abs()) {
+        *best = Some((d, guide((from + to) / 2.0)));
+    }
+}
+
+/// Span of two ranges, for guide lines.
+fn span(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
+    (a.0.min(b.0), a.1.max(b.1))
+}
+
+/// Candidates for moving edges; `edges` says which of left/right (or top/bottom)
+/// are free to move. `x` picks the axis.
+fn axis(rect: egui::Rect, others: &[egui::Rect], bounds: egui::Rect, x: bool, edges: (bool, bool)) -> Candidate {
+    // (low edge, high edge) along the axis, and the range across it.
+    let along = |r: egui::Rect| if x { (r.left(), r.right()) } else { (r.top(), r.bottom()) };
+    let across = |r: egui::Rect| if x { (r.top(), r.bottom()) } else { (r.left(), r.right()) };
+    let line = |at: f32, (a, b): (f32, f32)| if x { [pos2(at, a), pos2(at, b)] } else { [pos2(a, at), pos2(b, at)] };
+    let (lo, hi) = along(rect);
+    let cross = across(rect);
+    let mut best = None;
+    for &o in others {
+        let (olo, ohi) = along(o);
+        let ocross = across(o);
+        let s = span(cross, ocross);
+        let gap_across = (ocross.0 - cross.1).max(cross.0 - ocross.1);
+        // Side by side: they overlap across the axis.
+        if gap_across < 0.0 {
+            if edges.0 {
+                consider(&mut best, lo, ohi + SNAP_GAP, |at| line(at, s));
+            }
+            if edges.1 {
+                consider(&mut best, hi, olo - SNAP_GAP, |at| line(at, s));
+            }
+        }
+        // Aligned: one above the other (or near), same edge.
+        if gap_across <= ALIGN_REACH {
+            if edges.0 {
+                consider(&mut best, lo, olo, |at| line(at, s));
+            }
+            if edges.1 {
+                consider(&mut best, hi, ohi, |at| line(at, s));
+            }
+        }
+    }
+    let (blo, bhi) = if x {
+        (bounds.left() + LAYER_MARGIN.left as f32, bounds.right() - LAYER_MARGIN.right as f32)
+    } else {
+        (bounds.top() + LAYER_MARGIN.top as f32, bounds.bottom() - LAYER_MARGIN.bottom as f32)
+    };
+    let whole = across(bounds);
+    if edges.0 {
+        consider(&mut best, lo, blo, |_| line(blo, whole));
+    }
+    if edges.1 {
+        consider(&mut best, hi, bhi, |_| line(bhi, whole));
+    }
+    best
+}
+
+/// Sticks a dragged card to the edges of the others and of the layer: next to a
+/// card (edge to edge, [`SNAP_GAP`]), or aligned with its edge.
+pub fn snap_move(rect: egui::Rect, others: &[egui::Rect], bounds: egui::Rect) -> Snapped {
+    let dx = axis(rect, others, bounds, true, (true, true));
+    let dy = axis(rect, others, bounds, false, (true, true));
+    let shift = vec2(dx.map_or(0.0, |d| d.0), dy.map_or(0.0, |d| d.0));
+    // Guides were computed before the shift across the other axis; move them along.
+    let guides = dx
+        .map(|(_, g)| g.map(|p| p + vec2(0.0, shift.y)))
+        .into_iter()
+        .chain(dy.map(|(_, g)| g.map(|p| p + vec2(shift.x, 0.0))))
+        .collect();
+    Snapped { rect: rect.translate(shift), guides, x: dx.is_some(), y: dy.is_some() }
+}
+
+/// Which edges of a card a resize handle moves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Sides {
+    pub left: bool,
+    pub right: bool,
+    pub top: bool,
+    pub bottom: bool,
+}
+
+impl Sides {
+    /// `start` with these edges moved by `delta`; the opposite edges stay, the
+    /// size never drops below [`MIN_SIZE`] and moved edges stay on the layer.
+    pub fn resize(self, start: egui::Rect, delta: Vec2, bounds: egui::Rect) -> egui::Rect {
+        let mut r = start;
+        if self.left {
+            r.min.x = (r.min.x + delta.x).max(bounds.left()).min(r.max.x - MIN_SIZE.x);
+        }
+        if self.right {
+            r.max.x = (r.max.x + delta.x).max(r.min.x + MIN_SIZE.x);
+        }
+        if self.top {
+            r.min.y = (r.min.y + delta.y).max(bounds.top()).min(r.max.y - MIN_SIZE.y);
+        }
+        if self.bottom {
+            r.max.y = (r.max.y + delta.y).max(r.min.y + MIN_SIZE.y);
+        }
+        r
+    }
+
+    pub fn cursor(self) -> egui::CursorIcon {
+        use egui::CursorIcon::*;
+        match (self.left || self.right, self.top || self.bottom) {
+            (true, false) => ResizeHorizontal,
+            (false, true) => ResizeVertical,
+            _ if (self.left && self.top) || (self.right && self.bottom) => ResizeNwSe,
+            _ => ResizeNeSw,
+        }
+    }
+}
+
+/// Sticks the edges of a card being resized that the handle moves.
+pub fn snap_resize(rect: egui::Rect, others: &[egui::Rect], bounds: egui::Rect, sides: Sides) -> Snapped {
+    // Moving the low edge by d shrinks the rect by d; the high edge grows it.
+    let fits = |c: Candidate, low: bool, len: f32, min: f32| c.filter(|(d, _)| if low { len - d } else { len + d } >= min);
+    let dx = fits(axis(rect, others, bounds, true, (sides.left, sides.right)), sides.left, rect.width(), MIN_SIZE.x);
+    let dy = fits(axis(rect, others, bounds, false, (sides.top, sides.bottom)), sides.top, rect.height(), MIN_SIZE.y);
+    let mut out = rect;
+    if let Some((d, _)) = dx {
+        if sides.left { out.min.x += d } else { out.max.x += d }
+    }
+    if let Some((d, _)) = dy {
+        if sides.top { out.min.y += d } else { out.max.y += d }
+    }
+    let guides = dx.map(|(_, g)| g).into_iter().chain(dy.map(|(_, g)| g)).collect();
+    Snapped { rect: out, guides, x: dx.is_some(), y: dy.is_some() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn r(x: f32, y: f32, w: f32, h: f32) -> egui::Rect {
+        egui::Rect::from_min_size(pos2(x, y), vec2(w, h))
+    }
+
+    const BOUNDS: egui::Rect = egui::Rect { min: pos2(0.0, 0.0), max: pos2(2000.0, 1200.0) };
+
+    #[test]
+    fn snaps_beside_a_card_with_a_gap() {
+        let other = r(400.0, 300.0, 280.0, 150.0);
+        // Right of it, 6 pt too far.
+        let s = snap_move(r(686.0 + SNAP_GAP, 330.0, 280.0, 150.0), &[other], BOUNDS);
+        assert_eq!(s.rect.left(), 680.0 + SNAP_GAP);
+        assert!(s.x);
+        assert_eq!(s.guides.len(), 1);
+    }
+
+    #[test]
+    fn aligns_edges_when_stacked() {
+        let other = r(400.0, 300.0, 280.0, 150.0);
+        // Below it, left edges 7 pt apart, top 5 pt from the gap.
+        let s = snap_move(r(407.0, 455.0 + SNAP_GAP, 200.0, 100.0), &[other], BOUNDS);
+        assert_eq!(s.rect.min, pos2(400.0, 450.0 + SNAP_GAP));
+        assert!(s.x && s.y);
+    }
+
+    #[test]
+    fn far_cards_and_free_space_do_not_stick() {
+        let other = r(400.0, 300.0, 280.0, 150.0);
+        let rect = r(900.0, 700.0, 280.0, 150.0);
+        let s = snap_move(rect, &[other], BOUNDS);
+        assert_eq!(s.rect, rect);
+        assert!(s.guides.is_empty());
+    }
+
+    #[test]
+    fn sticks_to_layer_margins() {
+        let s = snap_move(r(36.0, 500.0, 280.0, 150.0), &[], BOUNDS);
+        assert_eq!(s.rect.left(), 32.0);
+    }
+
+    #[test]
+    fn resize_snaps_only_the_moving_edges_and_keeps_min_size() {
+        let br = Sides { right: true, bottom: true, ..Default::default() };
+        let other = r(700.0, 300.0, 280.0, 150.0);
+        let s = snap_resize(r(400.0, 320.0, 290.0, 120.0), &[other], BOUNDS, br);
+        assert_eq!(s.rect.min, pos2(400.0, 320.0));
+        assert_eq!(s.rect.right(), 700.0 - SNAP_GAP);
+        // Bottom aligns with the neighbour's.
+        assert_eq!(s.rect.bottom(), 450.0);
+
+        let tiny = r(400.0, 320.0, MIN_SIZE.x + 2.0, 120.0);
+        let s = snap_resize(tiny, &[r(400.0 + MIN_SIZE.x + 2.0 + SNAP_GAP - 8.0, 300.0, 100.0, 150.0)], BOUNDS, br);
+        assert!(s.rect.width() >= MIN_SIZE.x);
+    }
+
+    fn card_at(id: i64, x: f32, y: f32) -> Card {
+        Card {
+            id,
+            kind: Kind::Note,
+            title: String::new(),
+            body: String::new(),
+            tags: Vec::new(),
+            pinned: false,
+            archived: false,
+            pos: pos2(x, y),
+            size: DEFAULT_SIZE,
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn duplicate_goes_right_against_the_original_or_below() {
+        let area = vec2(1920.0, 1080.0);
+        let a = card_at(1, 400.0, 300.0);
+        assert_eq!(beside(&[a.clone()], &a, area), pos2(400.0 + DEFAULT_SIZE.x, 300.0));
+        // Right is taken: below.
+        let b = card_at(2, 400.0 + DEFAULT_SIZE.x, 300.0);
+        assert_eq!(beside(&[a.clone(), b], &a, area), pos2(400.0, 300.0 + DEFAULT_SIZE.y));
+        // At the right edge of the layer: not off-screen.
+        let edge = card_at(3, area.x - DEFAULT_SIZE.x, 300.0);
+        assert_eq!(beside(&[edge.clone()], &edge, area), pos2(edge.pos.x, 300.0 + DEFAULT_SIZE.y));
+    }
+
+    #[test]
+    fn resize_from_the_left_and_top_moves_those_edges() {
+        let tl = Sides { left: true, top: true, ..Default::default() };
+        let start = r(400.0, 400.0, 280.0, 150.0);
+        let grown = tl.resize(start, vec2(-50.0, -30.0), BOUNDS);
+        assert_eq!((grown.min, grown.max), (pos2(350.0, 370.0), start.max));
+        // Can't shrink past the minimum: the far edges stay where they were.
+        let shrunk = tl.resize(start, vec2(500.0, 500.0), BOUNDS);
+        assert_eq!(shrunk.size(), MIN_SIZE);
+        assert_eq!(shrunk.max, start.max);
+
+        // Left edge 6 pt from a neighbour's right edge sticks to it.
+        let left = Sides { left: true, ..Default::default() };
+        let s = snap_resize(r(286.0, 400.0, 300.0, 150.0), &[r(0.0, 380.0, 280.0, 150.0)], BOUNDS, left);
+        assert_eq!(s.rect.left(), 280.0);
+        assert_eq!(s.rect.right(), 586.0);
+    }
 
     #[test]
     fn detects_kinds() {

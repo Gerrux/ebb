@@ -22,7 +22,7 @@ use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindowLongPtrW, HWND_BOTTOM, MONITORINFOF_PRIMARY,
     SET_WINDOW_POS_FLAGS, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SetWindowLongPtrW, SetWindowPos, WINDOWPOS, WM_STYLECHANGING, WM_WINDOWPOSCHANGING, WS_EX_APPWINDOW,
+    SetWindowLongPtrW, SetWindowPos, WINDOWPOS, WM_ACTIVATEAPP, WM_STYLECHANGING, WM_WINDOWPOSCHANGING, WS_EX_APPWINDOW,
     WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_SYSMENU,
 };
 use windows::core::{BOOL, PCWSTR, w};
@@ -346,6 +346,77 @@ pub fn move_near_cursor(raw: isize, width_px: i32) {
 
 /// Whether the layer is kept at the bottom of the z-order (under other windows).
 pub static PIN_BOTTOM: AtomicBool = AtomicBool::new(true);
+/// The layer was summoned over other windows (tray click, launch from a shortcut);
+/// [`PIN_BOTTOM`] is suspended until it's dismissed or another app is activated.
+pub static RAISED: AtomicBool = AtomicBool::new(false);
+/// `GetTickCount64` when the layer last went back to the bottom because another
+/// app was activated. Clicking the tray icon activates the taskbar first, so the
+/// click that follows must not raise the layer again.
+static LOWERED_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn keep_bottom() -> bool {
+    PIN_BOTTOM.load(Ordering::Relaxed) && !RAISED.load(Ordering::Relaxed)
+}
+
+/// Milliseconds since the layer was lowered by activating another app.
+pub fn ms_since_auto_lowered() -> u64 {
+    let at = LOWERED_AT.load(Ordering::Relaxed);
+    if at == 0 { u64::MAX } else { unsafe { windows::Win32::System::SystemInformation::GetTickCount64() }.saturating_sub(at) }
+}
+
+/// Shows the window if hidden, puts it above other windows and activates it.
+/// Shown directly rather than waiting for eframe's command, which lands ~100 ms
+/// later for a hidden root window (winit reads visibility back from the window).
+pub fn raise(raw: isize) {
+    use windows::Win32::UI::WindowsAndMessaging::{HWND_TOP, IsWindowVisible, SW_SHOWNA, SetForegroundWindow, ShowWindow};
+    RAISED.store(true, Ordering::Relaxed);
+    let h = hwnd(raw);
+    unsafe {
+        if !IsWindowVisible(h).as_bool() {
+            let _ = ShowWindow(h, SW_SHOWNA);
+        }
+        let _ = SetWindowPos(h, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+        let _ = SetForegroundWindow(h);
+    }
+}
+
+/// Sends the window to the bottom of the z-order and, if it had the focus, hands
+/// it to the topmost window of another app, so typing goes where the user looks.
+pub fn lower(raw: isize) {
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GW_HWNDNEXT, GetForegroundWindow, GetTopWindow, GetWindow, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+        SetForegroundWindow,
+    };
+    RAISED.store(false, Ordering::Relaxed);
+    let h = hwnd(raw);
+    unsafe {
+        let _ = SetWindowPos(h, Some(HWND_BOTTOM), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        let fg = GetForegroundWindow();
+        let mut pid = 0;
+        GetWindowThreadProcessId(fg, Some(&mut pid));
+        if pid != GetCurrentProcessId() {
+            return;
+        }
+        let me = pid;
+        let mut next = GetTopWindow(None).ok();
+        while let Some(w) = next {
+            let mut owner = 0;
+            GetWindowThreadProcessId(w, Some(&mut owner));
+            let ex = GetWindowLongPtrW(w, GWL_EXSTYLE);
+            if owner != me
+                && IsWindowVisible(w).as_bool()
+                && !IsIconic(w).as_bool()
+                && ex & WS_EX_TOOLWINDOW.0 as isize == 0
+                && ex & windows::Win32::UI::WindowsAndMessaging::WS_EX_NOACTIVATE.0 as isize == 0
+            {
+                let _ = SetForegroundWindow(w);
+                return;
+            }
+            next = GetWindow(w, GW_HWNDNEXT).ok();
+        }
+    }
+}
 
 /// Subclass flags (`dwRefData`).
 pub const LAYER: usize = 1;
@@ -469,10 +540,17 @@ unsafe extern "system" fn subclass_proc(
                     }
                 }
             }
-            WM_WINDOWPOSCHANGING if flags & LAYER != 0 && PIN_BOTTOM.load(Ordering::Relaxed) => {
+            WM_WINDOWPOSCHANGING if flags & LAYER != 0 && keep_bottom() => {
                 let pos = &mut *(lparam.0 as *mut WINDOWPOS);
                 if !pos.flags.contains(SWP_NOZORDER) {
                     pos.hwndInsertAfter = HWND_BOTTOM;
+                }
+            }
+            // Another app got activated: a summoned layer goes back under the windows.
+            WM_ACTIVATEAPP if flags & LAYER != 0 && wparam.0 == 0 && RAISED.swap(false, Ordering::Relaxed) => {
+                LOWERED_AT.store(windows::Win32::System::SystemInformation::GetTickCount64(), Ordering::Relaxed);
+                if PIN_BOTTOM.load(Ordering::Relaxed) {
+                    let _ = SetWindowPos(hwnd, Some(HWND_BOTTOM), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
                 }
             }
             _ => {}
@@ -492,7 +570,7 @@ pub fn install_window_rules(raw: isize, flags: usize) {
         }
         let _ = SetWindowPos(
             h,
-            if flags & LAYER != 0 && PIN_BOTTOM.load(Ordering::Relaxed) { Some(HWND_BOTTOM) } else { None },
+            if flags & LAYER != 0 && keep_bottom() { Some(HWND_BOTTOM) } else { None },
             0,
             0,
             0,
@@ -506,7 +584,7 @@ pub fn install_window_rules(raw: isize, flags: usize) {
 /// Re-applies the z-order after toggling [`PIN_BOTTOM`].
 pub fn set_pin_bottom(raw: isize, on: bool) {
     PIN_BOTTOM.store(on, Ordering::Relaxed);
-    if on {
+    if keep_bottom() {
         unsafe {
             let _ = SetWindowPos(hwnd(raw), Some(HWND_BOTTOM), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }

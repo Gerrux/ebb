@@ -9,6 +9,7 @@ use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId};
 pub const TEXT: Color32 = Color32::from_rgb(236, 239, 244);
 pub const TEXT_DIM: Color32 = Color32::from_rgb(178, 186, 198);
 pub const TEXT_MUTED: Color32 = Color32::from_rgb(128, 136, 150);
+pub const SUCCESS: Color32 = Color32::from_rgb(52, 211, 153);
 
 pub fn glass_fill() -> Color32 {
     Color32::from_rgba_unmultiplied(30, 33, 40, 215)
