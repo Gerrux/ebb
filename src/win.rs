@@ -173,23 +173,54 @@ pub fn apply_backdrop(raw: isize, mode: Backdrop, rounded: bool) {
 // Monitors
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Monitor {
+    pub handle: isize,
+    pub rect: RECT,
     pub work: RECT,
     pub primary: bool,
+    /// Device interface paths of the display(s) behind this monitor, e.g.
+    /// `\\?\DISPLAY#XMI27B1#5&c579a42&0&UID4353#{e6f07b5f-...}` — the form other
+    /// apps (Sticky Notes) store window positions against.
+    pub device_ids: Vec<String>,
+}
+
+impl Monitor {
+    /// Whether `id` names this monitor; compared without the interface-class GUID.
+    pub fn matches_device(&self, id: &str) -> bool {
+        let key = |s: &str| s.split("#{").next().unwrap_or(s).to_ascii_lowercase();
+        let id = key(id);
+        self.device_ids.iter().any(|d| key(d) == id)
+    }
+}
+
+fn wide_str(buf: &[u16]) -> String {
+    String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap_or(buf.len())])
 }
 
 pub fn monitors() -> Vec<Monitor> {
+    use windows::Win32::Graphics::Gdi::{DISPLAY_DEVICEW, EnumDisplayDevicesW, MONITORINFOEXW};
+
     unsafe extern "system" fn cb(m: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> BOOL {
         let out = unsafe { &mut *(data.0 as *mut Vec<Monitor>) };
-        let mut info = MONITORINFO {
-            cbSize: size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if unsafe { GetMonitorInfoW(m, &mut info) }.as_bool() {
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+        if unsafe { GetMonitorInfoW(m, &mut info as *mut _ as *mut MONITORINFO) }.as_bool() {
+            let mut device_ids = Vec::new();
+            for index in 0.. {
+                let mut dd = DISPLAY_DEVICEW { cb: size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+                // EDD_GET_DEVICE_INTERFACE_NAME = 1
+                if !unsafe { EnumDisplayDevicesW(PCWSTR(info.szDevice.as_ptr()), index, &mut dd, 1) }.as_bool() {
+                    break;
+                }
+                device_ids.push(wide_str(&dd.DeviceID));
+            }
             out.push(Monitor {
-                work: info.rcWork,
-                primary: info.dwFlags & MONITORINFOF_PRIMARY != 0,
+                handle: m.0 as isize,
+                rect: info.monitorInfo.rcMonitor,
+                work: info.monitorInfo.rcWork,
+                primary: info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY != 0,
+                device_ids,
             });
         }
         true.into()
@@ -201,6 +232,13 @@ pub fn monitors() -> Vec<Monitor> {
     // Secondary monitors first: the ambient layer prefers them.
     out.sort_by_key(|m| m.primary);
     out
+}
+
+/// The monitor a window is (mostly) on.
+pub fn monitor_of(raw: isize) -> Option<Monitor> {
+    use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
+    let handle = unsafe { MonitorFromWindow(hwnd(raw), MONITOR_DEFAULTTONEAREST) }.0 as isize;
+    monitors().into_iter().find(|m| m.handle == handle)
 }
 
 /// Cover the work area of a monitor (physical pixels, bypasses DPI conversions).

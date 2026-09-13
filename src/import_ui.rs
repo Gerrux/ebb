@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use egui::{Align, Layout, Rect, RichText, Ui, UiBuilder, vec2};
 
-use crate::card::{self, Card};
+use crate::card::Card;
 use crate::store::Store;
 use crate::sticky::{self, Plan, Stats};
 use crate::theme::{self, TEXT, TEXT_DIM, TEXT_MUTED};
@@ -21,9 +21,19 @@ const SETTING: &str = "sticky_import";
 enum State {
     Idle,
     Scanning,
-    Offer(Plan),
-    Done { batch: i64, stats: Stats },
+    Offer(Offer),
+    Done { batch: i64, stats: Stats, replaced: usize },
     Failed(String),
+}
+
+struct Offer {
+    plan: Plan,
+    /// Cards of an earlier import that are unchanged and get replaced.
+    replace: Vec<i64>,
+    /// Earlier imported notes left alone because they were changed in Ambient.
+    kept: usize,
+    /// Open notes that were on the layer's monitor (placed exactly).
+    in_place: usize,
 }
 
 pub struct StickyImport {
@@ -63,16 +73,17 @@ fn background_priority() {
 impl StickyImport {
     /// Offers the import on startup unless it was done or declined. The scan waits a
     /// few seconds to stay away from logon and the first frames.
-    pub fn maybe_offer(&self, ctx: &egui::Context, store: &Store, cards: &[Card]) {
+    pub fn maybe_offer(&self, ctx: &egui::Context, store: &Store, layer: Option<isize>) {
         if sticky::plum_path().is_none() || matches!(store.setting(SETTING).as_deref(), Some("done" | "never")) {
             return;
         }
-        self.scan(ctx, store, cards, false);
+        self.scan(ctx, store, layer, false);
     }
 
     /// Scans Sticky Notes and shows the offer. `manual` (from the tray) ignores the
-    /// setting, starts at once and also reports when there is nothing new.
-    pub fn scan(&self, ctx: &egui::Context, store: &Store, cards: &[Card], manual: bool) {
+    /// setting, starts at once and also reports when there is nothing new. An earlier
+    /// import is replaced, except cards changed since.
+    pub fn scan(&self, ctx: &egui::Context, store: &Store, layer: Option<isize>, manual: bool) {
         let delay = if manual { Duration::ZERO } else { Duration::from_secs(3) };
         let Some(path) = sticky::plum_path() else {
             *self.state.lock().unwrap() = State::Failed("Sticky Notes не найдены на этом компьютере.".into());
@@ -86,8 +97,7 @@ impl StickyImport {
             }
             *state = State::Scanning;
         }
-        let already = store.imported_ids(SOURCE_PREFIX).unwrap_or_default();
-        let layer_free = sticky::LAYER_TARGET.saturating_sub(cards.iter().filter(|c| !c.archived).count());
+        let (keep, replace) = store.import_state(SOURCE_PREFIX).unwrap_or_default();
         let (state, ctx) = (self.state.clone(), ctx.clone());
         std::thread::Builder::new()
             .name("sticky-scan".into())
@@ -99,7 +109,15 @@ impl StickyImport {
                 let next = match sticky::read_notes(&path) {
                     Ok(notes) => {
                         let read_ms = started.elapsed().as_secs_f64() * 1000.0;
-                        let plan = sticky::plan(&notes, &already, layer_free, now());
+                        let plan = sticky::plan(&notes, &keep, now());
+                        let layer_monitor = layer.and_then(crate::win::monitor_of);
+                        let in_place = plan
+                            .notes
+                            .iter()
+                            .filter(|n| n.on_layer)
+                            .filter_map(|n| n.window.as_ref())
+                            .filter(|w| layer_monitor.as_ref().is_some_and(|m| m.matches_device(&w.device)))
+                            .count();
                         let (ws1, private) = crate::win::memory_mib();
                         crate::app::append_timing_log(&format!(
                             "sticky scan: {} notes, read {read_ms:.0} ms, plan {:.0} ms, ws +{:.1} MiB (private {private:.1})\n",
@@ -108,9 +126,9 @@ impl StickyImport {
                             ws1 - ws0,
                         ));
                         match (plan.notes.is_empty(), manual) {
-                            (false, _) => State::Offer(plan),
+                            (false, _) => State::Offer(Offer { kept: keep.len(), replace, in_place, plan }),
                             (true, true) => State::Failed(format!(
-                                "Новых заметок нет: {} уже импортированы, пустых {}, дубликатов {}.",
+                                "Нечего импортировать: {} изменены в Ambient и оставлены как есть, пустых {}, дубликатов {}.",
                                 plan.stats.already_imported, plan.stats.empty, plan.stats.duplicates
                             )),
                             (true, false) => State::Idle,
@@ -127,54 +145,41 @@ impl StickyImport {
             .expect("spawn sticky scan");
     }
 
-    fn apply(&self, plan: &Plan, store: &mut Store, cards: &mut Vec<Card>, area: egui::Vec2) -> State {
-        // Positions for the notes that go onto the layer, into free grid slots.
-        let mut layout = cards.clone();
-        let positions: Vec<Option<egui::Pos2>> = plan
-            .notes
+    fn apply(offer: &Offer, store: &mut Store, cards: &mut Vec<Card>, screen: &sticky::Screen) -> State {
+        // Cards being replaced don't block their own spots.
+        let occupied: Vec<Rect> = cards
             .iter()
-            .map(|n| {
-                n.on_layer.then(|| {
-                    let pos = card::free_slot(&layout, area);
-                    layout.push(Card {
-                        id: -1,
-                        kind: n.kind,
-                        title: String::new(),
-                        body: String::new(),
-                        tags: Vec::new(),
-                        pinned: false,
-                        archived: false,
-                        pos,
-                        size: card::DEFAULT_SIZE,
-                        created_at: 0,
-                    });
-                    pos
-                })
-            })
+            .filter(|c| !offer.replace.contains(&c.id))
+            .map(|c| Rect::from_min_size(c.pos, c.size))
             .collect();
-        match store.import(SOURCE_PREFIX, &plan.notes, &positions) {
+        let rects = sticky::layout(&offer.plan.notes, screen, &occupied);
+        match store.import(SOURCE_PREFIX, &offer.plan.notes, &rects, &offer.replace) {
             Ok(batch) => {
                 let _ = store.set_setting(SETTING, "done");
                 if let Ok(loaded) = store.load() {
                     *cards = loaded;
                 }
-                State::Done { batch, stats: plan.stats.clone() }
+                State::Done { batch, stats: offer.plan.stats.clone(), replaced: offer.replace.len() }
             }
             Err(e) => State::Failed(format!("Импорт не удался: {e}")),
         }
     }
 
     /// Draws the panel, if any, in the top-right corner of the layer.
-    pub fn ui(&self, ui: &mut Ui, store: &mut Store, cards: &mut Vec<Card>, area: egui::Vec2) {
+    pub fn ui(&self, ui: &mut Ui, store: &mut Store, cards: &mut Vec<Card>, layer: Option<isize>) {
         let mut state = self.state.lock().unwrap();
         if matches!(*state, State::Idle | State::Scanning) {
             return;
         }
         let height = match &*state {
+            State::Offer(o) if !o.replace.is_empty() || o.kept > 0 => 258.0,
             State::Offer(_) => 236.0,
+            State::Done { replaced, .. } if *replaced > 0 => 154.0,
             State::Done { .. } => 132.0,
             _ => 110.0,
         };
+        let area = ui.max_rect().size();
+        let pixels_per_point = ui.ctx().pixels_per_point();
         let rect = Rect::from_min_size(ui.max_rect().right_top() + vec2(-452.0, 64.0), vec2(420.0, height));
         crate::app::glass_panel(ui, rect, false);
 
@@ -192,28 +197,42 @@ impl StickyImport {
                 ui.label(RichText::new(text).size(13.0).color(color));
             };
             match &*state {
-                State::Offer(plan) => {
-                    let s = &plan.stats;
+                State::Offer(offer) => {
+                    let s = &offer.plan.stats;
                     title(ui, "Импорт из Sticky Notes");
                     line(ui, format!("Нашлось {} для импорта из {}.", notes(s.importable), s.total), TEXT);
-                    line(ui, format!("На слой: {} — открытые и недавние.", s.on_layer), TEXT_DIM);
                     line(
                         ui,
-                        format!("В архив: {} (не менялись больше года: {}). Их найдёт поиск.", s.archived, s.old),
+                        format!(
+                            "На слой: {} открытых, как на экране ({} на свои места, {} рядом).",
+                            s.on_layer,
+                            offer.in_place,
+                            s.on_layer - offer.in_place
+                        ),
                         TEXT_DIM,
                     );
+                    line(ui, format!("В архив: {} (давно не менялись: {}). Их найдёт поиск.", s.archived, s.old), TEXT_DIM);
                     let kinds: Vec<String> = s.by_kind.iter().map(|(k, n)| format!("{} {n}", k.label())).collect();
                     line(ui, kinds.join(" · "), TEXT_DIM);
-                    let mut skipped = vec![format!("пустых {}", s.empty), format!("дубликатов {}", s.duplicates)];
-                    if s.already_imported > 0 {
-                        skipped.push(format!("уже импортированных {}", s.already_imported));
+                    line(ui, format!("Пропущу: пустых {}, дубликатов {}.", s.empty, s.duplicates), TEXT_MUTED);
+                    if !offer.replace.is_empty() || offer.kept > 0 {
+                        line(
+                            ui,
+                            format!(
+                                "Прошлый импорт: заменю {}, оставлю изменённые тобой ({}).",
+                                offer.replace.len(),
+                                offer.kept
+                            ),
+                            TEXT_MUTED,
+                        );
                     }
-                    line(ui, format!("Пропущу: {}.", skipped.join(", ")), TEXT_MUTED);
                     line(ui, "Sticky Notes не меняются: читается копия базы.".into(), TEXT_MUTED);
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         if ui.button("Импортировать").clicked() {
-                            next = Some(self.apply(plan, store, cards, area));
+                            let layer_monitor = layer.and_then(crate::win::monitor_of);
+                            let screen = sticky::Screen { layer: layer_monitor.as_ref(), pixels_per_point, area };
+                            next = Some(Self::apply(offer, store, cards, &screen));
                         }
                         if ui.button("Не сейчас").clicked() {
                             next = Some(State::Idle);
@@ -226,13 +245,16 @@ impl StickyImport {
                         });
                     });
                 }
-                State::Done { batch, stats } => {
+                State::Done { batch, stats, replaced } => {
                     title(ui, "Sticky Notes импортированы");
                     line(
                         ui,
                         format!("{}: {} на слое, {} в архиве.", notes(stats.importable), stats.on_layer, stats.archived),
                         TEXT,
                     );
+                    if *replaced > 0 {
+                        line(ui, format!("Заменено из прошлого импорта: {replaced}.",), TEXT_MUTED);
+                    }
                     line(ui, "Оригиналы в Sticky Notes остались на месте.".into(), TEXT_MUTED);
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {

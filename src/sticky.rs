@@ -16,12 +16,8 @@ use crate::card::{Kind, parse_capture};
 
 /// .NET ticks (100 ns since 0001-01-01) at the Unix epoch.
 const TICKS_AT_UNIX_EPOCH: i64 = 621_355_968_000_000_000;
-/// Notes not edited for this long are imported to the archive.
+/// Closed notes not edited for this long are counted as old in the summary.
 pub const OLD_AFTER_DAYS: i64 = 365;
-/// At most this many imported notes go onto the layer...
-pub const MAX_ON_LAYER: usize = 8;
-/// ...and the layer is not filled beyond this many cards in total.
-pub const LAYER_TARGET: usize = 12;
 
 pub fn plum_path() -> Option<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA")?;
@@ -34,11 +30,41 @@ pub fn ticks_to_unix(ticks: i64) -> i64 {
     (ticks - TICKS_AT_UNIX_EPOCH) / 10_000_000
 }
 
+/// Where a Sticky Notes window was: `ManagedPosition=DeviceId:<path>;Position=x,y;Size=w,h`.
+/// Coordinates are pixels relative to that monitor's top-left corner.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowPos {
+    pub device: String,
+    pub pos: (i32, i32),
+    pub size: (i32, i32),
+}
+
+pub fn parse_window_position(s: &str) -> Option<WindowPos> {
+    let mut device = None;
+    let mut pos = None;
+    let mut size = None;
+    let pair = |v: &str| {
+        let (a, b) = v.split_once(',')?;
+        Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+    };
+    for part in s.split(';') {
+        let (key, value) = part.split_once('=')?;
+        match key.trim() {
+            "ManagedPosition" => device = value.strip_prefix("DeviceId:").map(str::to_owned),
+            "Position" => pos = pair(value),
+            "Size" => size = pair(value),
+            _ => {}
+        }
+    }
+    Some(WindowPos { device: device?, pos: pos?, size: size? })
+}
+
 #[derive(Clone, Debug)]
 pub struct SourceNote {
     pub id: String,
     pub text: String,
     pub is_open: bool,
+    pub window: Option<WindowPos>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -105,7 +131,7 @@ pub fn read_notes(src: &Path) -> Result<Vec<SourceNote>, String> {
         let conn = Connection::open_with_flags(&copy, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)
             .map_err(|e| format!("open copy: {e}"))?;
         let mut stmt = conn
-            .prepare("SELECT Id, Text, IsOpen, CreatedAt, UpdatedAt FROM Note WHERE DeletedAt IS NULL")
+            .prepare("SELECT Id, Text, IsOpen, CreatedAt, UpdatedAt, WindowPosition FROM Note WHERE DeletedAt IS NULL")
             .map_err(|e| format!("query: {e}"))?;
         let rows = stmt
             .query_map([], |r| {
@@ -113,6 +139,7 @@ pub fn read_notes(src: &Path) -> Result<Vec<SourceNote>, String> {
                     id: r.get(0)?,
                     text: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
                     is_open: r.get::<_, Option<i64>>(2)?.unwrap_or(0) != 0,
+                    window: r.get::<_, Option<String>>(5)?.as_deref().and_then(parse_window_position),
                     created_at: ticks_to_unix(r.get::<_, Option<i64>>(3)?.unwrap_or(TICKS_AT_UNIX_EPOCH)),
                     updated_at: ticks_to_unix(r.get::<_, Option<i64>>(4)?.unwrap_or(TICKS_AT_UNIX_EPOCH)),
                 })
@@ -236,7 +263,9 @@ pub struct Planned {
     pub tags: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Open in Sticky Notes: goes onto the layer, placed by [`layout`].
     pub on_layer: bool,
+    pub window: Option<WindowPos>,
     pub old: bool,
 }
 
@@ -259,14 +288,16 @@ pub struct Plan {
     pub stats: Stats,
 }
 
-/// Decides what to import and where. `already` holds source ids imported earlier;
-/// `layer_free` is how many more cards the layer can take.
-pub fn plan(notes: &[SourceNote], already: &std::collections::HashSet<String>, layer_free: usize, now: i64) -> Plan {
+/// Decides what to import. Notes open in Sticky Notes go onto the layer (all of
+/// them, as on screen); the rest go to the archive. `already` holds source ids
+/// that must not be imported again (kept from an earlier import).
+pub fn plan(notes: &[SourceNote], already: &std::collections::HashSet<String>, now: i64) -> Plan {
     let mut stats = Stats { total: notes.len(), ..Default::default() };
 
-    // Newest first, so the kept copy of a duplicate is the most recently edited one.
+    // Open notes first, then newest: the kept copy of a duplicate is the one on
+    // screen, or else the most recently edited.
     let mut sorted: Vec<&SourceNote> = notes.iter().collect();
-    sorted.sort_by_key(|n| std::cmp::Reverse(n.updated_at));
+    sorted.sort_by_key(|n| (std::cmp::Reverse(n.is_open), std::cmp::Reverse(n.updated_at)));
 
     let mut seen: HashMap<String, ()> = HashMap::new();
     let mut planned = Vec::new();
@@ -286,7 +317,6 @@ pub fn plan(notes: &[SourceNote], already: &std::collections::HashSet<String>, l
             continue;
         }
         let kind = classify(&plain);
-        let old = now - note.updated_at > OLD_AFTER_DAYS * 86_400;
         planned.push(Planned {
             source_id: note.id.clone(),
             kind,
@@ -296,28 +326,15 @@ pub fn plan(notes: &[SourceNote], already: &std::collections::HashSet<String>, l
             tags: tags(&plain),
             created_at: note.created_at,
             updated_at: note.updated_at,
-            // Candidate for the layer; trimmed to the budget below.
-            on_layer: note.is_open && !old,
-            old,
+            on_layer: note.is_open,
+            window: note.window.clone(),
+            old: !note.is_open && now - note.updated_at > OLD_AFTER_DAYS * 86_400,
         });
     }
 
-    // Open, recent notes go onto the layer, newest first, within the budget.
-    let budget = layer_free.min(MAX_ON_LAYER);
-    let mut placed = 0;
-    for p in &mut planned {
-        if p.on_layer {
-            if placed < budget {
-                placed += 1;
-            } else {
-                p.on_layer = false;
-            }
-        }
-    }
-
     stats.importable = planned.len();
-    stats.on_layer = placed;
-    stats.archived = planned.len() - placed;
+    stats.on_layer = planned.iter().filter(|p| p.on_layer).count();
+    stats.archived = planned.len() - stats.on_layer;
     stats.old = planned.iter().filter(|p| p.old).count();
     stats.by_kind = Kind::ALL
         .iter()
@@ -325,6 +342,100 @@ pub fn plan(notes: &[SourceNote], already: &std::collections::HashSet<String>, l
         .filter(|(_, n)| *n > 0)
         .collect();
     Plan { notes: planned, stats }
+}
+
+// ---------------------------------------------------------------------------
+// Layout
+// ---------------------------------------------------------------------------
+
+/// Screen geometry for placing imported notes on the layer.
+pub struct Screen<'a> {
+    /// The monitor the layer covers.
+    pub layer: Option<&'a crate::win::Monitor>,
+    /// Physical pixels per layer point.
+    pub pixels_per_point: f32,
+    /// Layer size in points.
+    pub area: egui::Vec2,
+}
+
+const HEADER_CLEAR: f32 = 64.0;
+const GAP: f32 = 8.0;
+
+/// First free spot (row by row, on the 8 pt grid) for a card of `size`, keeping a
+/// gap to `taken`.
+pub fn find_free(taken: &[egui::Rect], size: egui::Vec2, area: egui::Vec2) -> Option<egui::Pos2> {
+    let step = 8.0;
+    let mut y = HEADER_CLEAR;
+    while y + size.y <= area.y {
+        let mut x = 24.0;
+        while x + size.x <= area.x {
+            let r = egui::Rect::from_min_size(egui::pos2(x, y), size);
+            if !taken.iter().any(|t| t.expand(GAP).intersects(r)) {
+                return Some(r.min);
+            }
+            x += step;
+        }
+        y += step;
+    }
+    None
+}
+
+/// A spot for a card that would like `size`: at that size if it fits anywhere,
+/// else smaller (default, then minimum card size), else cascaded as a last resort.
+pub fn place(taken: &[egui::Rect], size: egui::Vec2, area: egui::Vec2) -> egui::Rect {
+    use crate::card::{DEFAULT_SIZE, MIN_SIZE};
+    for candidate in [size, DEFAULT_SIZE.min(size), MIN_SIZE] {
+        if let Some(pos) = find_free(taken, candidate, area) {
+            return egui::Rect::from_min_size(pos, candidate);
+        }
+    }
+    let n = taken.len() as f32 % 12.0;
+    egui::Rect::from_min_size(egui::pos2(40.0 + n * 24.0, HEADER_CLEAR + 16.0 + n * 24.0), size)
+}
+
+/// Rectangles (layer points) for the notes that go onto the layer, `None` for the
+/// rest. Notes that were on the layer's monitor keep their position and size;
+/// notes from other monitors keep their size and take the first free spot.
+pub fn layout(notes: &[Planned], screen: &Screen, occupied: &[egui::Rect]) -> Vec<Option<egui::Rect>> {
+    use crate::card::{DEFAULT_SIZE, MIN_SIZE};
+
+    let ppp = screen.pixels_per_point.max(0.5);
+    let fit = |size: egui::Vec2| size.max(MIN_SIZE).min(screen.area);
+    let mut out: Vec<Option<egui::Rect>> = vec![None; notes.len()];
+    let mut taken: Vec<egui::Rect> = occupied.to_vec();
+
+    // Exact placements first, so free-spot search avoids them.
+    for (i, n) in notes.iter().enumerate().filter(|(_, n)| n.on_layer) {
+        let (Some(w), Some(layer)) = (&n.window, screen.layer) else { continue };
+        if !layer.matches_device(&w.device) {
+            continue;
+        }
+        let size = fit(egui::vec2(w.size.0 as f32, w.size.1 as f32) / ppp);
+        // Position is relative to the monitor; the layer starts at its work area.
+        let x = (w.pos.0 + layer.rect.left - layer.work.left) as f32 / ppp;
+        let y = (w.pos.1 + layer.rect.top - layer.work.top) as f32 / ppp;
+        let min = egui::pos2(x.clamp(0.0, (screen.area.x - size.x).max(0.0)), y.clamp(0.0, (screen.area.y - size.y).max(0.0)));
+        let r = egui::Rect::from_min_size(min, size);
+        out[i] = Some(r);
+        taken.push(r);
+    }
+    for (i, n) in notes.iter().enumerate().filter(|(_, n)| n.on_layer) {
+        if out[i].is_some() {
+            continue;
+        }
+        let size = match &n.window {
+            Some(w) => {
+                // Scale by the source monitor's DPI? Positions are stored in that
+                // monitor's pixels; without its DPI, the layer's is the best guess.
+                fit(egui::vec2(w.size.0 as f32, w.size.1 as f32) / ppp)
+            }
+            None => DEFAULT_SIZE,
+        };
+        let r = place(&taken, size, screen.area);
+        out[i] = Some(r);
+        taken.push(r);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -364,6 +475,7 @@ mod tests {
             id: id.into(),
             text: format!("\\id={ID} {text}"),
             is_open: open,
+            window: None,
             created_at: now - updated_days_ago * 86_400,
             updated_at: now - updated_days_ago * 86_400,
         }
@@ -372,30 +484,93 @@ mod tests {
     #[test]
     fn plans_layer_archive_duplicates_and_reimport() {
         let notes = vec![
-            note("a", "идея: weekly recap", true, 3),
-            note("b", "идея:  Weekly   recap", false, 10), // duplicate of a (older)
-            note("c", "", true, 1),                        // empty
-            note("d", "старая заметка", true, 800),        // open but old -> archive
-            note("e", "https://example.com", false, 5),
+            note("a", "идея: weekly recap", false, 3),
+            note("b", "идея:  Weekly   recap", true, 10), // duplicate of a, but open: kept
+            note("c", "", true, 1),                       // empty
+            note("d", "старая заметка", true, 800),       // open, however old: on the layer
+            note("e", "https://example.com", false, 900), // closed and old
             note("f", "wifi пароль 123", true, 2),
         ];
         let now = 2_000_000_000;
-        let p = plan(&notes, &Default::default(), 10, now);
+        let p = plan(&notes, &Default::default(), now);
         assert_eq!(p.stats.duplicates, 1);
         assert_eq!(p.stats.empty, 1);
         assert_eq!(p.stats.importable, 4);
         assert_eq!(p.stats.old, 1);
-        let on_layer: Vec<_> = p.notes.iter().filter(|n| n.on_layer).map(|n| n.source_id.as_str()).collect();
-        assert_eq!(on_layer, ["f", "a"]);
+        let mut on_layer: Vec<_> = p.notes.iter().filter(|n| n.on_layer).map(|n| n.source_id.as_str()).collect();
+        on_layer.sort();
+        assert_eq!(on_layer, ["b", "d", "f"]);
         assert_eq!(p.notes.iter().find(|n| n.source_id == "f").unwrap().kind, Kind::Private);
         assert_eq!(p.notes.iter().find(|n| n.source_id == "e").unwrap().kind, Kind::Link);
 
-        let limited = plan(&notes, &Default::default(), 1, now);
-        assert_eq!(limited.stats.on_layer, 1);
-
-        let already = ["a".to_owned(), "f".to_owned()].into_iter().collect();
-        let again = plan(&notes, &already, 10, now);
+        let already = ["b".to_owned(), "f".to_owned()].into_iter().collect();
+        let again = plan(&notes, &already, now);
         assert_eq!(again.stats.already_imported, 2);
-        assert!(again.notes.iter().all(|n| n.source_id != "a" && n.source_id != "f"));
+        assert!(again.notes.iter().all(|n| n.source_id != "b" && n.source_id != "f"));
+    }
+
+    #[test]
+    fn parses_window_position() {
+        let w = parse_window_position(r"ManagedPosition=DeviceId:\\?\DISPLAY#XMI27B1#5&c579a42&0&UID4353#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7};Position=1263,170;Size=317,285").unwrap();
+        assert_eq!((w.pos, w.size), ((1263, 170), (317, 285)));
+        assert!(w.device.starts_with(r"\\?\DISPLAY#XMI27B1"));
+        assert_eq!(parse_window_position("garbage"), None);
+    }
+
+    #[test]
+    fn lays_out_like_the_screen() {
+        use crate::win::Monitor;
+        use windows::Win32::Foundation::RECT;
+        let second = Monitor {
+            handle: 1,
+            rect: RECT { left: 2560, top: 165, right: 4480, bottom: 1245 },
+            work: RECT { left: 2560, top: 165, right: 4480, bottom: 1197 },
+            primary: false,
+            device_ids: vec![r"\\?\DISPLAY#AAA#1&2&UID1#{guid}".into()],
+        };
+        let main = Monitor {
+            handle: 2,
+            rect: RECT { left: 0, top: 0, right: 2560, bottom: 1440 },
+            work: RECT { left: 0, top: 0, right: 2560, bottom: 1392 },
+            primary: true,
+            device_ids: vec![r"\\?\DISPLAY#BBB#1&2&UID2#{guid}".into()],
+        };
+        let _ = main;
+        let screen = Screen { layer: Some(&second), pixels_per_point: 1.0, area: egui::vec2(1920.0, 1032.0) };
+        let planned = |id: &str, device: &str, pos, size| Planned {
+            source_id: id.into(),
+            kind: Kind::Note,
+            title: String::new(),
+            body: String::new(),
+            tags: vec![],
+            created_at: 0,
+            updated_at: 0,
+            on_layer: true,
+            window: Some(WindowPos { device: device.into(), pos, size }),
+            old: false,
+        };
+        let notes = [
+            planned("here", r"\\?\DISPLAY#AAA#1&2&UID1#{other-guid}", (1263, 170), (317, 285)),
+            planned("main", r"\\?\DISPLAY#BBB#1&2&UID2#{guid}", (2207, 102), (353, 405)),
+            planned("off-edge", r"\\?\DISPLAY#AAA#1&2&UID1#{guid}", (1800, 900), (320, 320)),
+        ];
+        let rects = layout(&notes, &screen, &[]);
+        assert_eq!(rects[0], Some(egui::Rect::from_min_size(egui::pos2(1263.0, 170.0), egui::vec2(317.0, 285.0))));
+        // Kept its size, placed without overlapping the exact ones.
+        let main_rect = rects[1].unwrap();
+        assert_eq!(main_rect.size(), egui::vec2(353.0, 405.0));
+        assert!(!main_rect.intersects(rects[0].unwrap()) && !main_rect.intersects(rects[2].unwrap()));
+        // Clamped into the layer.
+        assert_eq!(rects[2].unwrap().max, egui::pos2(1920.0, 1032.0));
+    }
+
+    #[test]
+    fn crowded_layer_shrinks_instead_of_stacking() {
+        let area = egui::vec2(1000.0, 600.0);
+        // Everything taken except a 170 pt strip at the bottom.
+        let taken = [egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1000.0, 420.0))];
+        let r = place(&taken, egui::vec2(350.0, 400.0), area);
+        assert_eq!(r.size(), crate::card::DEFAULT_SIZE);
+        assert!(!r.intersects(taken[0]) && r.max.y <= area.y);
     }
 }

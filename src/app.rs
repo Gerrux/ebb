@@ -564,7 +564,7 @@ impl eframe::App for AmbientApp {
                 Event::Exit => ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close),
                 Event::ImportSticky => {
                     self.set_layer_visible(ctx, true);
-                    self.sticky.scan(ctx, &self.store, &self.cards, true);
+                    self.sticky.scan(ctx, &self.store, self.hwnd, true);
                 }
             }
         }
@@ -634,7 +634,7 @@ impl eframe::App for AmbientApp {
             });
             // Out of the way of logon and the first frames; not during benchmarks.
             if crate::bench::path().is_none() {
-                self.sticky.maybe_offer(ui.ctx(), &self.store, &self.cards);
+                self.sticky.maybe_offer(ui.ctx(), &self.store, self.hwnd);
             }
             if let Some(out) = crate::bench::path() {
                 let (shell, ctx) = (self.shell.clone(), ui.ctx().clone());
@@ -680,8 +680,7 @@ impl eframe::App for AmbientApp {
 
         self.header(ui);
         self.cards_ui(ui);
-        let area = self.area(ui);
-        self.sticky.ui(ui, &mut self.store, &mut self.cards, area);
+        self.sticky.ui(ui, &mut self.store, &mut self.cards, self.hwnd);
         self.toast_ui(ui);
         if self.show_debug {
             self.debug_ui(ui);

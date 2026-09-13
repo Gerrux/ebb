@@ -286,22 +286,56 @@ impl Store {
         Ok(())
     }
 
-    pub fn imported_ids(&self, prefix: &str) -> rusqlite::Result<std::collections::HashSet<String>> {
-        let mut stmt = self.conn.prepare("SELECT source_id FROM imported WHERE source_id LIKE ?1 || '%'")?;
-        let rows = stmt.query_map([prefix], |r| r.get::<_, String>(0))?;
-        rows.map(|r| r.map(|s| s[prefix.len()..].to_owned())).collect()
+    /// State of earlier imports from `prefix`, for importing again:
+    /// - source ids to leave alone: their card was changed in Ambient (moved, edited,
+    ///   trashed) or is gone, so a re-import must not duplicate or resurrect it;
+    /// - card ids that are still exactly as imported and can be replaced.
+    ///
+    /// "Changed" is `updated_at > last_viewed_at`: an import sets last_viewed_at to
+    /// the import time (layer) or the note's own updated_at (archive), and every
+    /// save() moves updated_at to now.
+    pub fn import_state(&self, prefix: &str) -> rusqlite::Result<(std::collections::HashSet<String>, Vec<i64>)> {
+        let mut stmt = self.conn.prepare(
+            "SELECT i.source_id, c.id,
+                    c.id IS NOT NULL AND c.deleted_at IS NULL AND c.updated_at <= c.last_viewed_at
+             FROM imported i LEFT JOIN cards c ON c.id = i.card_id
+             WHERE i.source_id LIKE ?1 || '%'",
+        )?;
+        let mut keep = std::collections::HashSet::new();
+        let mut replace = Vec::new();
+        let rows = stmt.query_map([prefix], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, bool>(2)?)))?;
+        for row in rows {
+            let (source, card, replaceable) = row?;
+            match (replaceable, card) {
+                (true, Some(id)) => replace.push(id),
+                _ => {
+                    keep.insert(source[prefix.len()..].to_owned());
+                }
+            }
+        }
+        Ok((keep, replace))
     }
 
-    /// Inserts imported notes in one transaction. `positions[i]` is `Some` for notes
-    /// that go onto the layer. Returns the batch id.
+    /// In one transaction: removes the `replace` cards of an earlier import, then
+    /// inserts `notes`. `rects[i]` is `Some` for notes that go onto the layer.
+    /// Returns the batch id.
     pub fn import(
         &mut self,
         prefix: &str,
         notes: &[crate::sticky::Planned],
-        positions: &[Option<egui::Pos2>],
+        rects: &[Option<egui::Rect>],
+        replace: &[i64],
     ) -> rusqlite::Result<i64> {
         let viewed = now();
         let tx = self.conn.transaction()?;
+        {
+            let mut drop_card = tx.prepare("DELETE FROM cards WHERE id=?1")?;
+            let mut drop_link = tx.prepare("DELETE FROM imported WHERE card_id=?1")?;
+            for id in replace {
+                drop_card.execute([id])?;
+                drop_link.execute([id])?;
+            }
+        }
         let batch: i64 = tx.query_row("SELECT COALESCE(MAX(batch), 0) + 1 FROM imported", [], |r| r.get(0))?;
         {
             let mut card = tx.prepare(
@@ -309,22 +343,24 @@ impl Store {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             )?;
             let mut link = tx.prepare("INSERT INTO imported (source_id, card_id, batch) VALUES (?1, ?2, ?3)")?;
-            for (n, pos) in notes.iter().zip(positions) {
-                let p = pos.unwrap_or(egui::Pos2::ZERO);
+            for (n, rect) in notes.iter().zip(rects) {
+                let r = rect.unwrap_or(egui::Rect::from_min_size(egui::Pos2::ZERO, DEFAULT_SIZE));
                 card.execute(params![
                     n.kind.as_str(),
                     n.title,
                     n.body,
                     n.tags.join(","),
-                    pos.is_none(),
-                    p.x,
-                    p.y,
-                    DEFAULT_SIZE.x,
-                    DEFAULT_SIZE.y,
+                    rect.is_none(),
+                    r.min.x,
+                    r.min.y,
+                    r.width(),
+                    r.height(),
                     n.created_at,
                     n.updated_at,
                     // Not "viewed" in Ambient yet, except what lands on the layer now.
-                    if pos.is_some() { viewed } else { n.updated_at },
+                    // One second back: timestamps are in seconds, and a move right
+                    // after the import must still count as a change (import_state).
+                    if rect.is_some() { (viewed - 1).max(n.updated_at) } else { n.updated_at },
                 ])?;
                 link.execute(params![format!("{prefix}{}", n.source_id), tx.last_insert_rowid(), batch])?;
             }
@@ -465,6 +501,7 @@ mod tests {
             created_at: 1_600_000_000,
             updated_at: 1_650_000_000,
             on_layer,
+            window: None,
             old: false,
         }
     }
@@ -599,33 +636,51 @@ mod tests {
     }
 
     #[test]
-    fn import_is_idempotent_and_undoable() {
+    fn import_replace_keeps_changed_cards_and_undo() {
         let (mut store, dir) = temp_store("import");
-        let notes = [planned("a", true), planned("b", false)];
-        let batch = store.import("sticky:", &notes, &[Some(egui::pos2(10.0, 20.0)), None]).unwrap();
+        let notes = [planned("a", true), planned("b", false), planned("c", false)];
+        let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(317.0, 285.0));
+        store.import("sticky:", &notes, &[Some(rect), None, None], &[]).unwrap();
 
         let visible = store.load().unwrap();
         assert_eq!(visible.len(), 1, "only the on-layer note is loaded");
         assert_eq!(visible[0].created_at, 1_600_000_000, "original timestamps are kept");
-        let ids = store.imported_ids("sticky:").unwrap();
-        assert_eq!(ids, ["a".to_owned(), "b".to_owned()].into_iter().collect());
+        assert_eq!((visible[0].pos, visible[0].size), (rect.min, rect.size()), "position and size kept");
 
-        // A second scan of the same source plans nothing new.
-        let source: Vec<_> = ["a", "b"]
+        // Untouched: everything can be replaced.
+        let (keep, replace) = store.import_state("sticky:").unwrap();
+        assert!(keep.is_empty());
+        assert_eq!(replace.len(), 3);
+
+        // The user moves "a" and trashes "b": those stay; only "c" is replaceable.
+        let mut a = visible[0].clone();
+        a.pos = egui::pos2(100.0, 100.0);
+        store.save(&a).unwrap();
+        let b = store.search(&crate::search::parse("note b", now(), 0), Scope::Archive, 5).unwrap()[0].id;
+        store.delete(b).unwrap();
+        let (keep, replace) = store.import_state("sticky:").unwrap();
+        assert_eq!(keep, ["a".to_owned(), "b".to_owned()].into_iter().collect());
+        assert_eq!(replace.len(), 1);
+
+        // Re-import: "c" is replaced, "a" and "b" are not duplicated.
+        let source: Vec<_> = ["a", "b", "c"]
             .iter()
             .map(|id| crate::sticky::SourceNote {
                 id: (*id).into(),
                 text: format!("\\id=0b1e2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d note {id}"),
-                is_open: true,
+                is_open: false,
+                window: None,
                 created_at: 0,
                 updated_at: 1_650_000_000,
             })
             .collect();
-        assert!(plan(&source, &ids, 10, 1_700_000_000).notes.is_empty());
+        let again = plan(&source, &keep, 1_700_000_000);
+        assert_eq!(again.notes.len(), 1);
+        let batch = store.import("sticky:", &again.notes, &[None], &replace).unwrap();
+        assert_eq!(store.counts().unwrap(), (1, 1, 1), "a on layer, new c archived, b in trash");
 
-        assert_eq!(store.undo_import(batch).unwrap(), 2);
-        assert!(store.load().unwrap().is_empty());
-        assert!(store.imported_ids("sticky:").unwrap().is_empty());
+        assert_eq!(store.undo_import(batch).unwrap(), 1);
+        assert_eq!(store.counts().unwrap(), (1, 0, 1));
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
