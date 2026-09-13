@@ -49,6 +49,7 @@ pub enum Event {
     ToggleLayer,
     ShowLayer,
     TogglePinBottom,
+    ImportSticky,
     Exit,
 }
 
@@ -237,6 +238,7 @@ unsafe fn tray_menu(hwnd: HWND, pt: POINT) {
     const CAPTURE: usize = 2;
     const BOTTOM: usize = 3;
     const AUTOSTART: usize = 4;
+    const IMPORT: usize = 5;
     const EXIT: usize = 9;
 
     let (visible, bottom, hotkey) = STATE.with_borrow(|s| {
@@ -253,7 +255,7 @@ unsafe fn tray_menu(hwnd: HWND, pt: POINT) {
 
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
-        let items: [(_, usize, Option<String>); 7] = [
+        let items: [(_, usize, Option<String>); 8] = [
             (MF_STRING, LAYER, Some(if visible { "Скрыть слой" } else { "Показать слой" }.into())),
             (MF_STRING, CAPTURE, Some(match hotkey {
                 Some(h) => format!("Записать мысль\t{h}"),
@@ -262,6 +264,7 @@ unsafe fn tray_menu(hwnd: HWND, pt: POINT) {
             (MF_SEPARATOR, 0, None),
             (check(bottom), BOTTOM, Some("Слой под окнами".into())),
             (check(autostart_on), AUTOSTART, Some("Запускать при входе в Windows".into())),
+            (MF_STRING, IMPORT, Some("Импорт из Sticky Notes…".into())),
             (MF_SEPARATOR, 0, None),
             (MF_STRING, EXIT, Some("Выход".into())),
         ];
@@ -293,6 +296,7 @@ unsafe fn tray_menu(hwnd: HWND, pt: POINT) {
                     eprintln!("autostart: {e}");
                 }
             }
+            IMPORT => push(Event::ImportSticky),
             EXIT => push(Event::Exit),
             _ => {}
         }

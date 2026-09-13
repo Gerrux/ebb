@@ -11,6 +11,7 @@ use egui::{
 
 use std::sync::atomic::Ordering;
 
+use crate::import_ui::StickyImport;
 use crate::shell::{self, Event};
 use crate::autostart;
 use crate::card::{self, Card, Kind, MIN_SIZE, parse_capture};
@@ -90,6 +91,8 @@ pub struct AmbientApp {
     editing: Option<(i64, String)>,
     revealed: Option<(i64, Instant)>,
 
+    sticky: StickyImport,
+
     show_debug: bool,
     /// Autostart task state, filled in by a background query when the debug panel opens.
     autostart: Arc<Mutex<AutostartUi>>,
@@ -139,6 +142,7 @@ impl AmbientApp {
             tint: 70,
             editing: None,
             revealed: None,
+            sticky: StickyImport::default(),
             show_debug: false,
             autostart: Arc::default(),
             autostarted,
@@ -456,6 +460,10 @@ impl eframe::App for AmbientApp {
                     self.shell.pin_bottom.store(on, Ordering::Relaxed);
                 }
                 Event::Exit => ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close),
+                Event::ImportSticky => {
+                    self.set_layer_visible(ctx, true);
+                    self.sticky.scan(ctx, &self.store, &self.cards, true);
+                }
             }
         }
 
@@ -512,6 +520,10 @@ impl eframe::App for AmbientApp {
                 std::thread::sleep(Duration::from_secs(2));
                 win::trim_working_set();
             });
+            // Out of the way of logon and the first frames; not during benchmarks.
+            if crate::bench::path().is_none() {
+                self.sticky.maybe_offer(ui.ctx(), &self.store, &self.cards);
+            }
             if let Some(out) = crate::bench::path() {
                 let (shell, ctx) = (self.shell.clone(), ui.ctx().clone());
                 let capture = self.capture.clone();
@@ -554,6 +566,8 @@ impl eframe::App for AmbientApp {
 
         self.header(ui);
         self.cards_ui(ui);
+        let area = self.area(ui);
+        self.sticky.ui(ui, &mut self.store, &mut self.cards, area);
         if self.show_debug {
             self.debug_ui(ui);
         }
@@ -593,6 +607,10 @@ fn log_first_frame(frame_at: u64, proc_ms: f64, main_ms: f64, autostarted: bool)
         rel(win::process_start_filetime()),
         rel(win::explorer_start_filetime()),
     );
+    append_timing_log(&line);
+}
+
+pub(crate) fn append_timing_log(line: &str) {
     if let Some(dir) = crate::store::db_path().parent() {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("timing.log")) {
@@ -608,7 +626,7 @@ fn log_first_frame(frame_at: u64, proc_ms: f64, main_ms: f64, autostarted: bool)
 // Widgets
 // ---------------------------------------------------------------------------
 
-fn glass_panel(ui: &Ui, rect: Rect, hovered: bool) {
+pub(crate) fn glass_panel(ui: &Ui, rect: Rect, hovered: bool) {
     let radius = CornerRadius::same(12);
     let painter = ui.painter();
     painter.add(
