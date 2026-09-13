@@ -5,6 +5,7 @@ mod autostart;
 mod bench;
 mod card;
 mod renderer;
+mod shell;
 mod store;
 mod theme;
 mod win;
@@ -61,6 +62,16 @@ fn main() -> eframe::Result {
         std::process::exit(code);
     }
     let autostarted = args.iter().any(|a| a == autostart::FLAG);
+    // Before opening the database or creating any window: a second launch only
+    // asks the running instance to show its layer (or, with --quit, to exit).
+    let quit = args.iter().any(|a| a == "--quit");
+    if !shell::claim_single_instance() {
+        shell::send_to_existing(if quit { shell::Request::Quit } else { shell::Request::ShowLayer });
+        return Ok(());
+    }
+    if quit {
+        return Ok(()); // nothing running
+    }
 
     let store = Store::open().expect("open database");
     let mut cards = store.load().expect("load cards");
@@ -74,6 +85,7 @@ fn main() -> eframe::Result {
             .with_inner_size([1280.0, 800.0])
             .with_decorations(false)
             .with_transparent(true)
+            .with_taskbar(false)
             .with_close_button(false)
             .with_minimize_button(false)
             .with_maximize_button(false),

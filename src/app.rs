@@ -9,6 +9,9 @@ use egui::{
     ViewportCommand, ViewportId, pos2, vec2,
 };
 
+use std::sync::atomic::Ordering;
+
+use crate::shell::{self, Event};
 use crate::autostart;
 use crate::card::{self, Card, Kind, MIN_SIZE, parse_capture};
 use crate::store::Store;
@@ -76,10 +79,10 @@ pub struct AmbientApp {
     store: Store,
     cards: Vec<Card>,
     capture: Arc<Mutex<CaptureState>>,
-    hotkey: Arc<Mutex<Option<Instant>>>,
-    hotkey_label: Option<&'static str>,
+    shell: Arc<shell::Shared>,
 
     hwnd: Option<isize>,
+    layer_visible: bool,
     backdrop: Backdrop,
     monitor: usize,
     tint: u8,
@@ -114,18 +117,23 @@ impl AmbientApp {
                 win::place_on(h, m);
             }
             win::apply_backdrop(h, backdrop);
+            // Still hidden here (eframe shows it after the first frame), so the
+            // taskbar never sees a button.
+            win::install_window_rules(h, win::LAYER);
         }
 
-        let hotkey = Arc::new(Mutex::new(None));
-        let hotkey_label = win::spawn_capture_hotkey(cc.egui_ctx.clone(), hotkey.clone());
+        let shell = Arc::new(shell::Shared::default());
+        shell.layer_visible.store(true, Ordering::Relaxed);
+        shell.pin_bottom.store(win::PIN_BOTTOM.load(Ordering::Relaxed), Ordering::Relaxed);
+        shell::spawn(cc.egui_ctx.clone(), shell.clone());
 
         Self {
             store,
             cards,
             capture: Arc::default(),
-            hotkey,
-            hotkey_label,
+            shell,
             hwnd,
+            layer_visible: true,
             backdrop,
             monitor: 0,
             tint: 70,
@@ -209,7 +217,11 @@ impl AmbientApp {
             format!(
                 "{} карточек  ·  {} — записать  ·  F1 — debug",
                 self.cards.len(),
-                self.hotkey_label.unwrap_or("хоткей занят")
+                match self.shell.hotkey_label.get() {
+                    Some(Some(label)) => label,
+                    Some(None) => "хоткей занят",
+                    None => "…",
+                }
             ),
             FontId::proportional(13.0),
             TEXT_MUTED,
@@ -376,6 +388,28 @@ impl AmbientApp {
         });
     }
 
+    fn shutdown(&mut self) {
+        self.commit_edit();
+        shell::remove_tray_icon(&self.shell);
+    }
+
+    fn set_layer_visible(&mut self, ctx: &egui::Context, visible: bool) {
+        if visible == self.layer_visible {
+            return;
+        }
+        self.layer_visible = visible;
+        self.shell.layer_visible.store(visible, Ordering::Relaxed);
+        ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(visible));
+        if !visible {
+            self.commit_edit();
+            // Nothing is drawn while hidden; give the pages back until it's shown again.
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_millis(500));
+                win::trim_working_set();
+            });
+        }
+    }
+
     fn cycle_backdrop(&mut self) {
         self.backdrop = self.backdrop.next();
         if let Some(h) = self.hwnd {
@@ -407,18 +441,36 @@ impl AmbientApp {
 
 impl eframe::App for AmbientApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let pressed = self.hotkey.lock().unwrap().take();
+        // Runs even while the layer is hidden, so tray and hotkey events work then too.
+        let mut pressed = None;
+        for event in self.shell.take_events() {
+            match event {
+                Event::Capture(t) => pressed = Some(t),
+                Event::ToggleLayer => self.set_layer_visible(ctx, !self.layer_visible),
+                Event::ShowLayer => self.set_layer_visible(ctx, true),
+                Event::TogglePinBottom => {
+                    let on = !win::PIN_BOTTOM.load(Ordering::Relaxed);
+                    if let Some(h) = self.hwnd {
+                        win::set_pin_bottom(h, on);
+                    }
+                    self.shell.pin_bottom.store(on, Ordering::Relaxed);
+                }
+                Event::Exit => ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close),
+            }
+        }
 
         let mut cap = self.capture.lock().unwrap();
         if cap.hwnd.is_none() {
             cap.hwnd = win::find_capture_window();
             if let Some(h) = cap.hwnd {
                 win::apply_backdrop(h, Backdrop::AccentAcrylic);
+                win::install_window_rules(h, 0);
             }
         }
         if let Some(t) = pressed {
             if cap.visible {
                 cap.visible = false;
+                ctx.send_viewport_cmd_to(capture_id(), ViewportCommand::Visible(false));
             } else {
                 if let Some(h) = cap.hwnd {
                     win::move_near_cursor(h, (CAPTURE_SIZE.x * win::dpi_scale(h)) as i32);
@@ -427,6 +479,9 @@ impl eframe::App for AmbientApp {
                 cap.pressed_at = Some(t);
                 cap.latency_ms = None;
                 cap.request_focus = true;
+                // Explicit command: with the layer hidden the root ui (which carries
+                // the viewport builder) doesn't run until something is visible.
+                ctx.send_viewport_cmd_to(capture_id(), ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd_to(capture_id(), ViewportCommand::Focus);
             }
         }
@@ -458,11 +513,11 @@ impl eframe::App for AmbientApp {
                 win::trim_working_set();
             });
             if let Some(out) = crate::bench::path() {
-                let (hotkey, ctx) = (self.hotkey.clone(), ui.ctx().clone());
+                let (shell, ctx) = (self.shell.clone(), ui.ctx().clone());
                 let capture = self.capture.clone();
                 let hooks = crate::bench::Hooks {
                     trigger: Some(Box::new(move || {
-                        *hotkey.lock().unwrap() = Some(Instant::now());
+                        shell.events.lock().unwrap().push(Event::Capture(Instant::now()));
                         ctx.request_repaint();
                     })),
                     latency_ms: Box::new(move || capture.lock().unwrap().latency_ms),
@@ -505,6 +560,16 @@ impl eframe::App for AmbientApp {
         // Created up front even while hidden: creating it on the first hotkey press
         // saves ~4 MiB but doubles the first-show latency and flashes without acrylic.
         self.capture_viewport(ui);
+    }
+
+    #[cfg(feature = "glow")]
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.shutdown();
+    }
+
+    #[cfg(not(feature = "glow"))]
+    fn on_exit(&mut self) {
+        self.shutdown();
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -847,6 +912,7 @@ fn capture_ui(ui: &mut Ui, state: &Mutex<CaptureState>) {
         changed = true;
     }
     if changed {
+        ui.ctx().send_viewport_cmd(ViewportCommand::Visible(false));
         ui.ctx().request_repaint_of(ViewportId::ROOT);
     }
 }

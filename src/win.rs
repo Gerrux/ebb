@@ -1,11 +1,10 @@
 //! Thin Win32 layer: backdrop effects, monitor placement, hotkeys, metrics.
 
 use std::ffi::c_void;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use windows::Win32::Foundation::{FILETIME, HWND, LPARAM, POINT, RECT};
+use windows::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
     DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
@@ -19,13 +18,12 @@ use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY
 use windows::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
 use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 use windows::Win32::UI::Controls::MARGINS;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_WIN, RegisterHotKey, VK_SPACE,
-};
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GWL_STYLE, GetCursorPos, GetMessageW, GetWindowLongPtrW, MONITORINFOF_PRIMARY,
-    MSG, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW,
-    SetWindowPos, WM_HOTKEY, WS_SYSMENU,
+    FindWindowW, GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindowLongPtrW, HWND_BOTTOM, MONITORINFOF_PRIMARY,
+    SET_WINDOW_POS_FLAGS, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SetWindowLongPtrW, SetWindowPos, WINDOWPOS, WM_STYLECHANGING, WM_WINDOWPOSCHANGING, WS_EX_APPWINDOW,
+    WS_EX_TOOLWINDOW, WS_SYSMENU,
 };
 use windows::core::{BOOL, PCWSTR, w};
 
@@ -252,43 +250,82 @@ pub fn move_near_cursor(raw: isize, width_px: i32) {
 }
 
 // ---------------------------------------------------------------------------
-// Hotkeys
+// Window behaviour
 // ---------------------------------------------------------------------------
 
-/// Candidate capture hotkeys, first free one wins. Ctrl+Alt+Space is often taken
-/// (PowerToys), Ctrl+Space and Ctrl+Shift+Space collide with IDE completion.
-const CAPTURE_HOTKEYS: &[(&str, HOT_KEY_MODIFIERS, u32)] = &[
-    ("Win+Alt+N", HOT_KEY_MODIFIERS(MOD_WIN.0 | MOD_ALT.0), b'N' as u32),
-    ("Ctrl+Alt+N", HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_ALT.0), b'N' as u32),
-    ("Ctrl+Alt+Space", HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_ALT.0), VK_SPACE.0 as u32),
-];
+/// Whether the layer is kept at the bottom of the z-order (under other windows).
+pub static PIN_BOTTOM: AtomicBool = AtomicBool::new(true);
 
-/// Registers the capture hotkey on a dedicated thread with a blocking message loop
-/// (no polling: zero idle CPU, no added latency). Returns the chosen combo.
-pub fn spawn_capture_hotkey(ctx: egui::Context, on_press: Arc<Mutex<Option<Instant>>>) -> Option<&'static str> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
-        .name("hotkeys".into())
-        .spawn(move || unsafe {
-            // Hotkeys belong to the registering thread, so register here.
-            let chosen = CAPTURE_HOTKEYS.iter().find(|(_, mods, vk)| {
-                RegisterHotKey(None, 1, *mods | MOD_NOREPEAT, *vk).is_ok()
-            });
-            let _ = tx.send(chosen.map(|(name, ..)| *name));
-            if chosen.is_none() {
-                eprintln!("no capture hotkey could be registered");
-                return;
-            }
-            let mut msg = MSG::default();
-            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-                if msg.message == WM_HOTKEY {
-                    *on_press.lock().unwrap() = Some(Instant::now());
-                    ctx.request_repaint();
+/// Subclass flags (`dwRefData`).
+pub const LAYER: usize = 1;
+
+/// winit rewrites GWL_STYLE/GWL_EXSTYLE from its own flags whenever any of them
+/// change (e.g. on show/hide), which would undo style tweaks made once. Enforcing
+/// them in WM_STYLECHANGING keeps them regardless of who sets the style:
+/// - every window: no WS_SYSMENU (otherwise DWM draws a caption "×" in the frame);
+/// - the layer: WS_EX_TOOLWINDOW without WS_EX_APPWINDOW (no taskbar button, not in
+///   Alt+Tab), and z-order pinned to HWND_BOTTOM in WM_WINDOWPOSCHANGING, so
+///   activating the layer by clicking a card doesn't raise it over other windows.
+unsafe extern "system" fn subclass_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    flags: usize,
+) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_STYLECHANGING => {
+                let s = &mut *(lparam.0 as *mut STYLESTRUCT);
+                if wparam.0 as i32 == GWL_STYLE.0 {
+                    s.styleNew &= !WS_SYSMENU.0;
+                } else if wparam.0 as i32 == GWL_EXSTYLE.0 && flags & LAYER != 0 {
+                    s.styleNew = (s.styleNew | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0;
                 }
             }
-        })
-        .expect("spawn hotkey thread");
-    rx.recv().ok().flatten()
+            WM_WINDOWPOSCHANGING if flags & LAYER != 0 && PIN_BOTTOM.load(Ordering::Relaxed) => {
+                let pos = &mut *(lparam.0 as *mut WINDOWPOS);
+                if !pos.flags.contains(SWP_NOZORDER) {
+                    pos.hwndInsertAfter = HWND_BOTTOM;
+                }
+            }
+            _ => {}
+        }
+        DefSubclassProc(hwnd, msg, wparam, lparam)
+    }
+}
+
+/// Installs [`subclass_proc`] (must run on the window's thread) and re-applies the
+/// styles through it. `flags` is 0 or [`LAYER`].
+pub fn install_window_rules(raw: isize, flags: usize) {
+    let h = hwnd(raw);
+    unsafe {
+        let _ = SetWindowSubclass(h, Some(subclass_proc), 1, flags);
+        for index in [GWL_STYLE, GWL_EXSTYLE] {
+            SetWindowLongPtrW(h, index, GetWindowLongPtrW(h, index));
+        }
+        let _ = SetWindowPos(
+            h,
+            if flags & LAYER != 0 && PIN_BOTTOM.load(Ordering::Relaxed) { Some(HWND_BOTTOM) } else { None },
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+                | if flags & LAYER != 0 { SET_WINDOW_POS_FLAGS(0) } else { SWP_NOZORDER },
+        );
+    }
+}
+
+/// Re-applies the z-order after toggling [`PIN_BOTTOM`].
+pub fn set_pin_bottom(raw: isize, on: bool) {
+    PIN_BOTTOM.store(on, Ordering::Relaxed);
+    if on {
+        unsafe {
+            let _ = SetWindowPos(hwnd(raw), Some(HWND_BOTTOM), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
