@@ -16,29 +16,7 @@ mod win;
 
 use std::time::Instant;
 
-use card::{Card, parse_capture};
 use store::Store;
-
-fn seed(store: &Store) -> Vec<Card> {
-    const SAMPLES: &[&str] = &[
-        "идея: Попробовать onboarding без обязательной регистрации #product #onboarding",
-        "промпт: Product Critic\nТы — строгий продуктовый критик. Найди 5 самых слабых мест в идее и предложи, как их проверить за неделю. #ai",
-        "vpn staging vpn.staging.internal #infra",
-        "через две недели проверить новую pricing модель #pricing",
-        "цель: Запустить MVP Ambient Notes\nПрототип → сплит на модули → импорт Sticky Notes #q4",
-        "секрет: Wi-Fi офис\nguest / s3cret-pass",
-        "https://www.egui.rs — демо виджетов #egui",
-    ];
-    let area = egui::vec2(1600.0, 900.0);
-    let mut cards = Vec::new();
-    for s in SAMPLES {
-        let pos = card::free_slot(&cards, area);
-        if let Ok(c) = store.insert(&parse_capture(s), pos) {
-            cards.push(c);
-        }
-    }
-    cards
-}
 
 /// `--autostart-on|off|run|status`: manage the logon task without the UI.
 /// Exit code 0 on success (for `status`: 0 = on, 1 = off), 2 on error.
@@ -78,10 +56,7 @@ fn main() -> eframe::Result {
     }
 
     let store = Store::open().expect("open database");
-    let mut cards = store.load().expect("load cards");
-    if cards.is_empty() {
-        cards = seed(&store);
-    }
+    let cards = store.load().expect("load cards");
 
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -89,6 +64,8 @@ fn main() -> eframe::Result {
             .with_inner_size([1280.0, 800.0])
             .with_decorations(false)
             .with_transparent(true)
+            // The layer always covers a monitor's work area: no edge resizing.
+            .with_resizable(false)
             .with_taskbar(false)
             .with_close_button(false)
             .with_minimize_button(false)

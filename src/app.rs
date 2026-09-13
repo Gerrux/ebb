@@ -105,7 +105,7 @@ impl AmbientApp {
             if let Some(m) = win::monitors().first() {
                 win::place_on(h, m);
             }
-            win::apply_backdrop(h, backdrop);
+            win::apply_backdrop(h, backdrop, false);
             // Still hidden here (eframe shows it after the first frame), so the
             // taskbar never sees a button.
             win::install_window_rules(h, win::LAYER);
@@ -421,7 +421,7 @@ impl AmbientApp {
     fn cycle_backdrop(&mut self) {
         self.backdrop = self.backdrop.next();
         if let Some(h) = self.hwnd {
-            win::apply_backdrop(h, self.backdrop);
+            win::apply_backdrop(h, self.backdrop, false);
         }
     }
 
@@ -510,7 +510,7 @@ impl eframe::App for AmbientApp {
         if bar.hwnd.is_none() {
             bar.hwnd = win::find_capture_window();
             if let Some(h) = bar.hwnd {
-                win::apply_backdrop(h, Backdrop::AccentAcrylic);
+                win::apply_backdrop(h, Backdrop::AccentAcrylic, true);
                 win::install_window_rules(h, 0);
             }
         }
@@ -701,6 +701,8 @@ fn icon_button(ui: &mut Ui, glyph: &str, tip: &str, color: Color32) -> egui::Res
     }
     ui.painter()
         .text(rect.center(), Align2::CENTER_CENTER, glyph, theme::icons(12.5), color);
+    // Name for screen readers and UI automation (the glyph itself says nothing).
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
     resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tip)
 }
 

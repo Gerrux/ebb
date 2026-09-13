@@ -7,7 +7,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
-    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND,
     DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
@@ -127,7 +127,9 @@ unsafe fn set_dwm_i32(hwnd: HWND, attr: windows::Win32::Graphics::Dwm::DWMWINDOW
     }
 }
 
-pub fn apply_backdrop(raw: isize, mode: Backdrop) {
+/// `rounded`: Windows 11 rounded corners, for floating windows; the full-screen
+/// layer stays square.
+pub fn apply_backdrop(raw: isize, mode: Backdrop, rounded: bool) {
     let h = hwnd(raw);
     unsafe {
         // Without WS_SYSMENU DWM stops drawing the (disabled) caption buttons
@@ -139,7 +141,8 @@ pub fn apply_backdrop(raw: isize, mode: Backdrop) {
         }
 
         set_dwm_i32(h, DWMWA_USE_IMMERSIVE_DARK_MODE, 1);
-        set_dwm_i32(h, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND.0);
+        let corners = if rounded { DWMWCP_ROUND } else { DWMWCP_DONOTROUND };
+        set_dwm_i32(h, DWMWA_WINDOW_CORNER_PREFERENCE, corners.0);
         let margins = MARGINS {
             cxLeftWidth: -1,
             cxRightWidth: -1,

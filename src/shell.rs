@@ -35,8 +35,17 @@ use windows::core::{PCWSTR, w};
 
 use crate::autostart;
 
-const CLASS: PCWSTR = w!("AmbientNotes.Shell");
-const MUTEX: PCWSTR = w!("Local\\AmbientNotes.Instance");
+/// Instance identity. `AMBIENT_INSTANCE=<name>` runs a separate instance (own mutex
+/// and shell window) next to the normal one, e.g. for testing against another
+/// LOCALAPPDATA while the real app keeps running.
+fn instance_suffix() -> String {
+    std::env::var("AMBIENT_INSTANCE").map(|s| format!(".{s}")).unwrap_or_default()
+}
+
+fn class_name() -> &'static [u16] {
+    static NAME: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| wide(&format!("AmbientNotes.Shell{}", instance_suffix())))
+}
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_SHOW_LAYER: u32 = WM_APP + 2;
 const WM_QUIT_APP: u32 = WM_APP + 3;
@@ -81,7 +90,8 @@ impl Shared {
 /// held for the whole process lifetime and released by the OS on exit.
 pub fn claim_single_instance() -> bool {
     unsafe {
-        match CreateMutexW(None, false, MUTEX) {
+        let mutex = wide(&format!("Local\\AmbientNotes.Instance{}", instance_suffix()));
+        match CreateMutexW(None, false, PCWSTR(mutex.as_ptr())) {
             Ok(handle) if GetLastError() == ERROR_ALREADY_EXISTS => {
                 let _ = CloseHandle(handle);
                 false
@@ -107,7 +117,7 @@ pub fn send_to_existing(request: Request) -> bool {
         Request::Quit => WM_QUIT_APP,
     };
     for _ in 0..40 {
-        if let Ok(hwnd) = unsafe { FindWindowW(CLASS, PCWSTR::null()) } {
+        if let Ok(hwnd) = unsafe { FindWindowW(PCWSTR(class_name().as_ptr()), PCWSTR::null()) } {
             return unsafe { PostMessageW(Some(hwnd), msg, WPARAM(0), LPARAM(0)) }.is_ok();
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -176,7 +186,7 @@ pub fn spawn(ctx: egui::Context, shared: Arc<Shared>) {
                 cbSize: size_of::<WNDCLASSEXW>() as u32,
                 lpfnWndProc: Some(wndproc),
                 hInstance: instance.into(),
-                lpszClassName: CLASS,
+                lpszClassName: PCWSTR(class_name().as_ptr()),
                 ..Default::default()
             };
             RegisterClassExW(&class);
@@ -184,7 +194,7 @@ pub fn spawn(ctx: egui::Context, shared: Arc<Shared>) {
             // windows don't receive the TaskbarCreated broadcast.
             let hwnd = CreateWindowExW(
                 WS_EX_TOOLWINDOW,
-                CLASS,
+                PCWSTR(class_name().as_ptr()),
                 w!("Ambient Notes"),
                 WS_POPUP,
                 0,
