@@ -531,8 +531,7 @@ impl EbbApp {
                 Action::StartEdit => {
                     self.commit_edit();
                     let c = &self.cards[idx];
-                    let buf = if c.title.is_empty() { c.body.clone() } else { format!("{}\n{}", c.title, c.body) };
-                    self.editing = Some((c.id, buf));
+                    self.editing = Some((c.id, edit_text(c)));
                 }
                 Action::Reveal => {
                     self.revealed = Some((self.cards[idx].id, Instant::now()));
@@ -1403,12 +1402,24 @@ fn age_label(created_at: i64) -> String {
     }
 }
 
-/// Text of a card, or its editor.
-fn card_body(ui: &mut Ui, card: &Card, editing: Option<&mut String>, revealed: bool, style: card::CardStyle) {
+/// Text of a card, or its editor. True when a click opened a link in the text.
+fn card_body(ui: &mut Ui, card: &Card, editing: Option<&mut String>, revealed: bool, style: card::CardStyle) -> bool {
     let base = style.text_size();
+    let editor_id = Id::new(("card", card.id)).with("editor");
+    // Where the last click in the text landed, in chars of the editor's text.
+    let click_id = editor_id.with("click");
     if let Some(buf) = editing {
+        // Opening: the cursor goes where the text was clicked, else to the end,
+        // never where it was the last time this card was edited.
+        if !ui.memory(|m| m.has_focus(editor_id)) {
+            let at = ui.data_mut(|d| d.remove_temp::<usize>(click_id)).unwrap_or_else(|| buf.chars().count());
+            let mut state = egui::text_edit::TextEditState::load(ui.ctx(), editor_id).unwrap_or_default();
+            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(at))));
+            state.store(ui.ctx(), editor_id);
+        }
         let resp = ui.add(
             egui::TextEdit::multiline(buf)
+                .id(editor_id)
                 .font(theme::card_font(base))
                 .text_color(theme::card_text())
                 .frame(egui::Frame::NONE)
@@ -1418,53 +1429,96 @@ fn card_body(ui: &mut Ui, card: &Card, editing: Option<&mut String>, revealed: b
         if !resp.has_focus() && !resp.lost_focus() {
             resp.request_focus();
         }
-        return;
+        return false;
     }
-    let hidden = card.kind == Kind::Private && !revealed;
     let body = without_tags(&card.body);
-    // A hidden Private card still says what it is (see card::private_label); a
-    // Prompt's first line is its name.
+    if card.kind == Kind::Private && !revealed {
+        // The heading stays readable (see card::private_label); only the rest is barred.
+        let label = card::private_label(&card.title, &body);
+        let rest = match &label {
+            // The label is the body's first line: don't bar it a second time.
+            Some(_) if card.title.is_empty() => {
+                body.trim_start().split_once('\n').map_or("", |(_, rest)| rest).trim_start().to_owned()
+            }
+            _ => body,
+        };
+        let heading_at = label.as_ref().and_then(|label| {
+            let job = egui::text::LayoutJob::simple(label.clone(), theme::card_bold(base + 0.5), theme::card_text(), ui.available_width());
+            let (pos, galley, resp) = egui::Label::new(job).wrap().selectable(false).layout_in_ui(ui);
+            let at = char_at(ui, &galley, pos, resp.rect);
+            ui.painter().galley(pos, galley, theme::card_text());
+            at
+        });
+        let size = if label.is_none() { base } else { base - 1.0 };
+        let rest_at = redacted(ui, &rest, theme::card_font(size), theme::card_dim().gamma_multiply(0.45));
+        remember_click(ui, click_id, card, label.as_deref(), heading_at, &rest, rest_at);
+        return false;
+    }
+    // A Prompt's first line is its name.
     let (heading, text) = match card.kind {
-        _ if hidden => (card::private_label(&card.title, &card.body), "••••••••••".to_owned()),
         Kind::Prompt if card.title.is_empty() => match card::prompt_name(&body) {
             Some((name, rest)) => (Some(name.to_owned()), rest.to_owned()),
             None => (None, body),
         },
         _ => ((!card.title.is_empty()).then(|| card.title.clone()), body),
     };
-    if let Some(heading) = &heading {
-        ui.add(
-            egui::Label::new(RichText::new(heading).font(theme::card_bold(base + 0.5)).color(theme::card_text()))
-                .wrap()
-                .selectable(false),
-        );
-    }
+    let heading_at = heading.as_ref().and_then(|heading| {
+        let job = egui::text::LayoutJob::simple(heading.clone(), theme::card_bold(base + 0.5), theme::card_text(), ui.available_width());
+        let (pos, galley, resp) = egui::Label::new(job).wrap().selectable(false).layout_in_ui(ui);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, galley.text()));
+        let at = char_at(ui, &galley, pos, resp.rect);
+        ui.painter().galley(pos, galley, theme::card_text());
+        at
+    });
     let color = if heading.is_none() { theme::card_text() } else { theme::card_dim() };
     let size = if heading.is_none() { base } else { base - 1.0 };
-    if card.kind == Kind::Reference {
-        // Commands, paths and hosts in monospace, the words around them as usual.
-        let mut job = egui::text::LayoutJob::default();
-        for (i, line) in text.lines().enumerate() {
-            let font = if card::looks_technical(line) { FontId::monospace(size - 1.0) } else { theme::card_font(size) };
-            let line = if i > 0 { format!("\n{line}") } else { line.to_owned() };
-            job.append(&line, 0.0, egui::TextFormat { font_id: font, color, ..Default::default() });
+    // Addresses in link blue and clickable, in any kind; in a Reference, commands,
+    // paths and hosts in monospace, the words around them as usual.
+    let mut job = egui::text::LayoutJob::default();
+    let mut links: Vec<(std::ops::Range<usize>, &str)> = Vec::new(); // char ranges in the galley
+    let mut chars = 0;
+    for (i, line) in text.split('\n').enumerate() {
+        let font = if card.kind == Kind::Reference && card::looks_technical(line) {
+            FontId::monospace(size - 1.0)
+        } else {
+            theme::card_font(size)
+        };
+        let format = |c: Color32| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
+        // Returns the galley's length so far, in chars.
+        let mut append = |s: &str, c: Color32| {
+            job.append(s, 0.0, format(c));
+            chars += s.chars().count();
+            chars
+        };
+        if i > 0 {
+            append("\n", color);
         }
-        ui.add(egui::Label::new(job).wrap().selectable(false));
-    } else if card.kind == Kind::Link {
-        // Addresses in link blue, the words around them as usual.
-        let mut job = egui::text::LayoutJob::default();
-        let format = |c: Color32| egui::TextFormat { font_id: theme::card_font(size), color: c, ..Default::default() };
-        let mut rest = text.as_str();
+        let mut rest = line;
         while let Some(start) = [rest.find("https://"), rest.find("http://")].into_iter().flatten().min() {
             let end = rest[start..].find(char::is_whitespace).map_or(rest.len(), |e| start + e);
-            job.append(&rest[..start], 0.0, format(color));
-            job.append(&rest[start..end], 0.0, format(theme::link()));
+            // "(see https://x.org)." — the closing punctuation isn't part of the address.
+            let url = rest[start..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '"', '\'']);
+            let end = start + url.len();
+            let from = append(&rest[..start], color);
+            let to = append(url, theme::link());
+            links.push((from..to, url));
             rest = &rest[end..];
         }
-        job.append(rest, 0.0, format(color));
-        ui.add(egui::Label::new(job).wrap().selectable(false));
-    } else {
-        ui.add(egui::Label::new(RichText::new(text).font(theme::card_font(size)).color(color)).wrap().selectable(false));
+        append(rest, color);
+    }
+    let (pos, galley, resp) = egui::Label::new(job).wrap().selectable(false).layout_in_ui(ui);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, galley.text()));
+    let text_at = char_at(ui, &galley, pos, resp.rect);
+    let link = text_at.and_then(|at| links.iter().find(|(range, _)| range.contains(&at)).map(|(_, url)| *url));
+    ui.painter().galley(pos, galley, color);
+    remember_click(ui, click_id, card, heading.as_deref(), heading_at, &text, text_at);
+    let mut link_clicked = false;
+    if let Some(url) = link {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        if ui.input(|i| i.pointer.primary_clicked()) {
+            win::open_url(url);
+            link_clicked = true;
+        }
     }
     if card.kind == Kind::Link
         && let Some(domain) = card::link_domain(&card.body)
@@ -1472,6 +1526,88 @@ fn card_body(ui: &mut Ui, card: &Card, editing: Option<&mut String>, revealed: b
         ui.add_space(2.0);
         ui.add(egui::Label::new(RichText::new(domain).size(12.0).color(theme::card_muted())).selectable(false));
     }
+    link_clicked
+}
+
+/// What the editor opens with: the note as written, an old separate title as its first line.
+fn edit_text(card: &Card) -> String {
+    if card.title.is_empty() { card.body.clone() } else { format!("{}\n{}", card.title, card.body) }
+}
+
+/// The char under the pointer in a galley painted at `pos` over `rect`.
+/// Not `Response::hover_pos`: while the card's background is being clicked egui
+/// hovers nothing else, so a label would never see the click.
+fn char_at(ui: &Ui, galley: &egui::Galley, pos: Pos2, rect: Rect) -> Option<usize> {
+    let p = ui.input(|i| i.pointer.interact_pos()).filter(|_| ui.rect_contains_pointer(rect))?;
+    Some(galley.cursor_from_pos(p - pos).index.0)
+}
+
+/// On a click in a card's text, keeps where it landed in the editor's text, for
+/// the cursor when the click opens the editor. `heading_at`/`text_at`: chars in
+/// the shown heading and text.
+fn remember_click(
+    ui: &Ui,
+    click_id: Id,
+    card: &Card,
+    heading: Option<&str>,
+    heading_at: Option<usize>,
+    text: &str,
+    text_at: Option<usize>,
+) {
+    if !ui.input(|i| i.pointer.primary_clicked()) {
+        return;
+    }
+    let shown = match heading {
+        Some(h) => format!("{h}\n{text}"),
+        None => text.to_owned(),
+    };
+    let heading_len = heading.map_or(0, |h| h.chars().count() + 1);
+    let at = match (heading_at, text_at) {
+        (Some(at), _) => at,
+        (None, Some(at)) => heading_len + at,
+        (None, None) => return ui.data_mut(|d| d.remove::<usize>(click_id)),
+    };
+    let at = shown_to_source(&shown, at, &edit_text(card));
+    ui.data_mut(|d| d.insert_temp(click_id, at));
+}
+
+/// Where char `at` of `shown` sits in `source`. The shown text is the source with
+/// bits left out (tags, trimmed space), so its chars are matched in order.
+fn shown_to_source(shown: &str, at: usize, source: &str) -> usize {
+    let mut rest = source.chars().enumerate();
+    let mut end = 0;
+    for c in shown.chars().take(at) {
+        match rest.by_ref().find(|&(_, s)| s == c) {
+            Some((i, _)) => end = i + 1,
+            None => return source.chars().count(),
+        }
+    }
+    end
+}
+
+/// Text laid out as usual but painted as one bar per word: the note keeps its
+/// shape (line and word lengths, paragraphs) without a readable letter.
+/// Returns the char under the pointer, like [`char_at`].
+fn redacted(ui: &mut Ui, text: &str, font: FontId, color: Color32) -> Option<usize> {
+    let galley = ui.painter().layout(text.to_owned(), font, color, ui.available_width());
+    let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
+    let at = char_at(ui, &galley, rect.min, rect);
+    let p = ui.painter();
+    for row in &galley.rows {
+        let r = row.rect().translate(rect.min.to_vec2());
+        let y = (r.top() + r.height() * 0.28)..=(r.bottom() - r.height() * 0.2);
+        let bar = |(a, b): (f32, f32)| p.rect_filled(Rect::from_x_y_ranges((r.left() + a)..=(r.left() + b), y.clone()), 2.0, color);
+        let mut run: Option<(f32, f32)> = None;
+        for g in &row.glyphs {
+            if g.chr.is_whitespace() {
+                run.take().map(bar);
+            } else {
+                run = Some((run.map_or(g.pos.x, |(a, _)| a), g.pos.x + g.advance_width));
+            }
+        }
+        run.map(bar);
+    }
+    at
 }
 
 /// Menu under a card's kind: every kind (with its digit key), then the card's color.
@@ -1579,9 +1715,11 @@ fn card_ui(
     if bg.clicked() || bg.double_clicked() || drag.drag_started() || resize.is_some_and(|(_, h)| h.drag_started()) {
         out.push(Action::Front);
     }
-    if bg.double_clicked() && editing.is_none() && card.kind != Kind::Private {
-        out.push(Action::StartEdit);
-    }
+    // One click edits; a Private card takes a double click, so a stray click
+    // doesn't lay its text open.
+    // Pushed once the body is drawn: a click on a link there opens it instead.
+    let edit_gesture = if card.kind == Kind::Private { bg.double_clicked() } else { bg.clicked() };
+    let start_edit = edit_gesture && editing.is_none();
 
     // The rect at the start of the gesture and the pointer's total movement live in
     // memory, so a stuck edge follows the pointer again once it moves past the snap
@@ -1731,17 +1869,20 @@ fn card_ui(
     );
 
     // Body: scrolls when the text doesn't fit; the floating bar shows only on hover.
-    ui.scope_builder(
-        UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Min)),
-        |ui| {
+    let link_clicked = ui
+        .scope_builder(UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Min)), |ui| {
             ui.set_clip_rect(body.intersect(ui.clip_rect()));
             egui::ScrollArea::vertical()
                 .id_salt(id.with("scroll"))
                 .auto_shrink([false, false])
                 .max_height(body.height())
-                .show(ui, |ui| card_body(ui, card, editing, revealed, style));
-        },
-    );
+                .show(ui, |ui| card_body(ui, card, editing, revealed, style))
+                .inner
+        })
+        .inner;
+    if start_edit && !link_clicked {
+        out.push(Action::StartEdit);
+    }
 
     // Footer: tags + age, and the kind's icon in the corner, which opens the menu
     // to change the kind.

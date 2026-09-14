@@ -660,6 +660,18 @@ pub fn set_pin_bottom(raw: isize, on: bool) {
 // Files
 // ---------------------------------------------------------------------------
 
+/// Opens an http(s) address in the default browser.
+pub fn open_url(url: &str) {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return;
+    }
+    let wide: Vec<u16> = url.encode_utf16().chain([0]).collect();
+    unsafe { ShellExecuteW(None, w!("open"), PCWSTR(wide.as_ptr()), None, None, SW_SHOWNORMAL) };
+}
+
 /// Maps a file read-only for the rest of the process lifetime. The pages are
 /// file-backed and shared with every other process that maps the same file
 /// (system fonts are mapped by most GUI apps), so they are not private bytes.
