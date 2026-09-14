@@ -10,6 +10,7 @@ mod import_ui;
 mod library;
 mod renderer;
 mod resurface;
+mod rich_text;
 mod search;
 mod shell;
 mod sticky;

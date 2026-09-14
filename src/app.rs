@@ -14,6 +14,7 @@ use std::sync::atomic::Ordering;
 use crate::bar::{self, BarState, Mode, Outbox, Press};
 use crate::import_ui::StickyImport;
 use crate::library::{self, LibraryState, Request, Tab};
+use crate::rich_text;
 use crate::shell::{self, Event};
 use crate::card::{self, Card, Kind, MIN_SIZE, Placement, Sides, parse_capture};
 use crate::store::Store;
@@ -763,7 +764,7 @@ impl EbbApp {
                         }
                     } else {
                         let text = if c.title.is_empty() { c.body.clone() } else { format!("{}\n{}", c.title, c.body) };
-                        ui.ctx().copy_text(text);
+                        ui.ctx().copy_text(rich_text::strip_markup(&text));
                     }
                 }
                 Action::Duplicate => {
@@ -1839,6 +1840,52 @@ fn card_body(
     // Where the last click in the text landed, in chars of the editor's text.
     let click_id = editor_id.with("click");
     if let Some(buf) = editing {
+        let mut toolbar_action = None;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            toolbar_action = format_button(ui, "B", "Жирный (Ctrl+B)").then_some(rich_text::Action::Bold);
+            if toolbar_action.is_none() {
+                toolbar_action = format_button(ui, "I", "Курсив (Ctrl+I)").then_some(rich_text::Action::Italic);
+            }
+            if toolbar_action.is_none() {
+                toolbar_action = format_button(ui, "U", "Подчёркивание (Ctrl+U)").then_some(rich_text::Action::Underline);
+            }
+            if toolbar_action.is_none() {
+                toolbar_action = format_button(ui, "S", "Зачёркивание (Ctrl+Shift+S)").then_some(rich_text::Action::Strikethrough);
+            }
+            if toolbar_action.is_none() {
+                toolbar_action = format_button(ui, "H", "Выделение маркером (Ctrl+Shift+H)").then_some(rich_text::Action::Highlight);
+            }
+            if toolbar_action.is_none() {
+                toolbar_action = format_button(ui, "`_`", "Моноширинный код (Ctrl+Shift+K)").then_some(rich_text::Action::Code);
+            }
+            if toolbar_action.is_none() {
+                toolbar_action = format_button(ui, "Tx", "Снять форматирование").then_some(rich_text::Action::Clear);
+            }
+        });
+        let shortcut_action = ui
+            .memory(|m| m.has_focus(editor_id))
+            .then(|| {
+                ui.input(|input| {
+                    input.events.iter().find_map(|event| match event {
+                        egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. }
+                            if modifiers.command && !modifiers.alt => match (key, modifiers.shift) {
+                                (Key::B, false) => Some(rich_text::Action::Bold),
+                                (Key::I, false) => Some(rich_text::Action::Italic),
+                                (Key::U, false) => Some(rich_text::Action::Underline),
+                                (Key::S, true) => Some(rich_text::Action::Strikethrough),
+                                (Key::H, true) => Some(rich_text::Action::Highlight),
+                                (Key::K, true) => Some(rich_text::Action::Code),
+                                _ => None,
+                            },
+                        _ => None,
+                    })
+                })
+            })
+            .flatten();
+        if let Some(action) = toolbar_action.or(shortcut_action) {
+            apply_editor_action(ui, editor_id, buf, action);
+        }
         // Opening: the cursor goes where the text was clicked, else to the end,
         // never where it was the last time this card was edited.
         if !ui.memory(|m| m.has_focus(editor_id)) {
@@ -1890,8 +1937,10 @@ fn card_body(
         },
         _ => ((!card.title.is_empty()).then(|| card.title.clone()), body),
     };
+    let displayed_heading = heading.as_ref().map(|heading| rich_text::strip_markup(heading));
     let heading_at = heading.as_ref().and_then(|heading| {
-        let job = egui::text::LayoutJob::simple(heading.clone(), theme::card_bold(base + 0.5), theme::card_text(), ui.available_width());
+        let heading = rich_text::strip_markup(heading);
+        let job = egui::text::LayoutJob::simple(heading, theme::card_bold(base + 0.5), theme::card_text(), ui.available_width());
         let (pos, galley, resp) = egui::Label::new(job).wrap().selectable(false).layout_in_ui(ui);
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, galley.text()));
         let at = char_at(ui, &galley, pos, resp.rect);
@@ -1903,43 +1952,48 @@ fn card_body(
     // Addresses in link blue and clickable, in any kind; in a Reference, commands,
     // paths and hosts in monospace, the words around them as usual.
     let mut job = egui::text::LayoutJob::default();
-    let mut links: Vec<(std::ops::Range<usize>, &str)> = Vec::new(); // char ranges in the galley
+    let mut links: Vec<(std::ops::Range<usize>, String)> = Vec::new(); // char ranges in the galley
     let mut chars = 0;
-    for (i, line) in text.split('\n').enumerate() {
-        let font = if card.kind == Kind::Reference && card::looks_technical(line) {
-            FontId::monospace(size - 1.0)
-        } else {
-            theme::card_font(size)
-        };
-        let format = |c: Color32| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
-        // Returns the galley's length so far, in chars.
-        let mut append = |s: &str, c: Color32| {
-            job.append(s, 0.0, format(c));
-            chars += s.chars().count();
-            chars
-        };
-        if i > 0 {
-            append("\n", color);
+    for span in rich_text::spans(&text) {
+        for piece in span.text.split_inclusive('\n') {
+            let (line, newline) = piece.strip_suffix('\n').map_or((piece, ""), |line| (line, "\n"));
+            let technical = card.kind == Kind::Reference && card::looks_technical(line);
+            // Returns the galley's length so far, in chars.
+            let mut append = |s: &str, c: Color32| {
+                let from = chars;
+                let font = if span.style.code || technical {
+                    FontId::monospace(size - 1.0)
+                } else if span.style.bold {
+                    theme::card_bold(size)
+                } else {
+                    theme::card_font(size)
+                };
+                job.append(s, 0.0, rich_format(font, c, span.style));
+                chars += s.chars().count();
+                from..chars
+            };
+            let mut rest = line;
+            while let Some(start) = [rest.find("https://"), rest.find("http://")].into_iter().flatten().min() {
+                let end = rest[start..].find(char::is_whitespace).map_or(rest.len(), |e| start + e);
+                // "(see https://x.org)." — the closing punctuation isn't part of the address.
+                let url = rest[start..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '"', '\'']);
+                let end = start + url.len();
+                append(&rest[..start], color);
+                let range = append(url, theme::link());
+                links.push((range, url.to_owned()));
+                rest = &rest[end..];
+            }
+            append(rest, color);
+            append(newline, color);
         }
-        let mut rest = line;
-        while let Some(start) = [rest.find("https://"), rest.find("http://")].into_iter().flatten().min() {
-            let end = rest[start..].find(char::is_whitespace).map_or(rest.len(), |e| start + e);
-            // "(see https://x.org)." — the closing punctuation isn't part of the address.
-            let url = rest[start..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '"', '\'']);
-            let end = start + url.len();
-            let from = append(&rest[..start], color);
-            let to = append(url, theme::link());
-            links.push((from..to, url));
-            rest = &rest[end..];
-        }
-        append(rest, color);
     }
     let (pos, galley, resp) = egui::Label::new(job).wrap().selectable(false).layout_in_ui(ui);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, galley.text()));
     let text_at = char_at(ui, &galley, pos, resp.rect);
-    let link = text_at.and_then(|at| links.iter().find(|(range, _)| range.contains(&at)).map(|(_, url)| *url));
+    let link = text_at.and_then(|at| links.iter().find(|(range, _)| range.contains(&at)).map(|(_, url)| url.as_str()));
     ui.painter().galley(pos, galley, color);
-    remember_click(ui, click_id, card, heading.as_deref(), heading_at, &text, text_at);
+    let display_text = rich_text::strip_markup(&text);
+    remember_click(ui, click_id, card, displayed_heading.as_deref(), heading_at, &display_text, text_at);
     let mut link_clicked = false;
     if let Some(url) = link {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
@@ -1955,6 +2009,40 @@ fn card_body(
         ui.add(egui::Label::new(RichText::new(domain).size(12.0).color(theme::card_muted())).selectable(false));
     }
     link_clicked
+}
+
+fn rich_format(font: FontId, color: Color32, style: rich_text::Style) -> egui::TextFormat {
+    egui::TextFormat {
+        font_id: font,
+        color,
+        italics: style.italic,
+        background: if style.highlight { Color32::from_rgba_unmultiplied(250, 204, 21, 42) } else { Color32::TRANSPARENT },
+        underline: if style.underline { Stroke::new(1.0, color) } else { Stroke::NONE },
+        strikethrough: if style.strikethrough { Stroke::new(1.0, color) } else { Stroke::NONE },
+        ..Default::default()
+    }
+}
+
+fn format_button(ui: &mut Ui, label: &str, tip: &str) -> bool {
+    ui.add_sized(
+        vec2(30.0, 22.0),
+        egui::Button::new(RichText::new(label).size(12.5).color(theme::card_text())),
+    )
+    .on_hover_text(tip)
+    .clicked()
+}
+
+fn apply_editor_action(ui: &Ui, editor_id: Id, buf: &mut String, action: rich_text::Action) {
+    let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id) else { return };
+    let cursor = state.cursor.char_range().unwrap_or(egui::text::CCursorRange::one(egui::text::CCursor::new(0)));
+    let range = cursor.as_sorted_char_range();
+    let (text, selection) = rich_text::apply(buf, range.start.0..range.end.0, action);
+    *buf = text;
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+        egui::text::CCursor::new(selection.start),
+        egui::text::CCursor::new(selection.end),
+    )));
+    state.store(ui.ctx(), editor_id);
 }
 
 /// What the editor opens with: the note as written, an old separate title as its first line.
@@ -2387,4 +2475,3 @@ fn card_ui(
 
     out
 }
-

@@ -16,6 +16,7 @@ use crate::autostart;
 use crate::bar::{age, highlighted};
 use crate::card::{Card, Kind};
 use crate::search;
+use crate::rich_text;
 use crate::resurface::{self, DAY, days_word};
 use crate::store::{Hit, ReviewAction, ReviewSnapshot, Scope, Store, TRASH_DAYS};
 use crate::theme;
@@ -507,10 +508,10 @@ fn review_tab(ui: &mut Ui, st: &mut LibraryState) {
                 .max_height((ui.available_height() - 150.0).clamp(120.0, 340.0))
                 .show(ui, |ui| {
                     if !card.title.is_empty() {
-                        ui.label(RichText::new(&card.title).font(theme::semibold(19.0)).color(theme::text()));
+                        ui.label(RichText::new(rich_text::strip_markup(&card.title)).font(theme::semibold(19.0)).color(theme::text()));
                         ui.add_space(6.0);
                     }
-                    ui.label(RichText::new(&card.body).size(16.0).color(theme::text()).line_height(Some(24.0)));
+                    ui.label(RichText::new(rich_text::strip_markup(&card.body)).size(16.0).color(theme::text()).line_height(Some(24.0)));
                 });
         });
     ui.add_space(16.0);
