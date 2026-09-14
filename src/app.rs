@@ -325,17 +325,18 @@ impl EbbApp {
     fn commit_edit(&mut self) {
         let Some((id, buf)) = self.editing.take() else { return };
         let Some(idx) = self.cards.iter().position(|c| c.id == id) else { return };
-        let buf = buf.trim();
+        let buf = rich_text::trim(&buf);
         let c = &mut self.cards[idx];
         // Saved as written; an old separate title becomes the first line of the text.
         c.title.clear();
-        c.body = buf.to_owned();
-        c.tags = buf
+        // Tags come from the visible text: "**#idea**" is the tag "idea".
+        c.tags = rich_text::strip_markup(&buf)
             .split_whitespace()
             .filter_map(|w| w.strip_prefix('#'))
             .map(|t| t.trim_end_matches([',', '.', ';']).to_lowercase())
             .filter(|t| !t.is_empty())
             .collect();
+        c.body = buf;
         self.save(idx);
         if self.cards[idx].kind == Kind::Private {
             // Encrypted by save; on the layer only the label stays in the open.
@@ -1840,29 +1841,25 @@ fn card_body(
     // Where the last click in the text landed, in chars of the editor's text.
     let click_id = editor_id.with("click");
     if let Some(buf) = editing {
-        let mut toolbar_action = None;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 3.0;
-            toolbar_action = format_button(ui, "B", "Жирный (Ctrl+B)").then_some(rich_text::Action::Bold);
-            if toolbar_action.is_none() {
-                toolbar_action = format_button(ui, "I", "Курсив (Ctrl+I)").then_some(rich_text::Action::Italic);
-            }
-            if toolbar_action.is_none() {
-                toolbar_action = format_button(ui, "U", "Подчёркивание (Ctrl+U)").then_some(rich_text::Action::Underline);
-            }
-            if toolbar_action.is_none() {
-                toolbar_action = format_button(ui, "S", "Зачёркивание (Ctrl+Shift+S)").then_some(rich_text::Action::Strikethrough);
-            }
-            if toolbar_action.is_none() {
-                toolbar_action = format_button(ui, "H", "Выделение маркером (Ctrl+Shift+H)").then_some(rich_text::Action::Highlight);
-            }
-            if toolbar_action.is_none() {
-                toolbar_action = format_button(ui, "`_`", "Моноширинный код (Ctrl+Shift+K)").then_some(rich_text::Action::Code);
-            }
-            if toolbar_action.is_none() {
-                toolbar_action = format_button(ui, "Tx", "Снять форматирование").then_some(rich_text::Action::Clear);
-            }
-        });
+        // The editor shows the text as it looks, no markup (like Sticky Notes):
+        // plain text with a style per char, written back as markup each frame.
+        let (mut plain, mut styles) = rich_text::parse(buf);
+        let before = plain.clone();
+        // Opening: the editor wasn't drawn last frame. A toolbar click takes the
+        // focus away for a moment and must not count as opening.
+        let pass = ui.ctx().cumulative_pass_nr();
+        let shown_id = editor_id.with("shown");
+        let opening = ui.data(|d| d.get_temp::<u64>(shown_id)).is_none_or(|last| last + 1 < pass);
+        ui.data_mut(|d| d.insert_temp(shown_id, pass));
+        if opening {
+            // The cursor goes where the text was clicked, else to the end, never
+            // where it was the last time this card was edited.
+            ui.data_mut(|d| d.remove::<(usize, rich_text::Style)>(editor_id.with("typing")));
+            let at = ui.data_mut(|d| d.remove_temp::<usize>(click_id)).unwrap_or_else(|| plain.chars().count());
+            let mut state = egui::text_edit::TextEditState::load(ui.ctx(), editor_id).unwrap_or_default();
+            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(at))));
+            state.store(ui.ctx(), editor_id);
+        }
         let shortcut_action = ui
             .memory(|m| m.has_focus(editor_id))
             .then(|| {
@@ -1883,27 +1880,53 @@ fn card_body(
                 })
             })
             .flatten();
-        if let Some(action) = toolbar_action.or(shortcut_action) {
-            apply_editor_action(ui, editor_id, buf, action);
+        if let Some(action) = shortcut_action {
+            apply_format(ui, editor_id, &mut styles, action);
         }
-        // Opening: the cursor goes where the text was clicked, else to the end,
-        // never where it was the last time this card was edited.
-        if !ui.memory(|m| m.has_focus(editor_id)) {
-            let at = ui.data_mut(|d| d.remove_temp::<usize>(click_id)).unwrap_or_else(|| buf.chars().count());
-            let mut state = egui::text_edit::TextEditState::load(ui.ctx(), editor_id).unwrap_or_default();
-            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(at))));
-            state.store(ui.ctx(), editor_id);
-        }
+        let (selection, typing) = format_state(ui, editor_id);
+        let typing = typing.filter(|_| selection.is_empty());
+        let layout_styles = styles.clone();
+        let mut layouter = |ui: &Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+            let text = text.as_str();
+            // Mid-edit the text is ahead of the styles; the edit is placed as
+            // after the frame, only without the cursor.
+            let styles = rich_text::restyle(&before, &layout_styles, text, None, typing);
+            let mut job = egui::text::LayoutJob::default();
+            let mut from = 0;
+            let bytes: Vec<usize> = text.char_indices().map(|(i, _)| i).chain(std::iter::once(text.len())).collect();
+            for i in 0..styles.len() {
+                if i + 1 == styles.len() || styles[i + 1] != styles[i] {
+                    let run = &text[bytes[from]..bytes[i + 1]];
+                    job.append(run, 0.0, rich_format(editor_font(base, styles[i]), theme::card_text(), styles[i]));
+                    from = i + 1;
+                }
+            }
+            if job.sections.is_empty() {
+                let style = typing.unwrap_or_default();
+                job.append("", 0.0, rich_format(editor_font(base, style), theme::card_text(), style));
+            }
+            job.wrap.max_width = wrap_width;
+            ui.fonts_mut(|f| f.layout_job(job))
+        };
         let resp = ui.add(
-            egui::TextEdit::multiline(buf)
+            egui::TextEdit::multiline(&mut plain)
                 .id(editor_id)
                 .font(theme::card_font(base))
                 .text_color(theme::card_text())
+                .layouter(&mut layouter)
                 .frame(egui::Frame::NONE)
                 .desired_width(f32::INFINITY)
                 .desired_rows(3),
         );
-        if !resp.has_focus() && !resp.lost_focus() {
+        if plain != before {
+            let cursor = editor_cursor(ui, editor_id).map(|r| r.end);
+            styles = rich_text::restyle(&before, &styles, &plain, cursor, typing);
+            // What's typed has the style now; the next char takes it from there.
+            ui.data_mut(|d| d.remove::<(usize, rich_text::Style)>(editor_id.with("typing")));
+        }
+        *buf = rich_text::serialize(&plain, &styles);
+        // Also right after a toolbar click, which took the focus for a frame.
+        if !resp.has_focus() {
             resp.request_focus();
         }
         return false;
@@ -2023,26 +2046,81 @@ fn rich_format(font: FontId, color: Color32, style: rich_text::Style) -> egui::T
     }
 }
 
-fn format_button(ui: &mut Ui, label: &str, tip: &str) -> bool {
-    ui.add_sized(
-        vec2(30.0, 22.0),
-        egui::Button::new(RichText::new(label).size(12.5).color(theme::card_text())),
-    )
-    .on_hover_text(tip)
-    .clicked()
+/// Formatting buttons along the bottom of a card being edited. A button shows
+/// pressed when the whole selection has its style or, with no selection, when
+/// typing at the cursor gets it.
+fn format_toolbar(ui: &mut Ui, editor_id: Id, buf: &mut String) {
+    use rich_text::Action as A;
+    const BUTTONS: [(&str, &str, A); 7] = [
+        ("\u{E8DD}", "Жирный (Ctrl+B)", A::Bold),
+        ("\u{E8DB}", "Курсив (Ctrl+I)", A::Italic),
+        ("\u{E8DC}", "Подчёркивание (Ctrl+U)", A::Underline),
+        ("\u{EDE0}", "Зачёркивание (Ctrl+Shift+S)", A::Strikethrough),
+        ("\u{E7E6}", "Выделение маркером (Ctrl+Shift+H)", A::Highlight),
+        ("\u{E943}", "Моноширинный код (Ctrl+Shift+K)", A::Code),
+        ("\u{E75C}", "Снять форматирование", A::Clear),
+    ];
+    let (plain, mut styles) = rich_text::parse(buf);
+    let (selection, typing) = format_state(ui, editor_id);
+    let at_cursor = typing.unwrap_or_else(|| rich_text::style_at(&styles, selection.start));
+    ui.spacing_mut().item_spacing.x = 1.0;
+    let mut clicked = None;
+    for (glyph, tip, action) in BUTTONS {
+        let active = action != A::Clear
+            && if selection.is_empty() { at_cursor.has(action) } else { rich_text::all_have(&styles, selection.clone(), action) };
+        let (rect, resp) = ui.allocate_exact_size(vec2(24.0, 22.0), Sense::click());
+        if active || resp.hovered() {
+            ui.painter().rect_filled(rect, CornerRadius::same(6), theme::wash(if active { 34 } else { 22 }));
+        }
+        let color = if active { theme::card_text() } else { theme::card_dim() };
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, theme::icons(12.5), color);
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, active, tip));
+        if resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tip).clicked() {
+            clicked = Some(action);
+        }
+    }
+    if let Some(action) = clicked {
+        apply_format(ui, editor_id, &mut styles, action);
+        *buf = rich_text::serialize(&plain, &styles);
+    }
 }
 
-fn apply_editor_action(ui: &Ui, editor_id: Id, buf: &mut String, action: rich_text::Action) {
-    let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id) else { return };
-    let cursor = state.cursor.char_range().unwrap_or(egui::text::CCursorRange::one(egui::text::CCursor::new(0)));
-    let range = cursor.as_sorted_char_range();
-    let (text, selection) = rich_text::apply(buf, range.start.0..range.end.0, action);
-    *buf = text;
-    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
-        egui::text::CCursor::new(selection.start),
-        egui::text::CCursor::new(selection.end),
-    )));
-    state.store(ui.ctx(), editor_id);
+fn editor_font(base: f32, style: rich_text::Style) -> FontId {
+    if style.code {
+        FontId::monospace(base - 1.0)
+    } else if style.bold {
+        theme::card_bold(base)
+    } else {
+        theme::card_font(base)
+    }
+}
+
+/// The editor's selection in chars, sorted; empty at the cursor.
+fn editor_cursor(ui: &Ui, editor_id: Id) -> Option<std::ops::Range<usize>> {
+    let state = egui::text_edit::TextEditState::load(ui.ctx(), editor_id)?;
+    let range = state.cursor.char_range()?.as_sorted_char_range();
+    Some(range.start.0..range.end.0)
+}
+
+/// The selection, and the style picked for typing at the cursor while it stays there.
+fn format_state(ui: &Ui, editor_id: Id) -> (std::ops::Range<usize>, Option<rich_text::Style>) {
+    let selection = editor_cursor(ui, editor_id).unwrap_or(0..0);
+    let typing = ui
+        .data(|d| d.get_temp::<(usize, rich_text::Style)>(editor_id.with("typing")))
+        .filter(|(at, _)| selection.is_empty() && *at == selection.start)
+        .map(|(_, style)| style);
+    (selection, typing)
+}
+
+/// Toggles a style on the selection or, with none, for what's typed next.
+fn apply_format(ui: &Ui, editor_id: Id, styles: &mut [rich_text::Style], action: rich_text::Action) {
+    let (selection, typing) = format_state(ui, editor_id);
+    if selection.is_empty() {
+        let style = typing.unwrap_or_else(|| rich_text::style_at(styles, selection.start)).toggled(action);
+        ui.data_mut(|d| d.insert_temp(editor_id.with("typing"), (selection.start, style)));
+    } else {
+        rich_text::toggle(styles, selection, action);
+    }
 }
 
 /// What the editor opens with: the note as written, an old separate title as its first line.
@@ -2083,7 +2161,8 @@ fn remember_click(
         (None, Some(at)) => heading_len + at,
         (None, None) => return ui.data_mut(|d| d.remove::<usize>(click_id)),
     };
-    let at = shown_to_source(&shown, at, &edit_text(card));
+    // The editor shows the text without markup.
+    let at = shown_to_source(&shown, at, &rich_text::strip_markup(&edit_text(card)));
     ui.data_mut(|d| d.insert_temp(click_id, at));
 }
 
@@ -2186,7 +2265,7 @@ fn card_ui(
     area: Vec2,
     card: &mut Card,
     hovered: bool,
-    editing: Option<&mut String>,
+    mut editing: Option<&mut String>,
     revealed: bool,
     revealed_text: Option<&str>,
     active: bool,
@@ -2389,6 +2468,18 @@ fn card_ui(
         },
     );
 
+    // Footer while editing: the formatting toolbar in place of tags and age. Drawn
+    // before the body, so a click applies in the same frame the editor reads it.
+    let toolbar_shown = editing.is_some();
+    if let Some(buf) = editing.as_deref_mut() {
+        let right = if style.icon == card::IconSpot::TopLeft { footer.right() } else { footer.right() - 30.0 };
+        let bar = Rect::from_min_max(footer.min, pos2(right, footer.bottom()));
+        ui.scope_builder(UiBuilder::new().max_rect(bar).layout(Layout::left_to_right(Align::Center)), |ui| {
+            ui.set_clip_rect(bar.intersect(ui.clip_rect()));
+            format_toolbar(ui, id.with("editor"), buf);
+        });
+    }
+
     // Body: scrolls when the text doesn't fit; the floating bar shows only on hover.
     let link_clicked = ui
         .scope_builder(UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Min)), |ui| {
@@ -2442,7 +2533,8 @@ fn card_ui(
     kind_menu(&kind, card, &mut out, style.icon == card::IconSpot::TopLeft);
 
     let mut painter = ui.painter().with_clip_rect(footer);
-    painter.multiply_opacity(details);
+    // While editing, the toolbar has the footer.
+    painter.multiply_opacity(if toolbar_shown { 0.0 } else { details });
     let age = painter.text(
         pos2(if style.icon == card::IconSpot::TopLeft { footer.right() } else { kind_rect.left() - 6.0 }, footer.center().y),
         Align2::RIGHT_CENTER,
