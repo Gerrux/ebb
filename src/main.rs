@@ -5,6 +5,7 @@ mod bar;
 mod autostart;
 mod bench;
 mod card;
+mod emoji;
 mod import_ui;
 mod library;
 mod renderer;

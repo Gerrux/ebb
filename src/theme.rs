@@ -384,6 +384,7 @@ fn read_static(path: &str) -> Option<&'static [u8]> {
 
 pub fn install(ctx: &egui::Context) {
     ctx.set_fonts(definitions(*CARD_FONT.read().unwrap()));
+    ctx.add_plugin(crate::emoji::ColorEmoji::default());
 
     ctx.global_style_mut(|style| {
         style.visuals = egui::Visuals::dark();
@@ -396,7 +397,8 @@ pub fn install(ctx: &egui::Context) {
 fn definitions(card: CardFont) -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
 
-    if let Some(segoe) = read_static(r"C:\Windows\Fonts\SegUIVar.ttf") {
+    let segoe = read_static(r"C:\Windows\Fonts\SegUIVar.ttf");
+    if let Some(segoe) = segoe {
         fonts
             .font_data
             .insert("segoe".into(), Arc::new(FontData::from_static(segoe)));
@@ -411,6 +413,16 @@ fn definitions(card: CardFont) -> FontDefinitions {
         proportional.insert(0, "segoe".into());
     }
 
+    // Emoji right after the UI font, ahead of egui's older Noto Emoji: its advances
+    // and ZWJ ligatures are what `emoji` paints the color rendering over.
+    let emoji = read_static(crate::emoji::FONT_PATH);
+    if let Some(data) = emoji {
+        fonts.font_data.insert("emoji".into(), Arc::new(FontData::from_static(data)));
+        let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
+        proportional.insert(segoe.is_some() as usize, "emoji".into());
+    }
+    let mut text_faces: Vec<&'static [u8]> = segoe.into_iter().collect();
+
     let mut semibold = vec!["segoe-semibold".to_owned()];
     semibold.extend(fonts.families[&FontFamily::Proportional].iter().cloned());
     fonts
@@ -422,6 +434,7 @@ fn definitions(card: CardFont) -> FontDefinitions {
     if let Some(consolas) = read_static(r"C:\Windows\Fonts\consola.ttf") {
         fonts.font_data.insert("consolas".into(), Arc::new(FontData::from_static(consolas)));
         mono.push("consolas".to_owned());
+        text_faces.push(consolas);
     }
     mono.extend(fonts.families[&FontFamily::Proportional].iter().cloned());
     fonts.families.insert(FontFamily::Monospace, mono);
@@ -446,12 +459,15 @@ fn definitions(card: CardFont) -> FontDefinitions {
         if let Some(data) = read_static(&format!(r"C:\Windows\Fonts\{r}")) {
             fonts.font_data.insert("card-regular".into(), Arc::new(FontData::from_static(data)));
             regular.push("card-regular".to_owned());
+            text_faces.push(data);
         }
         if let Some(data) = read_static(&format!(r"C:\Windows\Fonts\{b}")) {
             fonts.font_data.insert("card-bold".into(), Arc::new(FontData::from_static(data)));
             bold.push("card-bold".to_owned());
+            text_faces.push(data);
         }
     }
+    crate::emoji::set_faces(emoji, text_faces);
     regular.extend(proportional);
     bold.extend(semibold_list);
     fonts.families.insert(FontFamily::Name("card".into()), regular);

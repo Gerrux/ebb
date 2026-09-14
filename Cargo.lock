@@ -728,8 +728,10 @@ dependencies = [
  "raw-window-handle",
  "rusqlite",
  "serde",
+ "skrifa",
  "wgpu",
  "windows",
+ "windows-numerics",
  "winresource",
 ]
 
