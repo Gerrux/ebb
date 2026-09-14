@@ -343,6 +343,7 @@ pub fn monitor_of(raw: isize) -> Option<Monitor> {
 /// Cover the work area of a monitor (physical pixels, bypasses DPI conversions).
 pub fn place_on(raw: isize, m: &Monitor) {
     let r = m.work;
+    let _placing = Placing::begin();
     unsafe {
         let _ = SetWindowPos(
             hwnd(raw),
@@ -353,6 +354,51 @@ pub fn place_on(raw: isize, m: &Monitor) {
             r.bottom - r.top,
             SWP_NOZORDER | SWP_NOACTIVATE,
         );
+    }
+}
+
+/// Set while Ebb itself moves or sizes the layer (see [`place_on`]); any other
+/// move or resize of the layer — dragging its edge, Aero Snap, Win+arrows — is
+/// dropped in the layer's WM_WINDOWPOSCHANGING.
+static PLACING: AtomicBool = AtomicBool::new(false);
+
+struct Placing;
+
+impl Placing {
+    fn begin() -> Self {
+        PLACING.store(true, Ordering::Relaxed);
+        Placing
+    }
+}
+
+impl Drop for Placing {
+    fn drop(&mut self) {
+        PLACING.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Effective DPI scale of a monitor (1.0 at 96 DPI).
+pub fn monitor_scale(m: &Monitor) -> f32 {
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    let (mut x, mut y) = (0, 0);
+    match unsafe { GetDpiForMonitor(HMONITOR(m.handle as *mut c_void), MDT_EFFECTIVE_DPI, &mut x, &mut y) } {
+        Ok(()) if x > 0 => x as f32 / 96.0,
+        _ => 1.0,
+    }
+}
+
+/// A window of `size` points, centered at the top or bottom edge of a monitor's
+/// work area, `gap` points away from it (the collapsed layer).
+pub fn place_edge_center(raw: isize, m: &Monitor, size: (f32, f32), gap: f32, top: bool) {
+    let scale = monitor_scale(m);
+    let (w, h) = ((size.0 * scale).round() as i32, (size.1 * scale).round() as i32);
+    let r = m.work;
+    let gap = (gap * scale).round() as i32;
+    let x = r.left + ((r.right - r.left) - w) / 2;
+    let y = if top { r.top + gap } else { r.bottom - h - gap };
+    let _placing = Placing::begin();
+    unsafe {
+        let _ = SetWindowPos(hwnd(raw), None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 }
 
@@ -581,7 +627,9 @@ pub fn fade(raw: isize, from: u8, to: u8, duration: std::time::Duration, done: i
 /// - every window: no WS_SYSMENU (otherwise DWM draws a caption "×" in the frame);
 /// - the layer: WS_EX_TOOLWINDOW without WS_EX_APPWINDOW (no taskbar button, not in
 ///   Alt+Tab), and z-order pinned to HWND_BOTTOM in WM_WINDOWPOSCHANGING, so
-///   activating the layer by clicking a card doesn't raise it over other windows.
+///   activating the layer by clicking a card doesn't raise it over other windows;
+///   there too, its position and size only change through [`place_on`] and
+///   [`place_edge_center`].
 unsafe extern "system" fn subclass_proc(
     hwnd: HWND,
     msg: u32,
@@ -605,10 +653,15 @@ unsafe extern "system" fn subclass_proc(
                     }
                 }
             }
-            WM_WINDOWPOSCHANGING if flags & LAYER != 0 && keep_bottom() => {
+            WM_WINDOWPOSCHANGING if flags & LAYER != 0 => {
                 let pos = &mut *(lparam.0 as *mut WINDOWPOS);
-                if !pos.flags.contains(SWP_NOZORDER) {
+                if keep_bottom() && !pos.flags.contains(SWP_NOZORDER) {
                     pos.hwndInsertAfter = HWND_BOTTOM;
+                }
+                // The layer stays where Ebb puts it: no dragging by the frame's edge,
+                // no Aero Snap, no Win+arrows.
+                if !PLACING.load(Ordering::Relaxed) {
+                    pos.flags |= SWP_NOMOVE | SWP_NOSIZE;
                 }
             }
             // Another app got activated: a summoned layer goes back under the windows.

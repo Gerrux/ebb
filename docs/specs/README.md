@@ -106,7 +106,7 @@
 cards(id, kind, title, body, tags /*csv*/, pinned, archived,
       x, y, w, h, created_at, updated_at, last_viewed_at, deleted_at)
 cards_fts  -- FTS5 external content (title, body, tags), unicode61 remove_diacritics 2
-settings(key, value)          -- layer.monitor, layer.backdrop, layer.tint, layer.pin_bottom, sticky_import
+settings(key, value)          -- layer.monitor, layer.backdrop, layer.tint, layer.pin_bottom, layer.collapsed, sticky_import
 imported(source_id, card_id, batch)
 ```
 

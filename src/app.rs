@@ -38,6 +38,19 @@ pub(crate) fn panel_ease(t: f32) -> f32 {
     1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
 }
 const LAYER_FADE_OUT: Duration = Duration::from_millis(160);
+/// The curtain: the layer slides down and fades before it shrinks to the tab.
+const CURTAIN_ANIM: Duration = Duration::from_millis(200);
+/// How far the layer slides down as it collapses, and the drag that fully collapses it.
+const CURTAIN_DROP: f32 = 48.0;
+const CURTAIN_DRAG: f32 = 160.0;
+/// The collapsed layer: a tab at the top center of the desktop (a notch against
+/// the screen's edge) or at the bottom center, above the taskbar.
+const TAB_SIZE: (f32, f32) = (148.0, 40.0);
+const TAB_GAP: f32 = 10.0;
+
+fn place_tab(h: isize, m: &win::Monitor, top: bool) {
+    win::place_edge_center(h, m, TAB_SIZE, if top { 0.0 } else { TAB_GAP }, top);
+}
 
 // Settings keys.
 const SET_MONITOR: &str = "layer.monitor";
@@ -46,6 +59,9 @@ const SET_TINT: &str = "layer.tint";
 const SET_PIN_BOTTOM: &str = "layer.pin_bottom";
 /// "hide" or "back": what Esc / a second tray click does to a summoned layer.
 const SET_DISMISS: &str = "layer.dismiss";
+const SET_COLLAPSED: &str = "layer.collapsed";
+/// "top" or "bottom": the edge the layer rolls up to.
+const SET_CURTAIN: &str = "layer.curtain";
 const SET_SETTINGS_ON_LAUNCH: &str = "app.settings_on_launch";
 const SET_ONBOARDED: &str = "app.onboarded";
 const SET_SNAP: &str = "cards.snap";
@@ -82,6 +98,7 @@ enum MenuItem {
     Library,
     Import,
     Settings,
+    Collapse,
     Dismiss,
     Exit,
 }
@@ -114,6 +131,20 @@ pub struct EbbApp {
     backdrop: Backdrop,
     tint: u8,
     dismiss_hides: bool,
+    /// Rolled down into a tab at the bottom of the desktop, so what's under the
+    /// layer (desktop icons) can be reached.
+    collapsed: bool,
+    /// The layer rolls up to a notch at the top edge; else down to a tab at the bottom.
+    curtain_top: bool,
+    /// 0 = the layer is up, 1 = slid away; follows a drag on the curtain handle.
+    curtain: f32,
+    /// Start, from and to of the curtain's animation.
+    curtain_anim: Option<(Instant, f32, f32)>,
+    /// The window was just resized (to the tab or back): fade it in once a frame
+    /// at the new size is drawn.
+    resize_pending: bool,
+    /// Size of the full layer in points, for placing cards while it's collapsed.
+    full_area: Vec2,
     settings_on_launch: bool,
     snap: bool,
     card_style: card::CardStyle,
@@ -170,15 +201,25 @@ impl EbbApp {
         let manual_start = !autostarted && crate::bench::path().is_none();
         // Launched from a shortcut: shown over the windows, not under them.
         win::RAISED.store(manual_start, Ordering::Relaxed);
+        // Launched from a shortcut, it comes up whole even if it was collapsed.
+        let collapsed = !manual_start && store.setting(SET_COLLAPSED).is_some_and(|v| v == "1");
+        let curtain_top = store.setting(SET_CURTAIN).is_none_or(|v| v != "bottom");
+        let mut full_area = vec2(1280.0, 720.0);
         if let Some(h) = hwnd {
             let monitors = win::monitors();
             let saved = store.setting(SET_MONITOR);
             // The saved monitor if it's still connected, else the first secondary one.
             let monitor = saved.as_deref().and_then(|d| monitors.iter().find(|m| m.matches_device(d))).or(monitors.first());
             if let Some(m) = monitor {
-                win::place_on(h, m);
+                let (r, s) = (m.work, win::monitor_scale(m));
+                full_area = vec2((r.right - r.left) as f32 / s, (r.bottom - r.top) as f32 / s);
+                if collapsed {
+                    place_tab(h, m, curtain_top);
+                } else {
+                    win::place_on(h, m);
+                }
             }
-            win::apply_backdrop(h, backdrop, false);
+            win::apply_backdrop(h, backdrop, collapsed);
             // Still hidden here (eframe shows it after the first frame), so the
             // taskbar never sees a button. Starts transparent; fades in after the
             // first frame.
@@ -203,6 +244,12 @@ impl EbbApp {
             backdrop,
             tint,
             dismiss_hides,
+            collapsed,
+            curtain_top,
+            curtain: 0.0,
+            curtain_anim: None,
+            resize_pending: false,
+            full_area,
             settings_on_launch,
             snap,
             card_style,
@@ -302,12 +349,13 @@ impl EbbApp {
     // -----------------------------------------------------------------------
 
     fn header(&self, ui: &mut Ui) {
-        let origin = ui.max_rect().min + vec2(32.0, 22.0);
+        let origin = ui.max_rect().min + vec2(32.0, 20.0);
         let painter = ui.painter();
-        let title = painter.text(origin, Align2::LEFT_TOP, "Ebb", theme::semibold(22.0), theme::text());
+        let logo = Rect::from_min_size(origin, Vec2::splat(30.0));
+        paint_logo(painter, logo);
         painter.text(
-            pos2(title.right() + 14.0, title.bottom() - 3.0),
-            Align2::LEFT_BOTTOM,
+            pos2(logo.right() + 14.0, logo.center().y),
+            Align2::LEFT_CENTER,
             {
                 let label = |l: &std::sync::OnceLock<Option<&'static str>>| match l.get() {
                     Some(Some(label)) => *label,
@@ -333,9 +381,9 @@ impl EbbApp {
         let button = ui.interact(rect, Id::new("layer-menu"), Sense::click());
         button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Меню"));
         let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&button));
-        let fill = if open || button.hovered() { theme::glass_fill_hover() } else { theme::glass_fill() };
-        ui.painter().rect(rect, CornerRadius::same(10), fill, Stroke::new(1.0, theme::glass_stroke()), StrokeKind::Inside);
-        ui.painter().text(rect.center(), Align2::CENTER_CENTER, "\u{E712}", theme::icons(16.0), if open { theme::text() } else { theme::dim() });
+        let t = hover_t(ui, button.id, open || button.hovered());
+        glass_button(ui, rect.expand(t * 1.5), 10.0, t);
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, "\u{E712}", theme::icons(16.0), theme::dim().lerp_to_gamma(theme::text(), t));
         let button = button.on_hover_cursor(CursorIcon::PointingHand);
 
         let hotkey = |l: &std::sync::OnceLock<Option<&'static str>>| l.get().copied().flatten().unwrap_or("");
@@ -361,6 +409,7 @@ impl EbbApp {
                 item(ui, "Импорт из Sticky Notes…", "", MenuItem::Import);
                 item(ui, "Настройки…", "", MenuItem::Settings);
                 ui.separator();
+                item(ui, if self.curtain_top { "Свернуть вверх" } else { "Свернуть вниз" }, "", MenuItem::Collapse);
                 item(ui, dismiss_label, "Esc", MenuItem::Dismiss);
                 item(ui, "Выход", "", MenuItem::Exit);
             });
@@ -377,10 +426,171 @@ impl EbbApp {
                 self.dismiss(ui.ctx());
                 return;
             }
+            MenuItem::Collapse => {
+                self.curtain_anim = Some((Instant::now(), self.curtain, 1.0));
+                ui.ctx().request_repaint();
+                return;
+            }
         };
         // Handled in logic() like the tray's, on the next pass.
         self.shell.events.lock().unwrap().push(event);
         ui.ctx().request_repaint();
+    }
+
+    /// Direction the layer slides as it collapses: up to the top edge or down to the bottom one.
+    fn curtain_dir(&self) -> f32 {
+        if self.curtain_top { -1.0 } else { 1.0 }
+    }
+
+    /// The handle at the top or bottom center of the layer: a click, or a drag
+    /// toward that edge, rolls the layer into a tab, and the desktop under it is free.
+    /// `full`: the layer's rect, taken before the cards are drawn (they can grow
+    /// `ui.max_rect()` past the window's edge).
+    fn curtain_ui(&mut self, ui: &mut Ui, full: Rect) {
+        let top = self.curtain_top;
+        let y = if top { full.top() + 18.0 } else { full.bottom() - 18.0 };
+        let center = pos2(full.center().x, y);
+        // The hit area is the handle's hovered size, so it doesn't jitter as the handle grows.
+        let resp = ui.interact(Rect::from_center_size(center, vec2(96.0, 28.0)), Id::new("layer-curtain"), Sense::click_and_drag());
+        let label = if top { "Свернуть вверх" } else { "Свернуть вниз" };
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+        // At rest a slim pill; on hover it widens and the arrow nudges toward the edge.
+        let t = hover_t(ui, resp.id, resp.hovered() || resp.dragged());
+        let rect = Rect::from_center_size(center, vec2(56.0 + 32.0 * t, 20.0 + 6.0 * t));
+        glass_button(ui, rect, rect.height() / 2.0, t);
+        let icon = if top { "\u{E70E}" } else { "\u{E70D}" };
+        let nudge = vec2(0.0, self.curtain_dir() * 2.0 * t);
+        let color = theme::dim().lerp_to_gamma(theme::text(), t);
+        ui.painter().text(rect.center() + nudge, Align2::CENTER_CENTER, icon, theme::icons(12.0 + t), color);
+        // A pointing hand, not a resize cursor: after a click the pointer stays over
+        // the collapsed tab, and the cursor only changes once the mouse moves.
+        let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
+
+        if resp.dragged() {
+            self.curtain_anim = None;
+            self.curtain = (self.curtain + self.curtain_dir() * resp.drag_delta().y / CURTAIN_DRAG).clamp(0.0, 1.0);
+        }
+        if resp.drag_stopped() {
+            let to = if self.curtain > 0.3 { 1.0 } else { 0.0 };
+            self.curtain_anim = Some((Instant::now(), self.curtain, to));
+        } else if resp.clicked() {
+            self.curtain_anim = Some((Instant::now(), self.curtain, 1.0));
+        }
+    }
+
+    /// Steps the curtain's animation; the layer's window fades with it.
+    fn step_curtain(&mut self, ctx: &egui::Context) {
+        let active = self.curtain_anim.is_some() || self.curtain > 0.0;
+        if let Some((at, from, to)) = self.curtain_anim {
+            let t = at.elapsed().as_secs_f32() / CURTAIN_ANIM.as_secs_f32();
+            self.curtain = from + (to - from) * panel_ease(t);
+            if t >= 1.0 {
+                self.curtain = to;
+                self.curtain_anim = None;
+            }
+        }
+        if !active {
+            return;
+        }
+        // Also on the frame it comes back to 0, to leave the window opaque.
+        if let Some(h) = self.hwnd {
+            win::set_alpha_now(h, ((1.0 - self.curtain) * 255.0).round() as u8);
+        }
+        if self.curtain >= 1.0 && self.curtain_anim.is_none() {
+            self.collapse(ctx);
+        } else if self.curtain_anim.is_some() {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Shrinks the (already faded out) layer into the tab at the edge of its monitor.
+    fn collapse(&mut self, ctx: &egui::Context) {
+        self.curtain = 0.0;
+        self.curtain_anim = None;
+        if self.collapsed {
+            return;
+        }
+        self.commit_edit();
+        self.active = None;
+        self.collapsed = true;
+        self.set_flag(SET_COLLAPSED, true);
+        if let Some(h) = self.hwnd {
+            win::set_alpha_now(h, 0);
+            if let Some(m) = win::monitor_of(h) {
+                place_tab(h, &m, self.curtain_top);
+            }
+            win::apply_backdrop(h, self.backdrop, true);
+            if win::RAISED.load(Ordering::Relaxed) {
+                // Summoned over the windows: the point was the desktop, go under them.
+                win::lower(h);
+            }
+            self.resize_pending = true;
+        }
+        ctx.request_repaint();
+    }
+
+    /// Brings a collapsed layer back to its full size. True when it was collapsed.
+    fn expand(&mut self, ctx: &egui::Context) -> bool {
+        if !self.collapsed {
+            // Mid-curtain (dragged or animating): back up.
+            if self.curtain > 0.0 {
+                self.curtain_anim = Some((Instant::now(), self.curtain, 0.0));
+                ctx.request_repaint();
+            }
+            return false;
+        }
+        self.collapsed = false;
+        self.set_flag(SET_COLLAPSED, false);
+        if let Some(h) = self.hwnd {
+            win::set_alpha_now(h, 0);
+            if let Some(m) = win::monitor_of(h) {
+                win::place_on(h, &m);
+            }
+            win::apply_backdrop(h, self.backdrop, false);
+            self.resize_pending = true;
+        }
+        ctx.request_repaint();
+        true
+    }
+
+    /// The collapsed layer: "Ebb" and the number of cards; a click brings the layer back.
+    fn tab_ui(&mut self, ui: &mut Ui) {
+        let full = ui.max_rect();
+        let resp = ui.interact(full, Id::new("layer-tab"), Sense::click());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Развернуть Ebb"));
+        let hovered = resp.hovered();
+        let t = hover_t(ui, resp.id, hovered);
+        let p = ui.painter();
+        p.rect_filled(full, CornerRadius::ZERO, theme::scrim(self.tint));
+        p.rect_filled(full, CornerRadius::ZERO, theme::glass_fill_hover().gamma_multiply(t));
+        // A thin accent line on the side that faces the desktop, brighter on hover.
+        let line_y = if self.curtain_top { full.bottom() - 1.0 } else { full.top() + 1.0 };
+        let accent = Color32::from_rgb(45, 212, 191).gamma_multiply(0.35 + 0.5 * t);
+        p.hline((full.center().x - 24.0 - 12.0 * t)..=(full.center().x + 24.0 + 12.0 * t), line_y, Stroke::new(2.0, accent));
+
+        // Points the way the layer comes back, and moves that way on hover.
+        let arrow = if self.curtain_top { "\u{E70D}" } else { "\u{E70E}" };
+        let nudge = vec2(0.0, -self.curtain_dir() * 2.0 * t);
+        let icon = p.layout_no_wrap(arrow.into(), theme::icons(12.0), theme::dim().lerp_to_gamma(theme::text(), t));
+        let count = p.layout_no_wrap(self.cards.len().to_string(), theme::semibold(13.0), theme::muted().lerp_to_gamma(theme::text(), t));
+        let logo = 22.0;
+        let width = icon.size().x + 10.0 + logo + 10.0 + count.size().x;
+        let mut x = full.center().x - width / 2.0;
+        let cy = full.center().y;
+        let icon_w = icon.size().x;
+        p.galley(pos2(x, cy - icon.size().y / 2.0) + nudge, icon, theme::text());
+        x += icon_w + 10.0;
+        paint_logo(p, Rect::from_center_size(pos2(x + logo / 2.0, cy), Vec2::splat(logo + 2.0 * t)));
+        x += logo + 10.0;
+        p.galley(pos2(x, cy - count.size().y / 2.0), count, theme::text());
+
+        if resp.contains_pointer() {
+            // Also right after collapsing, before the pointer moves.
+            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        }
+        if resp.clicked() {
+            self.expand(ui.ctx());
+        }
     }
 
     fn cards_ui(&mut self, ui: &mut Ui) {
@@ -663,6 +873,7 @@ impl EbbApp {
             capture_hotkey: self.shell.hotkey_label.get().copied().flatten(),
             search_hotkey: self.shell.search_hotkey_label.get().copied().flatten(),
             dismiss_hides: self.dismiss_hides,
+            curtain_top: self.curtain_top,
             settings_on_launch: self.settings_on_launch,
             snap: self.snap,
             card_style: self.card_style,
@@ -687,12 +898,15 @@ impl EbbApp {
         let was_visible = self.layer_visible;
         // Fades in when it was hidden.
         self.set_layer_visible(ctx, true);
+        // Collapsed: grows back at alpha 0 and fades in once redrawn at full size
+        // (this cancels the fade above).
+        let expanded = self.expand(ctx);
         let Some(h) = self.hwnd else { return };
-        if already_up {
+        if already_up && !expanded {
             win::raise(h);
             return;
         }
-        if was_visible {
+        if was_visible && !expanded {
             // Was under the windows: come up the same way it appears when shown.
             // Alpha goes to 0 before the raise, so it never pops in at full opacity.
             win::fade(h, 0, 255, LAYER_FADE_IN, || {});
@@ -739,7 +953,7 @@ impl EbbApp {
     fn refresh_theme(&mut self, ctx: &egui::Context) {
         theme::apply(ctx, self.theme_mode, self.card_style.background, &win::system_colors());
         if let Some(h) = self.hwnd {
-            win::apply_backdrop(h, self.backdrop, false);
+            win::apply_backdrop(h, self.backdrop, self.collapsed);
         }
         for h in [win::find_capture_window(), win::find_library_window()].into_iter().flatten() {
             win::apply_backdrop(h, Backdrop::AccentAcrylic, true);
@@ -755,15 +969,30 @@ impl EbbApp {
     fn set_monitor(&mut self, device: &str) {
         let monitors = win::monitors();
         if let (Some(m), Some(h)) = (monitors.iter().find(|m| m.matches_device(device)), self.hwnd) {
-            win::place_on(h, m);
+            if self.collapsed {
+                place_tab(h, m, self.curtain_top);
+            } else {
+                win::place_on(h, m);
+            }
             let _ = self.store.set_setting(SET_MONITOR, device);
+        }
+    }
+
+    fn set_curtain_top(&mut self, top: bool) {
+        self.curtain_top = top;
+        let _ = self.store.set_setting(SET_CURTAIN, if top { "top" } else { "bottom" });
+        // A collapsed tab moves to the other edge right away.
+        if let (true, Some(h)) = (self.collapsed, self.hwnd)
+            && let Some(m) = win::monitor_of(h)
+        {
+            place_tab(h, &m, top);
         }
     }
 
     fn set_backdrop(&mut self, backdrop: Backdrop) {
         self.backdrop = backdrop;
         if let Some(h) = self.hwnd {
-            win::apply_backdrop(h, backdrop, false);
+            win::apply_backdrop(h, backdrop, self.collapsed);
         }
         let _ = self.store.set_setting(SET_BACKDROP, backdrop.key());
     }
@@ -791,6 +1020,7 @@ impl EbbApp {
                 ctx.request_repaint_of(ViewportId::ROOT);
             }
             Request::SetPinBottom(on) => self.set_pin_bottom(on),
+            Request::SetCurtainTop(top) => self.set_curtain_top(top),
             Request::SetDismissHides(on) => {
                 self.dismiss_hides = on;
                 let _ = self.store.set_setting(SET_DISMISS, if on { "hide" } else { "back" });
@@ -811,6 +1041,7 @@ impl EbbApp {
             }
             Request::ImportSticky => {
                 self.set_layer_visible(ctx, true);
+                self.expand(ctx);
                 self.sticky.scan(ctx, &self.store, self.hwnd, true);
             }
         }
@@ -910,12 +1141,13 @@ impl EbbApp {
     /// into a free slot. Counts as viewed.
     fn open_card(&mut self, ctx: &egui::Context, id: i64) {
         self.set_layer_visible(ctx, true);
+        self.expand(ctx);
         let idx = match self.cards.iter().position(|c| c.id == id) {
             Some(idx) => idx,
             None => {
                 let Ok(Some(mut card)) = self.store.card(id) else { return };
                 card.archived = false;
-                card.pos = card::free_slot(&self.cards, ctx.content_rect().size());
+                card.pos = card::free_slot(&self.cards, self.full_area);
                 card.size = card.size.max(MIN_SIZE);
                 self.appearing.push((card.id, Instant::now()));
                 self.cards.push(card);
@@ -954,7 +1186,7 @@ impl eframe::App for EbbApp {
             match event {
                 Event::Capture(t) => pressed = Some((Mode::Capture, t)),
                 Event::Search(t) => pressed = Some((Mode::Search, t)),
-                Event::ToggleLayer if self.layer_visible => self.set_layer_visible(ctx, false),
+                Event::ToggleLayer if self.layer_visible && !self.collapsed => self.set_layer_visible(ctx, false),
                 Event::ToggleLayer => self.summon(ctx),
                 Event::TrayClick => self.tray_click(ctx),
                 Event::Launched => {
@@ -1066,7 +1298,7 @@ impl eframe::App for EbbApp {
         for request in outbox {
             match request {
                 Outbox::Captured(text) => {
-                    self.add_from_capture(&text, ctx.content_rect().size());
+                    self.add_from_capture(&text, self.full_area);
                     changed = true;
                 }
                 Outbox::Open(id) => {
@@ -1169,7 +1401,7 @@ impl eframe::App for EbbApp {
             self.set_card_style(ui.ctx(), card::CardStyle { marker: next, ..self.card_style });
             self.toast = Some(Toast::new(format!("Вид карточек: {} (F4 — дальше)", next.label()), None));
         }
-        if esc {
+        if esc && !self.collapsed {
             if self.editing.is_some() {
                 self.commit_edit();
             } else if egui::Popup::is_any_open(ui.ctx()) {
@@ -1180,16 +1412,46 @@ impl eframe::App for EbbApp {
         }
 
         let full = ui.max_rect();
-        ui.painter()
-            .rect_filled(full, CornerRadius::ZERO, theme::scrim(self.tint));
-
-        self.header(ui);
-        self.cards_ui(ui);
-        self.sticky.ui(ui, &mut self.store, &mut self.cards, self.hwnd);
-        self.toast_ui(ui);
-        self.menu_ui(ui);
-        if self.show_debug {
-            self.debug_ui(ui);
+        // Told apart by size: the window may still be at its old size for a frame
+        // after a resize.
+        let at_tab_size = full.height() < TAB_SIZE.1 * 2.0;
+        if self.resize_pending && at_tab_size == self.collapsed {
+            self.resize_pending = false;
+            if let Some(h) = self.hwnd {
+                win::fade(h, 0, 255, LAYER_FADE_IN, || {});
+            }
+            if !self.collapsed {
+                let now = Instant::now();
+                self.appearing = self.cards.iter().map(|c| (c.id, now)).collect();
+            }
+        }
+        if self.resize_pending {
+            // Transparent until then; nothing to draw at the wrong size.
+            ui.ctx().request_repaint();
+        } else if self.collapsed {
+            self.tab_ui(ui);
+        } else {
+            self.full_area = full.size();
+            self.step_curtain(ui.ctx());
+            ui.painter().rect_filled(full, CornerRadius::ZERO, theme::scrim(self.tint));
+            // Slides down as the curtain closes.
+            let drop = vec2(0.0, self.curtain_dir() * self.curtain * CURTAIN_DROP);
+            let moved = full.translate(drop);
+            // Cards in their own scope: one past the window's edge grows its ui's
+            // max_rect, and the panels below place themselves by the window's edges.
+            ui.scope_builder(UiBuilder::new().max_rect(moved), |ui| {
+                self.header(ui);
+                self.cards_ui(ui);
+            });
+            ui.scope_builder(UiBuilder::new().max_rect(moved), |ui| {
+                self.sticky.ui(ui, &mut self.store, &mut self.cards, self.hwnd);
+                self.toast_ui(ui);
+                self.menu_ui(ui);
+                if self.show_debug {
+                    self.debug_ui(ui);
+                }
+                self.curtain_ui(ui, moved);
+            });
         }
         // Created up front even while hidden: creating it on the first hotkey press
         // saves ~4 MiB but doubles the first-show latency and flashes without acrylic.
@@ -1246,6 +1508,65 @@ pub(crate) fn append_timing_log(line: &str) {
 // ---------------------------------------------------------------------------
 // Widgets
 // ---------------------------------------------------------------------------
+
+/// The Ebb logo in a square `rect`, drawn from the geometry of scripts/make-icon.py
+/// (a 140-unit square), so it stays sharp at any size. Below ~24 px it keeps
+/// only the card and one bold wave, like the small icon sizes.
+pub(crate) fn paint_logo(painter: &egui::Painter, rect: Rect) {
+    const BG: Color32 = Color32::from_rgb(30, 33, 40);
+    const CARD: Color32 = Color32::from_rgb(52, 211, 153);
+    const INK: Color32 = Color32::from_rgb(11, 59, 43);
+    const WAVE: Color32 = Color32::from_rgb(45, 212, 191);
+    let k = rect.width() / 140.0;
+    let at = |x: f32, y: f32| rect.min + vec2(x, y) * k;
+    let rrect = |x0: f32, y0: f32, x1: f32, y1: f32, r: f32, fill: Color32| {
+        painter.rect_filled(Rect::from_min_max(at(x0, y0), at(x1, y1)), CornerRadius::same((r * k).round() as u8), fill);
+    };
+    let wave = |y: f32, width: f32, color: Color32| {
+        let points: Vec<Pos2> = (0..=48)
+            .map(|i| {
+                let x = 22.0 + i as f32 * 2.0;
+                at(x, y - 5.0 * (std::f32::consts::PI * (x - 22.0) / 24.0).sin())
+            })
+            .collect();
+        let r = width * k / 2.0;
+        painter.circle_filled(points[0], r, color);
+        painter.circle_filled(points[points.len() - 1], r, color);
+        painter.add(egui::Shape::line(points, Stroke::new(width * k, color)));
+    };
+
+    rrect(0.0, 0.0, 140.0, 140.0, 32.0, BG);
+    if rect.width() * painter.ctx().pixels_per_point() <= 24.0 {
+        rrect(34.0, 22.0, 106.0, 78.0, 12.0, CARD);
+        wave(108.0, 13.0, WAVE);
+    } else {
+        let edge = Rect::from_min_max(at(0.5, 0.5), at(139.5, 139.5));
+        painter.rect_stroke(edge, CornerRadius::same((32.0 * k).round() as u8), Stroke::new((1.2 * k).max(0.6), Color32::from_white_alpha(30)), StrokeKind::Inside);
+        rrect(42.0, 26.0, 98.0, 70.0, 10.0, CARD);
+        rrect(54.0, 40.0, 86.0, 45.0, 2.5, INK);
+        rrect(54.0, 51.0, 74.0, 56.0, 2.5, INK);
+        wave(90.0, 6.0, WAVE);
+        wave(110.0, 6.0, WAVE.gamma_multiply(115.0 / 255.0));
+    }
+}
+
+/// 0..1 hover progress of a widget, eased over a short time.
+fn hover_t(ui: &Ui, id: Id, hovered: bool) -> f32 {
+    panel_ease(ui.ctx().animate_bool_with_time(id.with("hover"), hovered, 0.14))
+}
+
+/// A glass button face at hover progress `t`: fill and edge brighten, a soft
+/// shadow comes up under it.
+fn glass_button(ui: &Ui, rect: Rect, radius: f32, t: f32) {
+    let p = ui.painter();
+    let r = CornerRadius::same(radius.round() as u8);
+    if t > 0.0 {
+        p.rect_filled(rect.translate(vec2(0.0, 1.5)).expand(1.0), r, Color32::from_black_alpha((40.0 * t) as u8));
+    }
+    let fill = theme::glass_fill().lerp_to_gamma(theme::glass_fill_hover(), t);
+    let stroke = theme::glass_stroke().lerp_to_gamma(theme::text().gamma_multiply(0.35), t);
+    p.rect(rect, r, fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
+}
 
 pub(crate) fn glass_panel(ui: &Ui, rect: Rect, hovered: bool) {
     let fill = if hovered { theme::glass_fill_hover() } else { theme::glass_fill() };

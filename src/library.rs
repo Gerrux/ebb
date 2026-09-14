@@ -49,6 +49,8 @@ pub struct LayerSettings {
     pub search_hotkey: Option<&'static str>,
     /// Esc / tray click on a summoned layer hides it instead of sending it back.
     pub dismiss_hides: bool,
+    /// The layer collapses to a notch at the top edge; else to a tab at the bottom.
+    pub curtain_top: bool,
     pub settings_on_launch: bool,
     /// Cards stick to each other's edges while dragged.
     pub snap: bool,
@@ -67,6 +69,7 @@ impl Default for LayerSettings {
             capture_hotkey: None,
             search_hotkey: None,
             dismiss_hides: false,
+            curtain_top: true,
             settings_on_launch: true,
             snap: true,
             card_style: crate::card::CardStyle::default(),
@@ -86,6 +89,7 @@ pub enum Request {
     SetTint(u8),
     SetPinBottom(bool),
     SetDismissHides(bool),
+    SetCurtainTop(bool),
     SetSettingsOnLaunch(bool),
     SetSnap(bool),
     SetCardStyle(crate::card::CardStyle),
@@ -777,6 +781,15 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
             st.settings.dismiss_hides = hides;
             st.outbox.push(Request::SetDismissHides(hides));
         }
+        ui.label(RichText::new("Свернуть слой к краю").size(13.0).color(theme::dim()));
+        let mut top = st.settings.curtain_top;
+        let a = ui.radio_value(&mut top, true, "Сверху — чёлкой у края экрана");
+        let b = ui.radio_value(&mut top, false, "Снизу — плашкой над панелью задач");
+        if (a.changed() || b.changed()) && top != st.settings.curtain_top {
+            st.settings.curtain_top = top;
+            st.outbox.push(Request::SetCurtainTop(top));
+        }
+        note(ui, "Ручка на краю слоя сворачивает его, и рабочий стол под ним снова доступен; клик по свёрнутому слою возвращает его.");
 
         section(ui, "Оформление");
         use crate::card::{IconSpot, Marker, PRESETS};
