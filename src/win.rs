@@ -15,6 +15,9 @@ use windows::Win32::Graphics::Gdi::{
     MonitorFromPoint,
 };
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
+use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardSequenceNumber, OpenClipboard, RegisterClipboardFormatW, SetClipboardData};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::Foundation::{GlobalFree, HANDLE};
 use windows::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
 use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 use windows::Win32::UI::Controls::MARGINS;
@@ -26,6 +29,76 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_SYSMENU,
 };
 use windows::core::{BOOL, PCWSTR, w};
+
+/// Copies a Private value through the Win32 clipboard and removes it after 30s
+/// if the user has not replaced it. The normal egui clipboard path is avoided.
+pub fn copy_private(text: &str) -> bool {
+    let mut wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let Ok(mem) = (unsafe { GlobalAlloc(GMEM_MOVEABLE, wide.len() * std::mem::size_of::<u16>()) }) else { return false };
+    let ptr = unsafe { GlobalLock(mem) } as *mut u16;
+    if ptr.is_null() {
+        unsafe { let _ = GlobalFree(Some(mem)); }
+        return false;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+        let _ = GlobalUnlock(mem);
+    }
+    let ok = unsafe {
+        if OpenClipboard(None).is_err() {
+            let _ = GlobalFree(Some(mem));
+            false
+        } else if EmptyClipboard().is_err() {
+            let _ = CloseClipboard();
+            let _ = GlobalFree(Some(mem));
+            false
+        } else {
+            let result = SetClipboardData(13, Some(HANDLE(mem.0)));
+            if result.is_err() {
+                let _ = GlobalFree(Some(mem));
+            }
+            // Windows uses these private formats to keep sensitive clipboard
+            // contents out of history and cloud sync.
+            for name in [w!("CanIncludeInClipboardHistory"), w!("CanUploadToCloudClipboard")] {
+                let format = RegisterClipboardFormatW(name);
+                if format != 0 {
+                    if let Ok(flag) = GlobalAlloc(GMEM_MOVEABLE, std::mem::size_of::<u32>()) {
+                        let p = GlobalLock(flag) as *mut u32;
+                        if !p.is_null() {
+                            *p = 0;
+                            let _ = GlobalUnlock(flag);
+                            if SetClipboardData(format, Some(HANDLE(flag.0))).is_err() {
+                                let _ = GlobalFree(Some(flag));
+                            }
+                        } else {
+                            let _ = GlobalFree(Some(flag));
+                        }
+                    }
+                }
+            }
+            let _ = CloseClipboard();
+            result.is_ok()
+        }
+    };
+    wide.fill(0);
+    if !ok {
+        return false;
+    }
+    let sequence = unsafe { GetClipboardSequenceNumber() };
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        if unsafe { GetClipboardSequenceNumber() } != sequence {
+            return;
+        }
+        unsafe {
+            if OpenClipboard(None).is_ok() {
+                let _ = EmptyClipboard();
+                let _ = CloseClipboard();
+            }
+        }
+    });
+    true
+}
 
 pub fn hwnd_of(handle: &impl HasWindowHandle) -> Option<isize> {
     match handle.window_handle().ok()?.as_raw() {

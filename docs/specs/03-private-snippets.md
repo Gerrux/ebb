@@ -1,6 +1,6 @@
 # 03 — Private Snippets: шифрование и безопасное обращение
 
-Статус: не начато · Зависит от: — · Оценка: 3–4 дня
+Статус: core реализован · Зависит от: — · Остаток: Secure Reference, предупреждения и защита reveal-окна
 
 ## Зачем
 
@@ -41,17 +41,17 @@ product.txt §5, §22. Сейчас «Private» — только маска на
 ## Данные
 
 ```sql
-ALTER TABLE cards ADD COLUMN secret BLOB;       -- nonce(12) || ciphertext || tag(16), только для private
+ALTER TABLE cards ADD COLUMN secret BLOB;       -- DPAPI ciphertext, только для private
 -- для private: title = метка, body = '' , tags как обычно
 ```
 
-Ключ данных: 256 бит, генерируется при первой записи секрета (`BCryptGenRandom`), хранится в
-`%LOCALAPPDATA%\Ebb\vault.key`, защищённый `CryptProtectData` (DPAPI, пользователь,
-`CRYPTPROTECT_UI_FORBIDDEN`, entropy = константа приложения). В базе ключа нет.
+В текущем core-срезе используется Windows DPAPI непосредственно для каждого секрета с
+дополнительной энтропией `card.id`. Поэтому отдельного plaintext-ключа рядом с базой нет, а
+скопированная база не расшифровывается другим пользователем Windows. Переход на отдельный
+AES-256-GCM ключевой файл можно сделать позже, если понадобится переносимый экспорт.
 
-Шифрование: AES-256-GCM через Windows CNG (`BCryptOpenAlgorithmProvider(BCRYPT_AES_ALGORITHM)`,
-`BCRYPT_CHAIN_MODE_GCM`) — без новых крейтов; associated data = `card.id` (секрет нельзя
-переставить в другую карточку).
+Шифрование: Windows DPAPI (`CryptProtectData` / `CryptUnprotectData`) с дополнительной
+энтропией, включающей `card.id` (секрет нельзя переставить в другую карточку).
 
 Миграция существующих Private-карточек (однократно, в транзакции):
 1. для каждой: метка = `card::private_label` или «Без названия», секрет = остальной текст;
@@ -61,12 +61,12 @@ ALTER TABLE cards ADD COLUMN secret BLOB;       -- nonce(12) || ciphertext || ta
 
 ## Реализация
 
-- Новый модуль `vault.rs`: `Vault::open()` (ленивая загрузка ключа при первом обращении),
-  `encrypt(id, &str) -> Vec<u8>`, `decrypt(id, &[u8]) -> Zeroizing<String>`.
+- Новый модуль `vault.rs`: `protect(id, &str) -> Vec<u8>` и `unprotect(id, &[u8]) -> String` через
+  DPAPI; plaintext не попадает в модель `Card` и живёт в UI только во время reveal.
   Буфер с открытым текстом обнуляется после использования (без крейта: `SecureZeroMemory`).
 - Буфер обмена: своя запись через Win32 (`OpenClipboard`/`SetClipboardData`) с форматами
-  `ExcludeClipboardContentFromMonitorProcessing`, `CanIncludeInClipboardHistory = 0`,
-  `CanUploadToCloudClipboard = 0`; очистка через 30 с — фоновый поток ждёт на waitable timer и
+  `CanIncludeInClipboardHistory = 0`, `CanUploadToCloudClipboard = 0`; очистка через 30 с — фоновый поток
+  ждёт таймер и
   проверяет `GetClipboardSequenceNumber()`.
 - Показ секрета: пока открыт — `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` для окна слоя
   (опция «Скрывать от записи экрана», по умолчанию включена), затем `WDA_NONE`.

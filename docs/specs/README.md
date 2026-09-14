@@ -22,11 +22,11 @@
 | 5. Global quick capture | ✅ | Бар захвата |
 | 6. Universal search | ✅ | FTS5, фильтры словами, бар поиска, библиотека. Нет семантики → [10](10-semantic-search-ai.md) |
 | 7. Tags | ⚠️ | `#теги` из текста, поиск по тегам. Нет редактора, подсказок → [04](04-cards-and-types.md) |
-| 8. Basic resurfacing | ❌ | → [01](01-resurfacing.md) |
+| 8. Basic resurfacing | ⚠️ core готов | Startup Rediscover, cooldown, snooze, приоритет типов, Private исключены → [01](01-resurfacing.md) |
 | 9. Forgotten notes | ❌ | → [01](01-resurfacing.md) |
-| 10. Weekly review | ❌ | → [02](02-weekly-review.md) |
+| 10. Weekly review | ⚠️ core | → [02](02-weekly-review.md) |
 | 11. Import Sticky Notes | ⚠️ | Импорт «как на экране», замена прошлого импорта. Нет просмотра классификации → [08](08-import-review.md) |
-| 12. Private Snippets с шифрованием | ❌ **важно** | Сейчас Private — только маска в UI, **текст лежит в БД открыто** → [03](03-private-snippets.md) |
+| 12. Private Snippets с шифрованием | ⚠️ core готов | DPAPI на карточку, миграция старых Private, исключение из FTS и безопасное копирование; UI-предупреждения и Secure Reference → [03](03-private-snippets.md) |
 | 13. Multi-monitor | ⚠️ | Слой на одном выбранном мониторе → [06](06-layouts-and-monitors.md) |
 
 Каркас: трей, единственный экземпляр, автозапуск через Task Scheduler, настройки в «Библиотеке».

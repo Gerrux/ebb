@@ -9,11 +9,13 @@ mod emoji;
 mod import_ui;
 mod library;
 mod renderer;
+mod resurface;
 mod search;
 mod shell;
 mod sticky;
 mod store;
 mod theme;
+mod vault;
 mod win;
 
 use std::time::Instant;
@@ -59,6 +61,7 @@ fn main() -> eframe::Result {
 
     store::migrate_legacy_data();
     let store = Store::open().expect("open database");
+    let _ = store.refresh_resurfacing(resurface::unix_now(), 3);
     let cards = store.load().expect("load cards");
 
     let mut options = eframe::NativeOptions {

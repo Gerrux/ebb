@@ -14,6 +14,39 @@ pub enum Kind {
     Private,
 }
 
+/// Why a card is currently on the layer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Placement {
+    #[default]
+    Manual,
+    Pinned,
+    Today,
+    Rediscover,
+    Archive,
+}
+
+impl Placement {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Pinned => "pinned",
+            Self::Today => "today",
+            Self::Rediscover => "rediscover",
+            Self::Archive => "archive",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "pinned" => Self::Pinned,
+            "today" => Self::Today,
+            "rediscover" => Self::Rediscover,
+            "archive" => Self::Archive,
+            _ => Self::Manual,
+        }
+    }
+}
+
 impl Kind {
     pub const ALL: [Kind; 8] = [
         Kind::Note,
@@ -396,6 +429,8 @@ pub struct Card {
     pub pos: Pos2,
     pub size: Vec2,
     pub created_at: i64,
+    pub review_at: Option<i64>,
+    pub placement: Placement,
     /// Picked by hand; `None` takes the kind's color.
     pub tint: Option<Tint>,
 }
@@ -403,6 +438,21 @@ pub struct Card {
 impl Card {
     pub fn accent(&self) -> Color32 {
         self.tint.map_or(self.kind.accent(), Tint::color)
+    }
+
+    pub fn resurface_reason(&self, now: i64) -> Option<String> {
+        if self.placement != Placement::Rediscover {
+            return None;
+        }
+        if self.review_at.is_some_and(|at| at <= now) {
+            return Some("Напоминание на сегодня".to_owned());
+        }
+        let days = (now - self.created_at).max(0) / 86_400;
+        Some(if days == 0 {
+            "Давно не открывал".to_owned()
+        } else {
+            format!("Ты записал это {days} дн. назад")
+        })
     }
 }
 
@@ -845,6 +895,8 @@ mod tests {
             pos: pos2(x, y),
             size: DEFAULT_SIZE,
             created_at: 0,
+            review_at: None,
+            placement: Placement::Manual,
             tint: None,
         }
     }

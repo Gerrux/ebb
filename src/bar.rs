@@ -19,6 +19,7 @@ use crate::card::{Kind, parse_capture};
 use crate::search::{self, MARK_END, MARK_START};
 use crate::store::{Hit, Store};
 use crate::theme;
+use crate::win;
 
 pub const CAPTURE_SIZE: Vec2 = vec2(640.0, 132.0);
 pub const SEARCH_SIZE: Vec2 = vec2(680.0, 476.0);
@@ -315,8 +316,14 @@ fn perform(ui: &Ui, st: &mut BarState, kind: ActionKind) -> bool {
         }
         ActionKind::Copy => {
             if let Ok(Some(card)) = store.card(hit.id) {
-                let text = if card.title.is_empty() { card.body } else { format!("{}\n{}", card.title, card.body) };
-                ui.ctx().copy_text(text);
+                if card.kind == Kind::Private {
+                    if let Ok(Some(secret)) = store.secret(card.id) {
+                        let _ = win::copy_private(&secret);
+                    }
+                } else {
+                    let text = if card.title.is_empty() { card.body } else { format!("{}\n{}", card.title, card.body) };
+                    ui.ctx().copy_text(text);
+                }
                 st.notice = Some(("Скопировано".into(), Instant::now()));
             }
         }

@@ -64,6 +64,8 @@ pub enum Event {
     ImportSticky,
     /// Open the library window; `true` = on the settings tab.
     OpenLibrary(bool),
+    /// Open the weekly review in the library window.
+    OpenReview,
     /// Windows' light/dark mode or accent color changed.
     SystemColors,
     Exit,

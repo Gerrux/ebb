@@ -15,7 +15,7 @@ use crate::bar::{self, BarState, Mode, Outbox, Press};
 use crate::import_ui::StickyImport;
 use crate::library::{self, LibraryState, Request, Tab};
 use crate::shell::{self, Event};
-use crate::card::{self, Card, Kind, MIN_SIZE, Sides, parse_capture};
+use crate::card::{self, Card, Kind, MIN_SIZE, Placement, Sides, parse_capture};
 use crate::store::Store;
 use crate::theme;
 use crate::win::{self, Backdrop};
@@ -96,6 +96,7 @@ enum MenuItem {
     Capture,
     Search,
     Library,
+    Review,
     Import,
     Settings,
     Collapse,
@@ -157,6 +158,8 @@ pub struct EbbApp {
     /// Last card clicked or dragged: shows its details until something else is clicked.
     active: Option<i64>,
     revealed: Option<(i64, Instant)>,
+    /// Plaintext is kept only for the short reveal window; it is never part of Card.
+    revealed_text: Option<(i64, String)>,
     /// Card just opened from search: outlined for a moment.
     highlighted: Option<(i64, Instant)>,
     toast: Option<Toast>,
@@ -259,6 +262,7 @@ impl EbbApp {
             editing: None,
             active: None,
             revealed: None,
+            revealed_text: None,
             highlighted: None,
             toast: None,
             appearing: Vec::new(),
@@ -327,10 +331,21 @@ impl EbbApp {
             }
             if self.revealed.is_some_and(|(rid, _)| rid == id) {
                 self.revealed = None;
+                self.revealed_text = None;
+            }
+        }
+        if old == Kind::Private && kind != Kind::Private {
+            if let Ok(Some(secret)) = self.store.secret(id) {
+                self.cards[idx].title.clear();
+                self.cards[idx].body = secret;
             }
         }
         self.cards[idx].kind = kind;
         self.save(idx);
+        if kind == Kind::Private {
+            self.cards[idx].title = card::private_label(&self.cards[idx].title, &self.cards[idx].body).unwrap_or_else(|| "Private".into());
+            self.cards[idx].body.clear();
+        }
         let text = format!("Тип: {} → {}", old.label(), kind.label());
         self.toast = Some(Toast::new(text, Some(Undo::Kind(id, old))));
         self.library.lock().unwrap().invalidate();
@@ -405,6 +420,7 @@ impl EbbApp {
                 item(ui, "Записать мысль", capture_key, MenuItem::Capture);
                 item(ui, "Найти", search_key, MenuItem::Search);
                 item(ui, "Архив и корзина", "Win+Alt+L", MenuItem::Library);
+                item(ui, "Еженедельный обзор", "", MenuItem::Review);
                 ui.separator();
                 item(ui, "Импорт из Sticky Notes…", "", MenuItem::Import);
                 item(ui, "Настройки…", "", MenuItem::Settings);
@@ -419,6 +435,7 @@ impl EbbApp {
             MenuItem::Capture => Event::Capture(Instant::now()),
             MenuItem::Search => Event::Search(Instant::now()),
             MenuItem::Library => Event::OpenLibrary(false),
+            MenuItem::Review => Event::OpenReview,
             MenuItem::Import => Event::ImportSticky,
             MenuItem::Settings => Event::OpenLibrary(true),
             MenuItem::Exit => Event::Exit,
@@ -611,6 +628,7 @@ impl EbbApp {
         if let Some((_, t)) = self.revealed {
             if t.elapsed() >= REVEAL_FOR {
                 self.revealed = None;
+                self.revealed_text = None;
             } else {
                 ui.ctx().request_repaint_after(REVEAL_FOR - t.elapsed());
             }
@@ -633,6 +651,7 @@ impl EbbApp {
             let id = self.cards[idx].id;
             let editing = self.editing.as_mut().filter(|(eid, _)| *eid == id).map(|(_, b)| b);
             let revealed = self.revealed.is_some_and(|(rid, _)| rid == id);
+            let revealed_text = self.revealed_text.as_ref().filter(|(rid, _)| *rid == id).map(|(_, text)| text.as_str());
             let appear = self
                 .appearing
                 .iter()
@@ -644,7 +663,7 @@ impl EbbApp {
             let produced = ui
                 .scope(|ui| {
                     ui.multiply_opacity(appear);
-                    card_ui(ui, origin + vec2(0.0, (1.0 - appear) * 10.0), area, card, hovered, editing, revealed, active, magnet, style)
+                    card_ui(ui, origin + vec2(0.0, (1.0 - appear) * 10.0), area, card, hovered, editing, revealed, revealed_text, active, magnet, style)
                 })
                 .inner;
             for a in produced {
@@ -656,7 +675,7 @@ impl EbbApp {
             ui.scope(|ui| {
                 ui.disable();
                 ui.multiply_opacity(1.0 - t);
-                let _ = card_ui(ui, origin + vec2(0.0, t * 6.0), area, card, false, None, false, false, None, style);
+                let _ = card_ui(ui, origin + vec2(0.0, t * 6.0), area, card, false, None, false, None, false, None, style);
             });
         }
 
@@ -698,21 +717,45 @@ impl EbbApp {
                 Action::Front => {
                     to_front = Some(idx);
                     self.active = Some(self.cards[idx].id);
+                    if self.cards[idx].placement == Placement::Rediscover {
+                        self.cards[idx].placement = Placement::Manual;
+                        self.save(idx);
+                    }
+                    let _ = self.store.touch(self.cards[idx].id);
                 }
-                Action::Moved => self.save(idx),
+                Action::Moved => {
+                    self.cards[idx].placement = Placement::Manual;
+                    self.save(idx);
+                }
                 Action::TogglePin => {
                     self.cards[idx].pinned ^= true;
+                    self.cards[idx].placement = if self.cards[idx].pinned { Placement::Pinned } else { Placement::Manual };
                     self.save(idx);
                 }
                 Action::Copy => {
                     let c = &self.cards[idx];
-                    let text = if c.title.is_empty() { c.body.clone() } else { format!("{}\n{}", c.title, c.body) };
-                    ui.ctx().copy_text(text);
+                    let _ = self.store.touch(c.id);
+                    if c.kind == Kind::Private {
+                        if let Ok(Some(secret)) = self.store.secret(c.id) {
+                            let _ = win::copy_private(&secret);
+                        }
+                    } else {
+                        let text = if c.title.is_empty() { c.body.clone() } else { format!("{}\n{}", c.title, c.body) };
+                        ui.ctx().copy_text(text);
+                    }
                 }
                 Action::Duplicate => {
                     let src = self.cards[idx].clone();
                     let pos = card::beside(&self.cards, &src, area);
-                    let parsed = card::Parsed { kind: src.kind, title: src.title, body: src.body, tags: src.tags };
+                    let body = if src.kind == Kind::Private {
+                        match self.store.secret(src.id) {
+                            Ok(Some(secret)) => secret,
+                            _ => continue,
+                        }
+                    } else {
+                        src.body
+                    };
+                    let parsed = card::Parsed { kind: src.kind, title: src.title, body, tags: src.tags };
                     match self.store.insert(&parsed, pos) {
                         Ok(mut copy) => {
                             copy.size = src.size;
@@ -728,6 +771,7 @@ impl EbbApp {
                 }
                 Action::Archive => {
                     self.cards[idx].archived = true;
+                    self.cards[idx].placement = Placement::Archive;
                     self.save(idx);
                     self.toast = Some(Toast::new("Карточка в архиве", Some(Undo::Unarchive(self.cards[idx].id))));
                     remove = Some(idx);
@@ -741,10 +785,16 @@ impl EbbApp {
                 Action::StartEdit => {
                     self.commit_edit();
                     let c = &self.cards[idx];
+                    let _ = self.store.touch(c.id);
                     self.editing = Some((c.id, edit_text(c)));
                 }
                 Action::Reveal => {
-                    self.revealed = Some((self.cards[idx].id, Instant::now()));
+                    let id = self.cards[idx].id;
+                    let _ = self.store.touch(id);
+                    if let Ok(Some(secret)) = self.store.secret(id) {
+                        self.revealed = Some((id, Instant::now()));
+                        self.revealed_text = Some((id, secret));
+                    }
                 }
                 Action::SetKind(kind) => self.set_kind(idx, kind),
                 Action::SetTint(tint) => {
@@ -1147,6 +1197,7 @@ impl EbbApp {
             None => {
                 let Ok(Some(mut card)) = self.store.card(id) else { return };
                 card.archived = false;
+                card.placement = Placement::Manual;
                 card.pos = card::free_slot(&self.cards, self.full_area);
                 card.size = card.size.max(MIN_SIZE);
                 self.appearing.push((card.id, Instant::now()));
@@ -1204,6 +1255,13 @@ impl eframe::App for EbbApp {
                     let mut lib = self.library.lock().unwrap();
                     lib.settings = self.layer_settings();
                     lib.open(Tab::Archive);
+                    ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::InnerSize(lib.size()));
+                    ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::Focus);
+                }
+                Event::OpenReview => {
+                    let mut lib = self.library.lock().unwrap();
+                    lib.settings = self.layer_settings();
+                    lib.open(Tab::Review);
                     ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::InnerSize(lib.size()));
                     ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::Focus);
                 }
@@ -1724,7 +1782,14 @@ fn age_label(created_at: i64) -> String {
 }
 
 /// Text of a card, or its editor. True when a click opened a link in the text.
-fn card_body(ui: &mut Ui, card: &Card, editing: Option<&mut String>, revealed: bool, style: card::CardStyle) -> bool {
+fn card_body(
+    ui: &mut Ui,
+    card: &Card,
+    editing: Option<&mut String>,
+    revealed: bool,
+    revealed_text: Option<&str>,
+    style: card::CardStyle,
+) -> bool {
     let base = style.text_size();
     let editor_id = Id::new(("card", card.id)).with("editor");
     // Where the last click in the text landed, in chars of the editor's text.
@@ -1752,17 +1817,15 @@ fn card_body(ui: &mut Ui, card: &Card, editing: Option<&mut String>, revealed: b
         }
         return false;
     }
-    let body = without_tags(&card.body);
+    if let Some(reason) = card.resurface_reason(crate::resurface::unix_now()) {
+        ui.label(RichText::new(reason).size(11.5).color(theme::card_dim()));
+        ui.add_space(3.0);
+    }
+    let body = without_tags(if card.kind == Kind::Private && revealed { revealed_text.unwrap_or("") } else { &card.body });
     if card.kind == Kind::Private && !revealed {
         // The heading stays readable (see card::private_label); only the rest is barred.
-        let label = card::private_label(&card.title, &body);
-        let rest = match &label {
-            // The label is the body's first line: don't bar it a second time.
-            Some(_) if card.title.is_empty() => {
-                body.trim_start().split_once('\n').map_or("", |(_, rest)| rest).trim_start().to_owned()
-            }
-            _ => body,
-        };
+        let label = (!card.title.is_empty()).then(|| card.title.clone());
+        let rest = "••••••••••".to_owned();
         let heading_at = label.as_ref().and_then(|label| {
             let job = egui::text::LayoutJob::simple(label.clone(), theme::card_bold(base + 0.5), theme::card_text(), ui.available_width());
             let (pos, galley, resp) = egui::Label::new(job).wrap().selectable(false).layout_in_ui(ui);
@@ -1993,6 +2056,7 @@ fn card_ui(
     hovered: bool,
     editing: Option<&mut String>,
     revealed: bool,
+    revealed_text: Option<&str>,
     active: bool,
     magnet: Option<&[(i64, Rect)]>,
     style: card::CardStyle,
@@ -2040,7 +2104,7 @@ fn card_ui(
     // doesn't lay its text open.
     // Pushed once the body is drawn: a click on a link there opens it instead.
     let edit_gesture = if card.kind == Kind::Private { bg.double_clicked() } else { bg.clicked() };
-    let start_edit = edit_gesture && editing.is_none();
+    let start_edit = edit_gesture && editing.is_none() && card.kind != Kind::Private;
 
     // The rect at the start of the gesture and the pointer's total movement live in
     // memory, so a stuck edge follows the pointer again once it moves past the snap
@@ -2197,7 +2261,7 @@ fn card_ui(
                 .id_salt(id.with("scroll"))
                 .auto_shrink([false, false])
                 .max_height(body.height())
-                .show(ui, |ui| card_body(ui, card, editing, revealed, style))
+                .show(ui, |ui| card_body(ui, card, editing, revealed, revealed_text, style))
                 .inner
         })
         .inner;
