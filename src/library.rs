@@ -17,7 +17,7 @@ use crate::bar::{age, highlighted};
 use crate::card::Kind;
 use crate::search;
 use crate::store::{Hit, Scope, Store, TRASH_DAYS};
-use crate::theme::{self, TEXT, TEXT_DIM, TEXT_MUTED};
+use crate::theme;
 use crate::win::{self, Backdrop};
 
 pub const SIZE: Vec2 = vec2(800.0, 600.0);
@@ -52,6 +52,9 @@ pub struct LayerSettings {
     pub settings_on_launch: bool,
     /// Cards stick to each other's edges while dragged.
     pub snap: bool,
+    /// How cards show their kind on the layer.
+    pub card_style: crate::card::CardStyle,
+    pub theme_mode: theme::ThemeMode,
 }
 
 impl Default for LayerSettings {
@@ -66,6 +69,8 @@ impl Default for LayerSettings {
             dismiss_hides: false,
             settings_on_launch: true,
             snap: true,
+            card_style: crate::card::CardStyle::default(),
+            theme_mode: theme::ThemeMode::System,
         }
     }
 }
@@ -83,6 +88,8 @@ pub enum Request {
     SetDismissHides(bool),
     SetSettingsOnLaunch(bool),
     SetSnap(bool),
+    SetCardStyle(crate::card::CardStyle),
+    SetTheme(theme::ThemeMode),
     ImportSticky,
 }
 
@@ -204,7 +211,7 @@ pub fn ui(ui: &mut Ui, state: &Mutex<LibraryState>) {
     ui.painter().rect(
         full,
         CornerRadius::same(12),
-        Color32::from_rgba_unmultiplied(22, 24, 30, 170),
+        theme::window_fill(170),
         Stroke::new(1.0, theme::glass_stroke()),
         StrokeKind::Inside,
     );
@@ -248,7 +255,7 @@ fn header(ui: &mut Ui, st: &mut LibraryState) -> bool {
             (true, false) => "Настройки Ebb",
             (true, true) => "Добро пожаловать в Ebb",
         };
-        ui.label(RichText::new(title).font(theme::semibold(17.0)).color(TEXT));
+        ui.label(RichText::new(title).font(theme::semibold(17.0)).color(theme::text()));
         ui.add_space(18.0);
         let (_, archived, trashed) = st.counts;
         let tabs = if st.settings_only {
@@ -262,18 +269,18 @@ fn header(ui: &mut Ui, st: &mut LibraryState) -> bool {
         };
         for (tab, label) in tabs {
             let on = st.tab == tab;
-            let galley = ui.painter().layout_no_wrap(label.clone(), FontId::proportional(14.0), TEXT);
+            let galley = ui.painter().layout_no_wrap(label.clone(), FontId::proportional(14.0), theme::text());
             let (r, resp) = ui.allocate_exact_size(galley.size() + vec2(20.0, 12.0), Sense::click());
             resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, on, &label));
             let fill = if on {
-                Color32::from_rgba_unmultiplied(96, 165, 250, 70)
+                theme::highlight(70)
             } else if resp.hovered() {
-                Color32::from_white_alpha(14)
+                theme::wash(14)
             } else {
                 Color32::TRANSPARENT
             };
             ui.painter().rect_filled(r, CornerRadius::same(8), fill);
-            ui.painter().galley(r.min + vec2(10.0, 6.0), galley, if on { TEXT } else { TEXT_DIM });
+            ui.painter().galley(r.min + vec2(10.0, 6.0), galley, if on { theme::text() } else { theme::dim() });
             if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() && !on {
                 st.tab = tab;
                 st.query.clear();
@@ -290,7 +297,7 @@ fn header(ui: &mut Ui, st: &mut LibraryState) -> bool {
             if resp.hovered() {
                 ui.painter().rect_filled(r, CornerRadius::same(6), Color32::from_rgba_unmultiplied(232, 17, 35, 160));
             }
-            ui.painter().text(r.center(), Align2::CENTER_CENTER, "\u{E8BB}", theme::icons(11.0), TEXT);
+            ui.painter().text(r.center(), Align2::CENTER_CENTER, "\u{E8BB}", theme::icons(11.0), theme::text());
             close = resp.on_hover_text("Закрыть (Esc)").clicked();
         });
     });
@@ -380,14 +387,14 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
     let top = Rect::from_min_size(area.min, vec2(area.width(), 36.0));
     let mut empty_clicked = false;
     ui.scope_builder(UiBuilder::new().max_rect(top).layout(Layout::left_to_right(Align::Center)), |ui| {
-        ui.label(RichText::new("\u{E721}").font(theme::icons(14.0)).color(TEXT_DIM));
+        ui.label(RichText::new("\u{E721}").font(theme::icons(14.0)).color(theme::dim()));
         ui.add_space(6.0);
         let hint = if trash { "Найти в корзине" } else { "Найти в архиве: текст, #тег, «ссылки прошлого года»" };
         let edit = ui.add(
             egui::TextEdit::singleline(&mut st.query)
                 .hint_text(hint)
                 .font(FontId::proportional(15.0))
-                .text_color(TEXT)
+                .text_color(theme::text())
                 .frame(egui::Frame::NONE)
                 .desired_width(if trash { area.width() - 230.0 } else { area.width() - 40.0 }),
         );
@@ -456,7 +463,7 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
         None if trash => format!("{found} · удалённое хранится {TRASH_DAYS} дней"),
         None => found,
     };
-    ui.painter().text(info.left_center(), Align2::LEFT_CENTER, text, FontId::proportional(12.0), TEXT_MUTED);
+    ui.painter().text(info.left_center(), Align2::LEFT_CENTER, text, FontId::proportional(12.0), theme::muted());
 
     // Rows.
     let footer_h = 20.0;
@@ -478,7 +485,7 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
             (false, true) => "В архиве пусто. Сюда уходят карточки со слоя и импорт.",
             _ => "Ничего не нашлось",
         };
-        ui.painter().text(list.center_top() + vec2(0.0, 60.0), Align2::CENTER_TOP, msg, FontId::proportional(14.0), TEXT_MUTED);
+        ui.painter().text(list.center_top() + vec2(0.0, 60.0), Align2::CENTER_TOP, msg, FontId::proportional(14.0), theme::muted());
     }
 
     let mut action = None;
@@ -509,7 +516,7 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
     } else {
         "↑↓ выбор · Enter — на слой · Delete — в корзину · Ctrl+Tab — вкладка · Esc — закрыть"
     };
-    ui.painter().text(pos2(area.left(), area.bottom() - footer_h / 2.0), Align2::LEFT_CENTER, hint, FontId::proportional(11.5), TEXT_MUTED);
+    ui.painter().text(pos2(area.left(), area.bottom() - footer_h / 2.0), Align2::LEFT_CENTER, hint, FontId::proportional(11.5), theme::muted());
 }
 
 /// One result row; returns Some(primary?) when one of its buttons was clicked.
@@ -517,7 +524,7 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
 fn row_ui(ui: &mut Ui, r: Rect, hit: &Hit, q: &search::Query, selected: bool, hovered: bool, trash: bool, confirm: bool) -> Option<bool> {
     let painter = ui.painter().clone();
     if selected || hovered {
-        painter.rect_filled(r, CornerRadius::same(8), Color32::from_white_alpha(if selected { 20 } else { 9 }));
+        painter.rect_filled(r, CornerRadius::same(8), theme::wash(if selected { 20 } else { 9 }));
     }
     painter.text(r.left_top() + vec2(14.0, 12.0), Align2::LEFT_TOP, hit.kind.icon(), theme::icons(14.0), hit.kind.accent());
 
@@ -531,19 +538,19 @@ fn row_ui(ui: &mut Ui, r: Rect, hit: &Hit, q: &search::Query, selected: bool, ho
             [(false, "В корзину"), (true, "На слой")]
         };
         for (primary, label) in labels {
-            let galley = painter.layout_no_wrap(label.to_owned(), FontId::proportional(12.5), TEXT);
+            let galley = painter.layout_no_wrap(label.to_owned(), FontId::proportional(12.5), theme::text());
             let b = Rect::from_min_size(pos2(right - galley.size().x - 18.0, r.center().y - 13.0), vec2(galley.size().x + 18.0, 26.0));
             let resp = ui.interact(b, Id::new(("library-btn", hit.id, primary)), Sense::click());
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
             let fill = match (primary, resp.hovered()) {
-                (true, true) => Color32::from_rgba_unmultiplied(96, 165, 250, 130),
-                (true, false) => Color32::from_rgba_unmultiplied(96, 165, 250, 70),
+                (true, true) => theme::highlight(130),
+                (true, false) => theme::highlight(70),
                 (false, true) if trash => Color32::from_rgba_unmultiplied(232, 17, 35, 140),
-                (false, true) => Color32::from_white_alpha(30),
-                (false, false) => Color32::from_white_alpha(14),
+                (false, true) => theme::wash(30),
+                (false, false) => theme::wash(14),
             };
             painter.rect_filled(b, CornerRadius::same(7), fill);
-            painter.galley(b.min + vec2(9.0, 13.0 - galley.size().y / 2.0), galley, TEXT);
+            painter.galley(b.min + vec2(9.0, 13.0 - galley.size().y / 2.0), galley, theme::text());
             if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                 clicked = Some(primary);
             }
@@ -556,7 +563,7 @@ fn row_ui(ui: &mut Ui, r: Rect, hit: &Hit, q: &search::Query, selected: bool, ho
         } else {
             age(hit.updated_at)
         };
-        let g = painter.text(pos2(right, r.top() + 12.0), Align2::RIGHT_TOP, label, FontId::proportional(11.5), TEXT_MUTED);
+        let g = painter.text(pos2(right, r.top() + 12.0), Align2::RIGHT_TOP, label, FontId::proportional(11.5), theme::muted());
         right = g.left() - 8.0;
     }
 
@@ -570,14 +577,14 @@ fn row_ui(ui: &mut Ui, r: Rect, hit: &Hit, q: &search::Query, selected: bool, ho
         (false, false) => (title, hit.snippet.clone()),
         (true, false) => (hit.snippet.clone(), String::new()),
     };
-    painter.galley(pos2(left, r.top() + 8.0), painter.layout_job(highlighted(&line1, 14.0, TEXT, width)), TEXT);
+    painter.galley(pos2(left, r.top() + 8.0), painter.layout_job(highlighted(&line1, 14.0, theme::text(), width)), theme::text());
     let second = if line2.is_empty() && trash {
         if hit.archived { "был в архиве".to_owned() } else { "был на слое".to_owned() }
     } else {
         line2
     };
     if !second.is_empty() {
-        painter.galley(pos2(left, r.top() + 30.0), painter.layout_job(highlighted(&second, 12.5, TEXT_DIM, width)), TEXT_DIM);
+        painter.galley(pos2(left, r.top() + 30.0), painter.layout_job(highlighted(&second, 12.5, theme::dim(), width)), theme::dim());
     }
     clicked
 }
@@ -588,12 +595,12 @@ fn row_ui(ui: &mut Ui, r: Rect, hit: &Hit, q: &search::Query, selected: bool, ho
 
 fn section(ui: &mut Ui, title: &str) {
     ui.add_space(10.0);
-    ui.label(RichText::new(title).font(theme::semibold(14.5)).color(TEXT));
+    ui.label(RichText::new(title).font(theme::semibold(14.5)).color(theme::text()));
     ui.add_space(2.0);
 }
 
 fn note(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).size(12.0).color(TEXT_MUTED));
+    ui.label(RichText::new(text).size(12.0).color(theme::muted()));
 }
 
 /// The monitors as Windows arranges them, to scale; returns the clicked one's
@@ -619,24 +626,114 @@ fn monitor_map(ui: &mut Ui, monitors: &[win::Monitor], current: Option<&str>) ->
         let on = current.is_some_and(|d| m.matches_device(d));
         let resp = ui.interact(rect, Id::new(("monitor", i)), Sense::click());
         resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, &name));
-        let accent = Color32::from_rgb(96, 165, 250);
+        let accent = theme::highlight(255);
         let fill = match (on, resp.hovered()) {
             (true, _) => accent.gamma_multiply(0.35),
-            (false, true) => Color32::from_white_alpha(26),
-            (false, false) => Color32::from_white_alpha(10),
+            (false, true) => theme::wash(26),
+            (false, false) => theme::wash(10),
         };
         let stroke = if on { Stroke::new(2.0, accent) } else { Stroke::new(1.0, theme::glass_stroke()) };
         let painter = ui.painter();
         painter.rect(rect, CornerRadius::same(6), fill, stroke, StrokeKind::Inside);
-        let color = if on { TEXT } else { TEXT_DIM };
+        let color = if on { theme::text() } else { theme::dim() };
         painter.text(rect.center() - vec2(0.0, 8.0), Align2::CENTER_CENTER, (i + 1).to_string(), theme::semibold(20.0), color);
         let detail = format!("{pw}×{ph}{}", if m.primary { " · основной" } else { "" });
-        painter.text(rect.center() + vec2(0.0, 13.0), Align2::CENTER_CENTER, detail, FontId::proportional(11.5), TEXT_MUTED);
+        painter.text(rect.center() + vec2(0.0, 13.0), Align2::CENTER_CENTER, detail, FontId::proportional(11.5), theme::muted());
         if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() && !on {
             chosen = m.device_ids.first().cloned();
         }
     }
     chosen
+}
+
+/// Theme glass, the taskbar's color, or a color of one's own: paper swatches
+/// and a picker.
+fn background_picker(ui: &mut Ui, background: &mut theme::CardBackground) {
+    use theme::CardBackground as B;
+    ui.horizontal_wrapped(|ui| {
+        ui.radio_value(background, B::Theme, "По теме");
+        ui.radio_value(background, B::Taskbar, "Как панель задач");
+        let custom = matches!(background, B::Custom(_));
+        if ui.radio(custom, "Свой цвет").clicked() && !custom {
+            *background = B::Custom(theme::PAPER[0]);
+        }
+    });
+    match background {
+        B::Custom(rgb) => {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                for paper in theme::PAPER {
+                    let (rect, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+                    let on = *rgb == paper;
+                    let stroke = if on { Stroke::new(2.0, theme::highlight(255)) } else { Stroke::new(1.0, theme::glass_stroke()) };
+                    ui.painter().rect(rect.shrink(2.0), CornerRadius::same(4), Color32::from_rgb(paper[0], paper[1], paper[2]), stroke, StrokeKind::Outside);
+                    let name = format!("#{:02X}{:02X}{:02X}", paper[0], paper[1], paper[2]);
+                    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, &name));
+                    if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                        *rgb = paper;
+                    }
+                }
+                ui.add_space(6.0);
+                egui::widgets::color_picker::color_edit_button_srgb(ui, rgb);
+            });
+            note(ui, "Цвет текста подбирается сам: тёмный на светлом фоне, светлый на тёмном.");
+        }
+        B::Taskbar => note(ui, "Берётся из «Параметры → Персонализация → Цвета» и меняется вместе с Windows."),
+        B::Theme => {}
+    }
+}
+
+/// A preset to pick: three tiny cards (an idea, a link, a private note) drawn in
+/// its style, with its name under them.
+fn preset_tile(ui: &mut Ui, preset: &crate::card::Preset, on: bool) -> egui::Response {
+    use crate::card::Kind;
+    let (rect, resp) = ui.allocate_exact_size(vec2(172.0, 112.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, preset.name));
+    let fill = match (on, resp.hovered()) {
+        (true, _) => theme::highlight(40),
+        (false, true) => theme::wash(20),
+        (false, false) => theme::wash(8),
+    };
+    let stroke = if on { Stroke::new(1.5, theme::highlight(255)) } else { Stroke::new(1.0, theme::glass_stroke()) };
+    ui.painter().rect(rect, CornerRadius::same(8), fill, stroke, StrokeKind::Inside);
+
+    // Scaled down: corners and strips at half size so the look still reads.
+    let mut style = preset.style;
+    style.radius /= 2;
+    style.strip = (style.strip / 2).max(2);
+    let base = match style.background {
+        theme::CardBackground::Theme => theme::glass_fill(),
+        theme::CardBackground::Taskbar if theme::is_light() => Color32::from_rgb(238, 238, 238),
+        theme::CardBackground::Taskbar => Color32::from_rgb(32, 32, 32),
+        theme::CardBackground::Custom([r, g, b]) => Color32::from_rgb(r, g, b),
+    };
+    let base = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), (f32::from(style.opacity) * 2.55) as u8);
+    for (i, kind) in [Kind::Idea, Kind::Link, Kind::Private].into_iter().enumerate() {
+        let card = Rect::from_min_size(rect.min + vec2(10.0 + i as f32 * 52.0, 10.0), vec2(48.0, 58.0));
+        if style.shadow > 0 {
+            let shadow = egui::epaint::Shadow { offset: [0, 2], blur: (f32::from(style.shadow) / 8.0) as u8, spread: 0, color: Color32::from_black_alpha(style.shadow) };
+            ui.painter().add(shadow.as_shape(card, CornerRadius::same(style.radius)));
+        }
+        ui.painter().rect(card, CornerRadius::same(style.radius), base, Stroke::new(1.0, theme::glass_stroke()), StrokeKind::Inside);
+        let accent = kind.accent();
+        crate::app::paint_marker(ui, card, accent, style, false);
+        for line in 0..3 {
+            let y = card.top() + 12.0 + line as f32 * 8.0;
+            let w = [30.0, 22.0, 26.0][line];
+            ui.painter().rect_filled(Rect::from_min_size(pos2(card.left() + 6.0, y), vec2(w, 3.0)), CornerRadius::same(1), theme::wash(60));
+        }
+        let size = if style.bold_icon { 11.0 } else { 9.0 };
+        let at = match style.icon {
+            crate::card::IconSpot::TopLeft => pos2(card.left() + 8.0, card.top() + 4.0),
+            _ => pos2(card.right() - 8.0, card.bottom() - 8.0),
+        };
+        if style.icon != crate::card::IconSpot::Hover {
+            ui.painter().text(at, Align2::CENTER_CENTER, kind.icon(), theme::icons(size), kind.accent());
+        }
+    }
+    ui.painter().text(pos2(rect.left() + 10.0, rect.bottom() - 34.0), Align2::LEFT_TOP, preset.name, theme::semibold(13.0), theme::text());
+    ui.painter().text(pos2(rect.left() + 10.0, rect.bottom() - 17.0), Align2::LEFT_TOP, preset.hint, FontId::proportional(10.5), theme::muted());
+    resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(preset.hint)
 }
 
 fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
@@ -653,7 +750,7 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
             ui.label(
                 RichText::new("Ebb кладёт заметки на отдельный экран — под окнами, как обои. Выберите, где им лежать; остальное можно не трогать.")
                     .size(13.5)
-                    .color(TEXT_DIM),
+                    .color(theme::dim()),
             );
             note(ui, "Настройки всегда открываются из меню значка Ebb в трее.");
         }
@@ -672,7 +769,7 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
             st.outbox.push(Request::SetPinBottom(pin));
         }
         note(ui, "Клик по значку в трее поднимает слой поверх всех окон; Esc, повторный клик или переход в другое окно возвращают его.");
-        ui.label(RichText::new("Esc и повторный клик в трее").size(13.0).color(TEXT_DIM));
+        ui.label(RichText::new("Esc и повторный клик в трее").size(13.0).color(theme::dim()));
         let mut hides = st.settings.dismiss_hides;
         let a = ui.radio_value(&mut hides, false, "Убрать слой на фон");
         let b = ui.radio_value(&mut hides, true, "Скрыть слой");
@@ -680,6 +777,93 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
             st.settings.dismiss_hides = hides;
             st.outbox.push(Request::SetDismissHides(hides));
         }
+
+        section(ui, "Оформление");
+        use crate::card::{IconSpot, Marker, PRESETS};
+        let mut mode = st.settings.theme_mode;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Тема").size(13.0).color(theme::dim()));
+            for m in theme::ThemeMode::ALL {
+                ui.radio_value(&mut mode, m, m.label());
+            }
+        });
+
+        ui.add_space(4.0);
+        ui.label(RichText::new("Вид карточек").size(13.0).color(theme::dim()));
+        let mut style = st.settings.card_style;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+            for preset in &PRESETS {
+                if preset_tile(ui, preset, preset.style == style).clicked() {
+                    style = preset.style;
+                }
+            }
+        });
+        if !PRESETS.iter().any(|p| p.style == style) {
+            note(ui, "Свой вариант: настроен вручную.");
+        }
+
+        egui::CollapsingHeader::new(RichText::new("Настроить вручную").size(13.0).color(theme::dim()))
+            .id_salt("card-style-manual")
+            .show(ui, |ui| {
+                ui.label(RichText::new("Цвет типа на карточке").size(13.0).color(theme::dim()));
+                ui.horizontal_wrapped(|ui| {
+                    for m in Marker::ALL {
+                        ui.radio_value(&mut style.marker, m, m.label());
+                    }
+                });
+                if style.marker != Marker::None {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Интенсивность").size(13.0).color(theme::dim()));
+                        ui.add(egui::Slider::new(&mut style.strength, 5..=100).suffix(" %"));
+                    });
+                }
+                if matches!(style.marker, Marker::StripTop | Marker::StripLeft) {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Толщина полосы").size(13.0).color(theme::dim()));
+                        ui.add(egui::Slider::new(&mut style.strip, 2..=10).suffix(" pt"));
+                    });
+                }
+                let slider = |ui: &mut Ui, label: &str, widget: egui::Slider<'_>| {
+                    ui.horizontal(|ui| {
+                        ui.add_sized(vec2(150.0, 18.0), egui::Label::new(RichText::new(label).size(13.0).color(theme::dim())));
+                        ui.add(widget);
+                    });
+                };
+                slider(ui, "Скругление углов", egui::Slider::new(&mut style.radius, 0..=20).suffix(" pt"));
+                slider(ui, "Тень", egui::Slider::new(&mut style.shadow, 0..=100).suffix(" %"));
+                slider(ui, "Непрозрачность фона", egui::Slider::new(&mut style.opacity, 30..=100).suffix(" %"));
+                ui.label(RichText::new("Шрифт текста").size(13.0).color(theme::dim()));
+                ui.horizontal_wrapped(|ui| {
+                    for f in theme::CardFont::ALL {
+                        ui.radio_value(&mut style.font, f, f.label());
+                    }
+                });
+                slider(
+                    ui,
+                    "Размер текста",
+                    egui::Slider::new(&mut style.text, 22..=40).custom_formatter(|v, _| format!("{:.1} pt", v / 2.0)),
+                );
+                ui.label(RichText::new("Иконка типа").size(13.0).color(theme::dim()));
+                ui.horizontal_wrapped(|ui| {
+                    for i in IconSpot::ALL {
+                        ui.radio_value(&mut style.icon, i, i.label());
+                    }
+                });
+                ui.checkbox(&mut style.bold_icon, "Жирная иконка");
+                ui.label(RichText::new("Фон карточек").size(13.0).color(theme::dim()));
+                background_picker(ui, &mut style.background);
+            });
+
+        if style != st.settings.card_style {
+            st.settings.card_style = style;
+            st.outbox.push(Request::SetCardStyle(style));
+        }
+        if mode != st.settings.theme_mode {
+            st.settings.theme_mode = mode;
+            st.outbox.push(Request::SetTheme(mode));
+        }
+        note(ui, "Слой меняется сразу. F4 на слое перебирает варианты цвета. Клик по иконке типа меняет тип и цвет карточки.");
 
         section(ui, "Карточки");
         let mut snap = st.settings.snap;
@@ -721,7 +905,7 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
         }
 
         section(ui, "Внешний вид");
-        ui.label(RichText::new("Фон").size(13.0).color(TEXT_DIM));
+        ui.label(RichText::new("Фон").size(13.0).color(theme::dim()));
         for backdrop in Backdrop::ALL {
             if ui.radio(st.settings.backdrop == backdrop, backdrop.title()).clicked() && st.settings.backdrop != backdrop {
                 st.settings.backdrop = backdrop;
@@ -729,7 +913,7 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
             }
         }
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Затемнение").size(13.0).color(TEXT_DIM));
+            ui.label(RichText::new("Затемнение").size(13.0).color(theme::dim()));
             let mut tint = st.settings.tint;
             if ui.add(egui::Slider::new(&mut tint, 0..=220).show_value(false)).changed() {
                 st.settings.tint = tint;

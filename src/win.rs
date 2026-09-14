@@ -174,7 +174,7 @@ pub fn apply_backdrop(raw: isize, mode: Backdrop, rounded: bool) {
             let _ = SetWindowPos(h, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
 
-        set_dwm_i32(h, DWMWA_USE_IMMERSIVE_DARK_MODE, 1);
+        set_dwm_i32(h, DWMWA_USE_IMMERSIVE_DARK_MODE, i32::from(!LIGHT_THEME.load(Ordering::Relaxed)));
         let corners = if rounded { DWMWCP_ROUND } else { DWMWCP_DONOTROUND };
         set_dwm_i32(h, DWMWA_WINDOW_CORNER_PREFERENCE, corners.0);
         let margins = MARGINS {
@@ -193,7 +193,8 @@ pub fn apply_backdrop(raw: isize, mode: Backdrop, rounded: bool) {
             Backdrop::AccentAcrylic => {
                 set_dwm_i32(h, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE.0);
                 // ABGR tint; low alpha, the egui layer adds its own tint on top.
-                set_accent(h, ACCENT_ENABLE_ACRYLICBLURBEHIND, 0x10_18_14_10);
+                let tint = if LIGHT_THEME.load(Ordering::Relaxed) { 0x10_F4_F2_F0 } else { 0x10_18_14_10 };
+                set_accent(h, ACCENT_ENABLE_ACRYLICBLURBEHIND, tint);
             }
             Backdrop::Off => {
                 set_dwm_i32(h, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE.0);
@@ -201,6 +202,70 @@ pub fn apply_backdrop(raw: isize, mode: Backdrop, rounded: bool) {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// System colors
+// ---------------------------------------------------------------------------
+
+/// The app's theme is light: backdrops set up after this use a light tint.
+pub static LIGHT_THEME: AtomicBool = AtomicBool::new(false);
+
+/// Windows' app theme and accent palette.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SystemColors {
+    /// "Choose your default app mode": Light.
+    pub light: bool,
+    /// RGB: Light3, Light2, Light1, Accent, Dark1, Dark2, Dark3.
+    pub palette: [[u8; 3]; 7],
+    /// RGB of Start and the taskbar when "Show accent color on Start and taskbar"
+    /// is on; `None` when they're the neutral system grey.
+    pub start: Option<[u8; 3]>,
+}
+
+impl Default for SystemColors {
+    /// Windows' default blue, dark mode.
+    fn default() -> Self {
+        Self {
+            light: false,
+            palette: [[153, 235, 255], [76, 194, 255], [0, 145, 248], [0, 120, 212], [0, 103, 192], [0, 62, 146], [0, 26, 104]],
+            start: None,
+        }
+    }
+}
+
+fn reg_value(key: PCWSTR, name: PCWSTR, buf: &mut [u8]) -> Option<usize> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_BINARY, RRF_RT_REG_DWORD, RegGetValueW};
+    let mut len = buf.len() as u32;
+    let flags = RRF_RT_REG_BINARY | RRF_RT_REG_DWORD;
+    let r = unsafe { RegGetValueW(HKEY_CURRENT_USER, key, name, flags, None, Some(buf.as_mut_ptr().cast()), Some(&mut len)) };
+    r.is_ok().then_some(len as usize)
+}
+
+/// Read from the registry: a few microseconds, no WinRT.
+pub fn system_colors() -> SystemColors {
+    let mut colors = SystemColors::default();
+    let mut dword = [0u8; 4];
+    if reg_value(w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"), w!("AppsUseLightTheme"), &mut dword) == Some(4) {
+        colors.light = u32::from_le_bytes(dword) != 0;
+    }
+    // 8 RGBA entries; the 8th isn't part of the ramp.
+    let mut palette = [0u8; 32];
+    if reg_value(w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"), w!("AccentPalette"), &mut palette) == Some(32) {
+        for (i, c) in colors.palette.iter_mut().enumerate() {
+            *c = [palette[i * 4], palette[i * 4 + 1], palette[i * 4 + 2]];
+        }
+    }
+    let mut prevalence = [0u8; 4];
+    let accent_start = reg_value(w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"), w!("ColorPrevalence"), &mut prevalence)
+        == Some(4)
+        && u32::from_le_bytes(prevalence) != 0;
+    let mut start = [0u8; 4];
+    if accent_start && reg_value(w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"), w!("StartColorMenu"), &mut start) == Some(4) {
+        // DWORD 0xAABBGGRR, little-endian: R, G, B, A.
+        colors.start = Some([start[0], start[1], start[2]]);
+    }
+    colors
 }
 
 // ---------------------------------------------------------------------------

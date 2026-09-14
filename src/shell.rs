@@ -25,7 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, AppendMenuW, GetWindowThreadProcessId, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW,
     FindWindowW, GetMessageW, HICON, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW,
     RegisterClassExW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_HOTKEY, WM_NULL,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_HOTKEY, WM_NULL, WM_SETTINGCHANGE,
     WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
@@ -43,6 +43,8 @@ fn class_name() -> &'static [u16] {
     static NAME: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
     NAME.get_or_init(|| wide(&format!("Ebb.Shell{}", instance_suffix())))
 }
+/// Not in the windows crate's Dwm module.
+const WM_DWMCOLORIZATIONCOLORCHANGED: u32 = 0x0320;
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_SHOW_LAYER: u32 = WM_APP + 2;
 const WM_QUIT_APP: u32 = WM_APP + 3;
@@ -62,6 +64,8 @@ pub enum Event {
     ImportSticky,
     /// Open the library window; `true` = on the settings tab.
     OpenLibrary(bool),
+    /// Windows' light/dark mode or accent color changed.
+    SystemColors,
     Exit,
 }
 
@@ -256,6 +260,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_HOTKEY if wparam.0 as i32 >= SEARCH_ID_BASE => push(Event::Search(Instant::now())),
         WM_HOTKEY => push(Event::Capture(Instant::now())),
         WM_SHOW_LAYER => push(Event::Launched),
+        // Broadcast to top-level windows: "ImmersiveColorSet" when the app mode or
+        // the accent changes.
+        WM_SETTINGCHANGE if lparam.0 != 0 && unsafe { PCWSTR(lparam.0 as *const u16).to_string() }.is_ok_and(|s| s == "ImmersiveColorSet") => {
+            push(Event::SystemColors)
+        }
+        WM_DWMCOLORIZATIONCOLORCHANGED => push(Event::SystemColors),
         WM_QUIT_APP => push(Event::Exit),
         WM_TRAY => match (lparam.0 & 0xFFFF) as u32 {
             NIN_SELECT | NIN_KEYSELECT => push(Event::TrayClick),

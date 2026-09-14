@@ -12,7 +12,7 @@ use egui::{Align, Layout, Rect, RichText, Ui, UiBuilder, vec2};
 use crate::card::Card;
 use crate::store::Store;
 use crate::sticky::{self, Plan, Stats};
-use crate::theme::{self, TEXT, TEXT_DIM, TEXT_MUTED};
+use crate::theme;
 
 const SOURCE_PREFIX: &str = "sticky:";
 /// settings key: "done" after an import, "never" when declined for good.
@@ -209,8 +209,8 @@ impl StickyImport {
             ui.spacing_mut().item_spacing.y = 5.0;
             let title = |ui: &mut Ui, text: &str| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("\u{E8B5}").font(theme::icons(15.0)).color(TEXT_DIM));
-                    ui.label(RichText::new(text).font(theme::semibold(15.0)).color(TEXT));
+                    ui.label(RichText::new("\u{E8B5}").font(theme::icons(15.0)).color(theme::dim()));
+                    ui.label(RichText::new(text).font(theme::semibold(15.0)).color(theme::text()));
                 });
                 ui.add_space(2.0);
             };
@@ -221,7 +221,7 @@ impl StickyImport {
                 State::Offer(offer) => {
                     let s = &offer.plan.stats;
                     title(ui, "Импорт из Sticky Notes");
-                    line(ui, format!("Нашлось {} для импорта из {}.", notes(s.importable), s.total), TEXT);
+                    line(ui, format!("Нашлось {} для импорта из {}.", notes(s.importable), s.total), theme::text());
                     line(
                         ui,
                         format!(
@@ -230,12 +230,12 @@ impl StickyImport {
                             offer.in_place,
                             s.on_layer - offer.in_place
                         ),
-                        TEXT_DIM,
+                        theme::dim(),
                     );
-                    line(ui, format!("В архив: {} (давно не менялись: {}). Их найдёт поиск.", s.archived, s.old), TEXT_DIM);
+                    line(ui, format!("В архив: {} (давно не менялись: {}). Их найдёт поиск.", s.archived, s.old), theme::dim());
                     let kinds: Vec<String> = s.by_kind.iter().map(|(k, n)| format!("{} {n}", k.label())).collect();
-                    line(ui, kinds.join(" · "), TEXT_DIM);
-                    line(ui, format!("Пропущу: пустых {}, дубликатов {}.", s.empty, s.duplicates), TEXT_MUTED);
+                    line(ui, kinds.join(" · "), theme::dim());
+                    line(ui, format!("Пропущу: пустых {}, дубликатов {}.", s.empty, s.duplicates), theme::muted());
                     if !offer.replace.is_empty() || offer.kept > 0 {
                         line(
                             ui,
@@ -244,10 +244,10 @@ impl StickyImport {
                                 offer.replace.len(),
                                 offer.kept
                             ),
-                            TEXT_MUTED,
+                            theme::muted(),
                         );
                     }
-                    line(ui, "Sticky Notes не меняются: читается копия базы.".into(), TEXT_MUTED);
+                    line(ui, "Sticky Notes не меняются: читается копия базы.".into(), theme::muted());
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         if ui.button("Импортировать").clicked() {
@@ -271,12 +271,12 @@ impl StickyImport {
                     line(
                         ui,
                         format!("{}: {} на слое, {} в архиве.", notes(stats.importable), stats.on_layer, stats.archived),
-                        TEXT,
+                        theme::text(),
                     );
                     if *replaced > 0 {
-                        line(ui, format!("Заменено из прошлого импорта: {replaced}.",), TEXT_MUTED);
+                        line(ui, format!("Заменено из прошлого импорта: {replaced}.",), theme::muted());
                     }
-                    line(ui, "Оригиналы в Sticky Notes остались на месте.".into(), TEXT_MUTED);
+                    line(ui, "Оригиналы в Sticky Notes остались на месте.".into(), theme::muted());
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         if ui.button("Готово").clicked() {
@@ -300,7 +300,7 @@ impl StickyImport {
                 }
                 State::Failed(message) => {
                     title(ui, "Импорт из Sticky Notes");
-                    line(ui, message.clone(), TEXT_DIM);
+                    line(ui, message.clone(), theme::dim());
                     ui.add_space(6.0);
                     if ui.button("Закрыть").clicked() {
                         next = Some(State::Idle);

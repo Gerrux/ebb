@@ -17,7 +17,7 @@ use crate::library::{self, LibraryState, Request, Tab};
 use crate::shell::{self, Event};
 use crate::card::{self, Card, Kind, MIN_SIZE, Sides, parse_capture};
 use crate::store::Store;
-use crate::theme::{self, TEXT, TEXT_DIM, TEXT_MUTED};
+use crate::theme;
 use crate::win::{self, Backdrop};
 
 const HEADER_H: f32 = 30.0;
@@ -49,6 +49,8 @@ const SET_DISMISS: &str = "layer.dismiss";
 const SET_SETTINGS_ON_LAUNCH: &str = "app.settings_on_launch";
 const SET_ONBOARDED: &str = "app.onboarded";
 const SET_SNAP: &str = "cards.snap";
+const SET_CARD_STYLE: &str = "cards.style";
+const SET_THEME: &str = "app.theme";
 /// A tray click this soon after another app took the focus from a summoned layer
 /// (the taskbar does, on mouse down) counts as a click on the summoned layer.
 const TRAY_CLICK_AFTER_LOWER_MS: u64 = 500;
@@ -57,6 +59,8 @@ const TRAY_CLICK_AFTER_LOWER_MS: u64 = 500;
 enum Undo {
     Unarchive(i64),
     Restore(i64),
+    /// Back to the kind a card had.
+    Kind(i64, Kind),
 }
 
 struct Toast {
@@ -92,6 +96,8 @@ enum Action {
     Delete,
     StartEdit,
     Reveal,
+    SetKind(Kind),
+    SetTint(Option<card::Tint>),
 }
 
 pub struct EbbApp {
@@ -110,6 +116,8 @@ pub struct EbbApp {
     dismiss_hides: bool,
     settings_on_launch: bool,
     snap: bool,
+    card_style: card::CardStyle,
+    theme_mode: theme::ThemeMode,
     /// Started by the user (not at logon): bring the layer up, maybe open settings.
     manual_start: bool,
     library: Arc<Mutex<LibraryState>>,
@@ -143,6 +151,11 @@ impl EbbApp {
         autostarted: bool,
     ) -> Self {
         theme::install(&cc.egui_ctx);
+        let card_style = store.setting(SET_CARD_STYLE).map_or_else(card::CardStyle::default, |v| card::CardStyle::from_setting(&v));
+        theme::set_card_font(&cc.egui_ctx, card_style.font);
+        // Before any window gets its backdrop: that follows light/dark too.
+        let theme_mode = store.setting(SET_THEME).map_or(theme::ThemeMode::System, |v| theme::ThemeMode::from_key(&v));
+        theme::apply(&cc.egui_ctx, theme_mode, card_style.background, &win::system_colors());
 
         let hwnd = win::hwnd_of(cc);
         // Saved layer settings. DWM acrylic turns flat grey when the window is
@@ -192,6 +205,8 @@ impl EbbApp {
             dismiss_hides,
             settings_on_launch,
             snap,
+            card_style,
+            theme_mode,
             manual_start,
             library: Arc::default(),
             editing: None,
@@ -252,6 +267,29 @@ impl EbbApp {
         self.save(idx);
     }
 
+    /// Changes a card's kind, keeping its text; the toast can undo it.
+    fn set_kind(&mut self, idx: usize, kind: Kind) {
+        let (id, old) = (self.cards[idx].id, self.cards[idx].kind);
+        if old == kind {
+            return;
+        }
+        if kind == Kind::Private {
+            // A Private card isn't edited in place, and its text hides right away.
+            if self.editing.as_ref().is_some_and(|(eid, _)| *eid == id) {
+                self.commit_edit();
+            }
+            if self.revealed.is_some_and(|(rid, _)| rid == id) {
+                self.revealed = None;
+            }
+        }
+        self.cards[idx].kind = kind;
+        self.save(idx);
+        let text = format!("Тип: {} → {}", old.label(), kind.label());
+        self.toast = Some(Toast::new(text, Some(Undo::Kind(id, old))));
+        self.library.lock().unwrap().invalidate();
+        self.bar.lock().unwrap().invalidate();
+    }
+
     fn cycle_monitor(&mut self) {
         let monitors = win::monitors();
         let current = self.hwnd.and_then(win::monitor_of).map(|m| m.handle);
@@ -266,7 +304,7 @@ impl EbbApp {
     fn header(&self, ui: &mut Ui) {
         let origin = ui.max_rect().min + vec2(32.0, 22.0);
         let painter = ui.painter();
-        let title = painter.text(origin, Align2::LEFT_TOP, "Ebb", theme::semibold(22.0), TEXT);
+        let title = painter.text(origin, Align2::LEFT_TOP, "Ebb", theme::semibold(22.0), theme::text());
         painter.text(
             pos2(title.right() + 14.0, title.bottom() - 3.0),
             Align2::LEFT_BOTTOM,
@@ -284,7 +322,7 @@ impl EbbApp {
                 )
             },
             FontId::proportional(13.0),
-            TEXT_MUTED,
+            theme::muted(),
         );
     }
 
@@ -297,7 +335,7 @@ impl EbbApp {
         let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&button));
         let fill = if open || button.hovered() { theme::glass_fill_hover() } else { theme::glass_fill() };
         ui.painter().rect(rect, CornerRadius::same(10), fill, Stroke::new(1.0, theme::glass_stroke()), StrokeKind::Inside);
-        ui.painter().text(rect.center(), Align2::CENTER_CENTER, "\u{E712}", theme::icons(16.0), if open { TEXT } else { TEXT_DIM });
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, "\u{E712}", theme::icons(16.0), if open { theme::text() } else { theme::dim() });
         let button = button.on_hover_cursor(CursorIcon::PointingHand);
 
         let hotkey = |l: &std::sync::OnceLock<Option<&'static str>>| l.get().copied().flatten().unwrap_or("");
@@ -379,6 +417,7 @@ impl EbbApp {
         // Where cards are (layer coordinates), for the magnet; None with it off.
         let rects: Vec<(i64, Rect)> = self.cards.iter().map(|c| (c.id, Rect::from_min_size(c.pos, c.size))).collect();
         let magnet = self.snap.then_some(rects.as_slice());
+        let style = self.card_style;
         let mut actions: Vec<(usize, Action)> = Vec::new();
         for idx in 0..self.cards.len() {
             let id = self.cards[idx].id;
@@ -395,7 +434,7 @@ impl EbbApp {
             let produced = ui
                 .scope(|ui| {
                     ui.multiply_opacity(appear);
-                    card_ui(ui, origin + vec2(0.0, (1.0 - appear) * 10.0), area, card, hovered, editing, revealed, active, magnet)
+                    card_ui(ui, origin + vec2(0.0, (1.0 - appear) * 10.0), area, card, hovered, editing, revealed, active, magnet, style)
                 })
                 .inner;
             for a in produced {
@@ -407,7 +446,7 @@ impl EbbApp {
             ui.scope(|ui| {
                 ui.disable();
                 ui.multiply_opacity(1.0 - t);
-                let _ = card_ui(ui, origin + vec2(0.0, t * 6.0), area, card, false, None, false, false, None);
+                let _ = card_ui(ui, origin + vec2(0.0, t * 6.0), area, card, false, None, false, false, None, style);
             });
         }
 
@@ -416,11 +455,23 @@ impl EbbApp {
                 Some(c) if t.elapsed() < HIGHLIGHT_FOR => {
                     let fade = 1.0 - t.elapsed().as_secs_f32() / HIGHLIGHT_FOR.as_secs_f32();
                     let rect = Rect::from_min_size(origin + c.pos.to_vec2(), c.size).expand(3.0);
-                    let stroke = Stroke::new(2.0, c.kind.accent().gamma_multiply(fade));
-                    ui.painter().rect_stroke(rect, CornerRadius::same(14), stroke, StrokeKind::Outside);
+                    let stroke = Stroke::new(2.0, c.accent().gamma_multiply(fade));
+                    ui.painter().rect_stroke(rect, CornerRadius::same(self.card_style.radius + 2), stroke, StrokeKind::Outside);
                     ui.ctx().request_repaint();
                 }
                 _ => self.highlighted = None,
+            }
+        }
+
+        // 1–8 change the selected card's kind (not while typing anywhere).
+        if let Some(idx) = self.active.and_then(|a| self.cards.iter().position(|c| c.id == a))
+            && self.editing.is_none()
+            && !ui.ctx().egui_wants_keyboard_input()
+        {
+            const DIGITS: [Key; 8] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8];
+            let pressed = ui.input_mut(|i| DIGITS.iter().position(|k| i.consume_key(Modifiers::NONE, *k)));
+            if let Some(n) = pressed {
+                self.set_kind(idx, Kind::ALL[n]);
             }
         }
 
@@ -455,6 +506,7 @@ impl EbbApp {
                     match self.store.insert(&parsed, pos) {
                         Ok(mut copy) => {
                             copy.size = src.size;
+                            copy.tint = src.tint;
                             self.appearing.push((copy.id, Instant::now()));
                             self.cards.push(copy);
                             self.save(self.cards.len() - 1);
@@ -484,6 +536,11 @@ impl EbbApp {
                 }
                 Action::Reveal => {
                     self.revealed = Some((self.cards[idx].id, Instant::now()));
+                }
+                Action::SetKind(kind) => self.set_kind(idx, kind),
+                Action::SetTint(tint) => {
+                    self.cards[idx].tint = tint;
+                    self.save(idx);
                 }
             }
         }
@@ -521,22 +578,22 @@ impl EbbApp {
         ui.scope(|ui| {
             ui.multiply_opacity(appear * fade_out);
             let font = FontId::proportional(14.0);
-            let text = ui.painter().layout_no_wrap(toast.text.clone(), font, TEXT);
+            let text = ui.painter().layout_no_wrap(toast.text.clone(), font, theme::text());
             let undo_w = if toast.undo.is_some() { 96.0 } else { 0.0 };
             let size = vec2(text.size().x + undo_w + 40.0, 44.0);
             let full = ui.max_rect();
             let center = pos2(full.center().x, full.bottom() - 48.0 - size.y / 2.0 + (1.0 - appear) * 12.0);
             let rect = Rect::from_center_size(center, size);
             glass_panel(ui, rect, false);
-            ui.painter().galley(pos2(rect.left() + 20.0, rect.center().y - text.size().y / 2.0), text, TEXT);
+            ui.painter().galley(pos2(rect.left() + 20.0, rect.center().y - text.size().y / 2.0), text, theme::text());
 
             if let Some(action) = toast.undo {
                 let button = Rect::from_min_size(pos2(rect.right() - undo_w - 8.0, rect.top() + 8.0), vec2(undo_w, 28.0));
                 let resp = ui.interact(button, Id::new("toast-undo"), Sense::click());
                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Отменить"));
-                let fill = if resp.hovered() { Color32::from_rgba_unmultiplied(96, 165, 250, 90) } else { theme::chip_fill() };
+                let fill = if resp.hovered() { theme::highlight(90) } else { theme::chip_fill() };
                 ui.painter().rect_filled(button, CornerRadius::same(8), fill);
-                ui.painter().text(button.center(), Align2::CENTER_CENTER, "Отменить", FontId::proportional(13.5), TEXT);
+                ui.painter().text(button.center(), Align2::CENTER_CENTER, "Отменить", FontId::proportional(13.5), theme::text());
                 if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                     undo = Some(action);
                 }
@@ -549,6 +606,9 @@ impl EbbApp {
                 }
                 Undo::Restore(id) => {
                     let _ = self.store.restore(id);
+                }
+                Undo::Kind(id, kind) => {
+                    let _ = self.store.set_kind(id, kind);
                 }
             }
             self.toast = None;
@@ -563,16 +623,16 @@ impl EbbApp {
         glass_panel(ui, rect, false);
         let mut settings_clicked = false;
         ui.scope_builder(UiBuilder::new().max_rect(rect.shrink(16.0)), |ui| {
-            ui.label(RichText::new("Debug").font(theme::semibold(15.0)).color(TEXT));
+            ui.label(RichText::new("Debug").font(theme::semibold(15.0)).color(theme::text()));
             ui.add_space(4.0);
             let (proc_ms, main_ms) = self.first_frame.unwrap_or((f64::NAN, f64::NAN));
             let (ws, private) = win::memory_mib();
             let latency = self.bar.lock().unwrap().latency_ms;
             let row = |ui: &mut Ui, k: &str, v: String| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(k).size(13.0).color(TEXT_MUTED));
+                    ui.label(RichText::new(k).size(13.0).color(theme::muted()));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(RichText::new(v).size(13.0).color(TEXT));
+                        ui.label(RichText::new(v).size(13.0).color(theme::text()));
                     });
                 });
             };
@@ -606,6 +666,8 @@ impl EbbApp {
             dismiss_hides: self.dismiss_hides,
             settings_on_launch: self.settings_on_launch,
             snap: self.snap,
+            card_style: self.card_style,
+            theme_mode: self.theme_mode,
         }
     }
 
@@ -659,6 +721,32 @@ impl EbbApp {
         } else {
             self.summon(ctx);
         }
+    }
+
+    fn set_card_style(&mut self, ctx: &egui::Context, style: card::CardStyle) {
+        let background_changed = style.background != self.card_style.background;
+        self.card_style = style;
+        theme::set_card_font(ctx, style.font);
+        if background_changed {
+            self.refresh_theme(ctx);
+        }
+        let _ = self.store.set_setting(SET_CARD_STYLE, &style.to_setting());
+        self.library.lock().unwrap().settings.card_style = style;
+        ctx.request_repaint_of(ViewportId::ROOT);
+        ctx.request_repaint_of(library::viewport_id());
+    }
+
+    /// Re-reads Windows' colors and repaints every window in the resulting theme.
+    fn refresh_theme(&mut self, ctx: &egui::Context) {
+        theme::apply(ctx, self.theme_mode, self.card_style.background, &win::system_colors());
+        if let Some(h) = self.hwnd {
+            win::apply_backdrop(h, self.backdrop, false);
+        }
+        for h in [win::find_capture_window(), win::find_library_window()].into_iter().flatten() {
+            win::apply_backdrop(h, Backdrop::AccentAcrylic, true);
+        }
+        ctx.request_repaint_of(ViewportId::ROOT);
+        ctx.request_repaint_of(library::viewport_id());
     }
 
     fn set_flag(&self, key: &str, on: bool) {
@@ -715,6 +803,12 @@ impl EbbApp {
             Request::SetSnap(on) => {
                 self.snap = on;
                 self.set_flag(SET_SNAP, on);
+            }
+            Request::SetCardStyle(style) => self.set_card_style(ctx, style),
+            Request::SetTheme(mode) => {
+                self.theme_mode = mode;
+                let _ = self.store.set_setting(SET_THEME, mode.key());
+                self.refresh_theme(ctx);
             }
             Request::ImportSticky => {
                 self.set_layer_visible(ctx, true);
@@ -870,6 +964,7 @@ impl eframe::App for EbbApp {
                         self.open_settings(ctx, false);
                     }
                 }
+                Event::SystemColors => self.refresh_theme(ctx),
                 Event::TogglePinBottom => self.set_pin_bottom(!win::PIN_BOTTOM.load(Ordering::Relaxed)),
                 Event::Exit => ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close),
                 Event::ImportSticky => self.apply_library_request(ctx, Request::ImportSticky),
@@ -1050,11 +1145,12 @@ impl eframe::App for EbbApp {
             }
         }
 
-        let (f1, f2, f3, esc) = ui.input_mut(|i| {
+        let (f1, f2, f3, f4, esc) = ui.input_mut(|i| {
             (
                 i.consume_key(Modifiers::NONE, Key::F1),
                 i.consume_key(Modifiers::NONE, Key::F2),
                 i.consume_key(Modifiers::NONE, Key::F3),
+                i.consume_key(Modifiers::NONE, Key::F4),
                 i.key_pressed(Key::Escape),
             )
         });
@@ -1066,6 +1162,13 @@ impl eframe::App for EbbApp {
         }
         if f3 {
             self.cycle_monitor();
+        }
+        if f4 {
+            // Next card marker, to compare them on the real layer.
+            let all = card::Marker::ALL;
+            let next = all[(all.iter().position(|m| *m == self.card_style.marker).unwrap_or(0) + 1) % all.len()];
+            self.set_card_style(ui.ctx(), card::CardStyle { marker: next, ..self.card_style });
+            self.toast = Some(Toast::new(format!("Вид карточек: {} (F4 — дальше)", next.label()), None));
         }
         if esc {
             if self.editing.is_some() {
@@ -1079,7 +1182,7 @@ impl eframe::App for EbbApp {
 
         let full = ui.max_rect();
         ui.painter()
-            .rect_filled(full, CornerRadius::ZERO, Color32::from_black_alpha(self.tint));
+            .rect_filled(full, CornerRadius::ZERO, theme::scrim(self.tint));
 
         self.header(ui);
         self.cards_ui(ui);
@@ -1146,26 +1249,124 @@ pub(crate) fn append_timing_log(line: &str) {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn glass_panel(ui: &Ui, rect: Rect, hovered: bool) {
-    let radius = CornerRadius::same(12);
-    let painter = ui.painter();
-    painter.add(
-        egui::epaint::Shadow {
-            offset: [0, 8],
-            blur: 28,
-            spread: 0,
-            color: Color32::from_black_alpha(70),
-        }
-        .as_shape(rect, radius),
-    );
     let fill = if hovered { theme::glass_fill_hover() } else { theme::glass_fill() };
+    panel(ui, rect, fill, CornerRadius::same(12), 50);
+}
+
+/// A card's panel: glass, or the Start/taskbar color (a setting).
+fn card_panel(ui: &Ui, rect: Rect, hovered: bool, style: card::CardStyle) {
+    panel(ui, rect, card_background(theme::card_fill(hovered), style, hovered), CornerRadius::same(style.radius), style.shadow);
+}
+
+/// `fill` at the style's opacity; a hovered card is a little more solid.
+fn card_background(fill: Color32, style: card::CardStyle, hovered: bool) -> Color32 {
+    let alpha = (f32::from(style.opacity) * 2.55 + if hovered { 12.0 } else { 0.0 }).min(255.0) as u8;
+    Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), alpha)
+}
+
+/// `shadow` 0–100; 50 is the soft shadow floating panels always had.
+fn panel(ui: &Ui, rect: Rect, fill: Color32, radius: CornerRadius, shadow: u8) {
+    let painter = ui.painter();
+    if shadow > 0 {
+        let k = f32::from(shadow) / 50.0;
+        let alpha = if theme::is_light() { 28.0 } else { 70.0 } * k;
+        painter.add(
+            egui::epaint::Shadow {
+                offset: [0, (8.0 * k.min(1.5)).round() as i8],
+                blur: (28.0 * k.min(1.5)).round() as u8,
+                spread: 0,
+                color: Color32::from_black_alpha(alpha.min(160.0) as u8),
+            }
+            .as_shape(rect, radius),
+        );
+    }
     painter.rect(rect, radius, fill, Stroke::new(1.0, theme::glass_stroke()), StrokeKind::Inside);
+}
+
+/// The card's color, drawn the way the user picked in settings. `strength` 50
+/// (the default) is the look each marker was tuned at.
+pub(crate) fn paint_marker(ui: &Ui, rect: Rect, accent: Color32, style: card::CardStyle, hovered: bool) {
+    use card::Marker;
+    let s = f32::from(style.strength) / 50.0;
+    let radius = CornerRadius::same(style.radius);
+    let painter = ui.painter();
+    // A band along one edge: the rounded rect clipped, so it follows the corners.
+    let band = |band: Rect| {
+        painter.with_clip_rect(band.intersect(ui.clip_rect())).rect_filled(rect, radius, accent.gamma_multiply((0.85 * s).min(1.0)));
+    };
+    let w = f32::from(style.strip);
+    match style.marker {
+        Marker::None => {}
+        Marker::Glow => corner_glow(painter, rect, f32::from(style.radius), accent, (0.2 * s).min(0.6)),
+        Marker::StripTop => band(Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + w))),
+        Marker::StripLeft => band(Rect::from_min_max(rect.min, pos2(rect.min.x + w, rect.max.y))),
+        Marker::Tint => {
+            painter.rect_filled(rect, radius, accent.gamma_multiply((0.1 * s).min(0.4)));
+        }
+        Marker::Border => {
+            painter.rect_stroke(rect, radius, Stroke::new(1.5, accent.gamma_multiply((0.55 * s).min(1.0))), StrokeKind::Inside);
+        }
+        Marker::Fill => {
+            // Opaque, like paper: a muted shade of the color over the card's own
+            // background (dark shades in the dark theme, pastels in the light one).
+            let base = theme::card_fill(false);
+            let t = if theme::is_light() { 0.38 } else { 0.3 } * s.min(2.0);
+            let l = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t.min(0.9)).round() as u8;
+            let fill = card_background(Color32::from_rgb(l(base.r(), accent.r()), l(base.g(), accent.g()), l(base.b(), accent.b())), style, false);
+            painter.rect_filled(rect, radius, fill);
+            if hovered {
+                painter.rect_filled(rect, radius, theme::wash(10));
+            }
+        }
+        Marker::Outline => {
+            painter.rect_filled(rect, radius, accent.gamma_multiply((0.07 * s).min(0.3)));
+            painter.rect_stroke(rect, radius, Stroke::new(2.0, accent.gamma_multiply((0.8 * s).min(1.0))), StrokeKind::Inside);
+        }
+    }
+}
+
+/// A soft wash of `color` spreading from the top left corner of a rounded card.
+/// egui has no radial gradient: a grid mesh with per-vertex alpha, its outer
+/// vertices pulled inside the rounded corners so nothing spills past them.
+fn corner_glow(painter: &egui::Painter, rect: Rect, radius: f32, color: Color32, strength: f32) {
+    const STEP: f32 = 14.0;
+    let reach = (rect.width().max(rect.height()) * 0.75).min(240.0);
+    let area = Rect::from_min_size(rect.min, vec2(reach.min(rect.width()), reach.min(rect.height())));
+    let (nx, ny) = ((area.width() / STEP).ceil() as u32, (area.height() / STEP).ceil() as u32);
+    let inside = |p: Pos2| {
+        // Nearest point of the rounded rect: clamp into the corner's circle.
+        let c = pos2(p.x.clamp(rect.left() + radius, rect.right() - radius), p.y.clamp(rect.top() + radius, rect.bottom() - radius));
+        let d = p - c;
+        if d.length() > radius { c + d.normalized() * radius } else { p }
+    };
+    let mut mesh = egui::Mesh::default();
+    for j in 0..=ny {
+        for i in 0..=nx {
+            let p = pos2(
+                (area.left() + i as f32 * STEP).min(area.right()),
+                (area.top() + j as f32 * STEP).min(area.bottom()),
+            );
+            let p = inside(p);
+            let t = (1.0 - (p - rect.min).length() / reach).max(0.0);
+            mesh.colored_vertex(p, color.gamma_multiply(strength * t * t));
+        }
+    }
+    let row = nx + 1;
+    for j in 0..ny {
+        for i in 0..nx {
+            let k = j * row + i;
+            mesh.add_triangle(k, k + 1, k + row);
+            mesh.add_triangle(k + 1, k + row + 1, k + row);
+        }
+    }
+    painter.add(mesh);
 }
 
 fn icon_button(ui: &mut Ui, glyph: &str, tip: &str, color: Color32) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(24.0, 22.0), Sense::click());
     if resp.hovered() {
         ui.painter()
-            .rect_filled(rect, CornerRadius::same(6), Color32::from_white_alpha(22));
+            .rect_filled(rect, CornerRadius::same(6), theme::wash(22));
     }
     ui.painter()
         .text(rect.center(), Align2::CENTER_CENTER, glyph, theme::icons(12.5), color);
@@ -1203,12 +1404,13 @@ fn age_label(created_at: i64) -> String {
 }
 
 /// Text of a card, or its editor.
-fn card_body(ui: &mut Ui, card: &Card, editing: Option<&mut String>, revealed: bool) {
+fn card_body(ui: &mut Ui, card: &Card, editing: Option<&mut String>, revealed: bool, style: card::CardStyle) {
+    let base = style.text_size();
     if let Some(buf) = editing {
         let resp = ui.add(
             egui::TextEdit::multiline(buf)
-                .font(FontId::proportional(14.0))
-                .text_color(TEXT)
+                .font(theme::card_font(base))
+                .text_color(theme::card_text())
                 .frame(egui::Frame::NONE)
                 .desired_width(f32::INFINITY)
                 .desired_rows(3),
@@ -1219,20 +1421,109 @@ fn card_body(ui: &mut Ui, card: &Card, editing: Option<&mut String>, revealed: b
         return;
     }
     let hidden = card.kind == Kind::Private && !revealed;
-    // A hidden Private card still says what it is (see card::private_label).
-    let heading = if hidden { card::private_label(&card.title, &card.body) } else { None };
-    let heading = heading.as_deref().or((!card.title.is_empty()).then_some(card.title.as_str()));
-    if let Some(heading) = heading {
+    let body = without_tags(&card.body);
+    // A hidden Private card still says what it is (see card::private_label); a
+    // Prompt's first line is its name.
+    let (heading, text) = match card.kind {
+        _ if hidden => (card::private_label(&card.title, &card.body), "••••••••••".to_owned()),
+        Kind::Prompt if card.title.is_empty() => match card::prompt_name(&body) {
+            Some((name, rest)) => (Some(name.to_owned()), rest.to_owned()),
+            None => (None, body),
+        },
+        _ => ((!card.title.is_empty()).then(|| card.title.clone()), body),
+    };
+    if let Some(heading) = &heading {
         ui.add(
-            egui::Label::new(RichText::new(heading).font(theme::semibold(15.0)).color(TEXT))
+            egui::Label::new(RichText::new(heading).font(theme::card_bold(base + 0.5)).color(theme::card_text()))
                 .wrap()
                 .selectable(false),
         );
     }
-    let text = if hidden { "••••••••••".to_owned() } else { without_tags(&card.body) };
-    let color = if heading.is_none() { TEXT } else { TEXT_DIM };
-    let size = if heading.is_none() { 14.5 } else { 13.5 };
-    ui.add(egui::Label::new(RichText::new(text).size(size).color(color)).wrap().selectable(false));
+    let color = if heading.is_none() { theme::card_text() } else { theme::card_dim() };
+    let size = if heading.is_none() { base } else { base - 1.0 };
+    if card.kind == Kind::Reference {
+        // Commands, paths and hosts in monospace, the words around them as usual.
+        let mut job = egui::text::LayoutJob::default();
+        for (i, line) in text.lines().enumerate() {
+            let font = if card::looks_technical(line) { FontId::monospace(size - 1.0) } else { theme::card_font(size) };
+            let line = if i > 0 { format!("\n{line}") } else { line.to_owned() };
+            job.append(&line, 0.0, egui::TextFormat { font_id: font, color, ..Default::default() });
+        }
+        ui.add(egui::Label::new(job).wrap().selectable(false));
+    } else if card.kind == Kind::Link {
+        // Addresses in link blue, the words around them as usual.
+        let mut job = egui::text::LayoutJob::default();
+        let format = |c: Color32| egui::TextFormat { font_id: theme::card_font(size), color: c, ..Default::default() };
+        let mut rest = text.as_str();
+        while let Some(start) = [rest.find("https://"), rest.find("http://")].into_iter().flatten().min() {
+            let end = rest[start..].find(char::is_whitespace).map_or(rest.len(), |e| start + e);
+            job.append(&rest[..start], 0.0, format(color));
+            job.append(&rest[start..end], 0.0, format(theme::link()));
+            rest = &rest[end..];
+        }
+        job.append(rest, 0.0, format(color));
+        ui.add(egui::Label::new(job).wrap().selectable(false));
+    } else {
+        ui.add(egui::Label::new(RichText::new(text).font(theme::card_font(size)).color(color)).wrap().selectable(false));
+    }
+    if card.kind == Kind::Link
+        && let Some(domain) = card::link_domain(&card.body)
+    {
+        ui.add_space(2.0);
+        ui.add(egui::Label::new(RichText::new(domain).size(12.0).color(theme::card_muted())).selectable(false));
+    }
+}
+
+/// Menu under a card's kind: every kind (with its digit key), then the card's color.
+/// `below`: the anchor is at the top of the card, so the menu opens downwards.
+fn kind_menu(anchor: &egui::Response, card: &Card, out: &mut Vec<Action>, below: bool) {
+    egui::Popup::menu(anchor)
+        .align(if below { egui::RectAlign::BOTTOM_START } else { egui::RectAlign::TOP_END })
+        .gap(4.0)
+        .width(236.0)
+        .show(|ui| {
+            ui.spacing_mut().button_padding = vec2(8.0, 5.0);
+            for kind in Kind::ALL {
+                let mut job = egui::text::LayoutJob::default();
+                let format = |font: FontId, color: Color32| egui::TextFormat { font_id: font, color, valign: Align::Center, ..Default::default() };
+                job.append(kind.icon(), 0.0, format(theme::icons(13.0), kind.accent()));
+                job.append(kind.label(), 10.0, format(FontId::proportional(14.0), theme::text()));
+                let button = egui::Button::new(job)
+                    .selected(kind == card.kind)
+                    .shortcut_text(RichText::new(kind.key().to_string()).size(12.5))
+                    .min_size(vec2(ui.available_width(), 0.0));
+                if ui.add(button).clicked() {
+                    out.push(Action::SetKind(kind));
+                }
+            }
+            ui.separator();
+            ui.add(egui::Label::new(RichText::new("Цвет").size(12.0).color(theme::muted())).selectable(false));
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(2.0, 4.0);
+                let swatches = std::iter::once(None).chain(card::Tint::ALL.into_iter().map(Some));
+                for tint in swatches {
+                    let (rect, resp) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
+                    let color = tint.map_or(card.kind.accent(), card::Tint::color);
+                    let p = ui.painter();
+                    if tint.is_none() {
+                        // "By kind": a ring in the kind's color.
+                        p.circle_stroke(rect.center(), 6.0, Stroke::new(2.0, color));
+                    } else {
+                        p.circle_filled(rect.center(), 7.0, color);
+                    }
+                    if tint == card.tint {
+                        p.circle_stroke(rect.center(), 9.5, Stroke::new(1.5, theme::text()));
+                    } else if resp.hovered() {
+                        p.circle_stroke(rect.center(), 9.5, Stroke::new(1.0, theme::muted()));
+                    }
+                    let label = tint.map_or("По типу", card::Tint::label);
+                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+                    if resp.on_hover_text(label).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                        out.push(Action::SetTint(tint));
+                    }
+                }
+            });
+        });
 }
 
 /// `magnet`: every card's rect on the layer, to stick to while dragging.
@@ -1247,6 +1538,7 @@ fn card_ui(
     revealed: bool,
     active: bool,
     magnet: Option<&[(i64, Rect)]>,
+    style: card::CardStyle,
 ) -> Vec<Action> {
     let mut out = Vec::new();
     let id = Id::new(("card", card.id));
@@ -1369,11 +1661,11 @@ fn card_ui(
     }
 
     let rect = Rect::from_min_size(origin + card.pos.to_vec2(), card.size);
-    glass_panel(ui, rect, hovered);
+    card_panel(ui, rect, hovered, style);
     if let Some(s) = &snapped {
         // Above every card, not just the ones painted before this one.
         let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, id.with("guides")));
-        let stroke = Stroke::new(1.0, card.kind.accent().gamma_multiply(0.8));
+        let stroke = Stroke::new(1.0, card.accent().gamma_multiply(0.8));
         for [a, b] in &s.guides {
             painter.line_segment([origin + a.to_vec2(), origin + b.to_vec2()], stroke);
         }
@@ -1383,32 +1675,29 @@ fn card_ui(
     let header = Rect::from_min_size(inner.min, vec2(inner.width(), HEADER_H - 4.0));
     let footer = Rect::from_min_max(pos2(inner.left(), inner.bottom() - FOOTER_H), inner.max);
     let body = Rect::from_min_max(pos2(inner.left(), header.bottom() + 2.0), pos2(inner.right(), footer.top() - 2.0));
-    let accent = card.kind.accent();
+    let accent = theme::on_card(card.accent());
 
-    // Kind, tags and age only while the card is hovered, edited or selected: at rest
-    // a card is just its text.
+    paint_marker(ui, rect, accent, style, hovered);
+
+    // Tags and age only while the card is hovered, edited or selected; at rest a
+    // card is its text, its color marker (a setting) and the kind's icon.
     let details = ui.ctx().animate_bool_with_time(id.with("details"), hovered || active || editing.is_some(), 0.15);
 
-    // Header: kind + hover actions.
+    // Header: hover actions.
     ui.scope_builder(
         UiBuilder::new().max_rect(header).layout(Layout::left_to_right(Align::Center)),
         |ui| {
-            ui.scope(|ui| {
-                ui.multiply_opacity(details);
-                ui.label(RichText::new(card.kind.icon()).font(theme::icons(12.0)).color(accent));
-                ui.add(egui::Label::new(RichText::new(card.kind.label()).size(12.0).color(TEXT_MUTED)).selectable(false));
-            });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 if hovered {
                     // Pinned: nothing that takes the card off the layer by accident.
-                    if !locked && icon_button(ui, "\u{E74D}", "Удалить", TEXT_MUTED).clicked() {
+                    if !locked && icon_button(ui, "\u{E74D}", "Удалить", theme::card_muted()).clicked() {
                         out.push(Action::Delete);
                     }
-                    if !locked && icon_button(ui, "\u{E7B8}", "В архив", TEXT_DIM).clicked() {
+                    if !locked && icon_button(ui, "\u{E7B8}", "В архив", theme::card_dim()).clicked() {
                         out.push(Action::Archive);
                     }
-                    if icon_button(ui, "\u{E8C8}", "Дублировать", TEXT_DIM).clicked() {
+                    if icon_button(ui, "\u{E8C8}", "Дублировать", theme::card_dim()).clicked() {
                         out.push(Action::Duplicate);
                     }
                     // The check mark says the text is on the clipboard.
@@ -1419,20 +1708,20 @@ fn card_ui(
                     }
                     let (glyph, tip, color) = match copied {
                         Some(_) => ("\u{E73E}", "Текст скопирован", theme::SUCCESS),
-                        None => ("\u{E77F}", "Копировать текст", TEXT_DIM),
+                        None => ("\u{E77F}", "Копировать текст", theme::card_dim()),
                     };
                     if icon_button(ui, glyph, tip, color).clicked() {
                         ui.data_mut(|d| d.insert_temp(copied_id, Instant::now()));
                         out.push(Action::Copy);
                     }
                     if card.kind == Kind::Private
-                        && icon_button(ui, "\u{E890}", "Показать на 5 секунд", TEXT_DIM).clicked()
+                        && icon_button(ui, "\u{E890}", "Показать на 5 секунд", theme::card_dim()).clicked()
                     {
                         out.push(Action::Reveal);
                     }
                 }
                 if card.pinned || hovered {
-                    let (glyph, color) = if card.pinned { ("\u{E841}", accent) } else { ("\u{E718}", TEXT_DIM) };
+                    let (glyph, color) = if card.pinned { ("\u{E841}", accent) } else { ("\u{E718}", theme::card_dim()) };
                     if icon_button(ui, glyph, if card.pinned { "Открепить" } else { "Закрепить на месте" }, color).clicked() {
                         out.push(Action::TogglePin);
                     }
@@ -1450,23 +1739,58 @@ fn card_ui(
                 .id_salt(id.with("scroll"))
                 .auto_shrink([false, false])
                 .max_height(body.height())
-                .show(ui, |ui| card_body(ui, card, editing, revealed));
+                .show(ui, |ui| card_body(ui, card, editing, revealed, style));
         },
     );
 
-    // Footer: tags + age.
+    // Footer: tags + age, and the kind's icon in the corner, which opens the menu
+    // to change the kind.
+    let icon_size = if style.bold_icon { vec2(26.0, 24.0) } else { vec2(22.0, 20.0) };
+    let kind_rect = match style.icon {
+        card::IconSpot::TopLeft => Rect::from_center_size(pos2(header.left() + 8.0, header.center().y), icon_size),
+        _ => Rect::from_center_size(pos2(footer.right() - 8.0, footer.center().y), icon_size),
+    };
+    let icon_shown = if style.icon == card::IconSpot::Hover { details } else { 1.0 };
+    let sense = if icon_shown > 0.5 { Sense::click() } else { Sense::hover() };
+    let kind = ui.interact(kind_rect, id.with("kind"), sense);
+    kind.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Тип: {}", card.kind.label())));
+    let menu_open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&kind));
+    let mut painter = ui.painter().clone();
+    painter.multiply_opacity(icon_shown);
+    if kind.hovered() && icon_shown > 0.5 || menu_open {
+        painter.rect_filled(kind_rect, CornerRadius::same(6), theme::wash(22));
+    }
+    if style.bold_icon {
+        // Segoe Fluent Icons has no bold weight: the glyph drawn a few times, a
+        // fraction of a point apart, thickens its strokes.
+        for d in [vec2(-0.4, 0.0), vec2(0.4, 0.0), vec2(0.0, -0.4), vec2(0.0, 0.4), Vec2::ZERO] {
+            painter.text(kind_rect.center() + d, Align2::CENTER_CENTER, card.kind.icon(), theme::icons(16.0), accent);
+        }
+    } else {
+        painter.text(kind_rect.center(), Align2::CENTER_CENTER, card.kind.icon(), theme::icons(12.5), accent);
+    }
+    if kind.clicked() {
+        out.push(Action::Front);
+    }
+    let kind = if icon_shown > 0.5 {
+        kind.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(format!("{} — сменить тип", card.kind.label()))
+    } else {
+        kind
+    };
+    kind_menu(&kind, card, &mut out, style.icon == card::IconSpot::TopLeft);
+
     let mut painter = ui.painter().with_clip_rect(footer);
     painter.multiply_opacity(details);
     let age = painter.text(
-        pos2(footer.right(), footer.center().y),
+        pos2(if style.icon == card::IconSpot::TopLeft { footer.right() } else { kind_rect.left() - 6.0 }, footer.center().y),
         Align2::RIGHT_CENTER,
         age_label(card.created_at),
         FontId::proportional(11.5),
-        TEXT_MUTED,
+        theme::card_muted(),
     );
     let mut x = footer.left();
     for tag in &card.tags {
-        let galley = painter.layout_no_wrap(format!("#{tag}"), FontId::proportional(11.5), TEXT_DIM);
+        let galley = painter.layout_no_wrap(format!("#{tag}"), FontId::proportional(11.5), theme::card_dim());
         let chip = Rect::from_min_size(
             pos2(x, footer.center().y - galley.size().y / 2.0 - 2.0),
             galley.size() + vec2(12.0, 4.0),
@@ -1475,14 +1799,14 @@ fn card_ui(
             break;
         }
         painter.rect_filled(chip, CornerRadius::same(6), theme::chip_fill());
-        painter.galley(chip.min + vec2(6.0, 2.0), galley, TEXT_DIM);
+        painter.galley(chip.min + vec2(6.0, 2.0), galley, theme::card_dim());
         x = chip.right() + 4.0;
     }
 
     if hovered {
         let p = ui.painter();
         let c = rect.max - vec2(6.0, 6.0);
-        let stroke = Stroke::new(1.2, Color32::from_white_alpha(if corner_hovered { 120 } else { 50 }));
+        let stroke = Stroke::new(1.2, theme::wash(if corner_hovered { 120 } else { 50 }));
         p.line_segment([c - vec2(8.0, 0.0), c - vec2(0.0, 8.0)], stroke);
         p.line_segment([c - vec2(4.0, 0.0), c - vec2(0.0, 4.0)], stroke);
     }

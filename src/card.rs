@@ -70,7 +70,12 @@ impl Kind {
         }
     }
 
+    /// Readable on the current theme (see theme::adapt).
     pub fn accent(self) -> Color32 {
+        crate::theme::adapt(self.raw_accent())
+    }
+
+    fn raw_accent(self) -> Color32 {
         match self {
             Kind::Note => Color32::from_rgb(160, 174, 192),
             Kind::Idea => Color32::from_rgb(250, 204, 21),
@@ -82,7 +87,302 @@ impl Kind {
             Kind::Private => Color32::from_rgb(244, 114, 182),
         }
     }
+
+    /// The digit that switches a selected card to this kind (1–8, in `ALL` order).
+    pub fn key(self) -> char {
+        let i = Kind::ALL.iter().position(|k| *k == self).unwrap_or(0);
+        char::from(b'1' + i as u8)
+    }
 }
+
+/// A color picked for a card by hand; replaces its kind's accent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tint {
+    Yellow,
+    Orange,
+    Pink,
+    Purple,
+    Blue,
+    Teal,
+    Green,
+    Gray,
+}
+
+impl Tint {
+    pub const ALL: [Tint; 8] =
+        [Tint::Yellow, Tint::Orange, Tint::Pink, Tint::Purple, Tint::Blue, Tint::Teal, Tint::Green, Tint::Gray];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tint::Yellow => "yellow",
+            Tint::Orange => "orange",
+            Tint::Pink => "pink",
+            Tint::Purple => "purple",
+            Tint::Blue => "blue",
+            Tint::Teal => "teal",
+            Tint::Green => "green",
+            Tint::Gray => "gray",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Tint> {
+        Tint::ALL.into_iter().find(|t| t.as_str() == s)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tint::Yellow => "Жёлтый",
+            Tint::Orange => "Оранжевый",
+            Tint::Pink => "Розовый",
+            Tint::Purple => "Фиолетовый",
+            Tint::Blue => "Синий",
+            Tint::Teal => "Бирюзовый",
+            Tint::Green => "Зелёный",
+            Tint::Gray => "Серый",
+        }
+    }
+
+    pub fn color(self) -> Color32 {
+        crate::theme::adapt(self.raw_color())
+    }
+
+    fn raw_color(self) -> Color32 {
+        match self {
+            Tint::Yellow => Color32::from_rgb(250, 204, 21),
+            Tint::Orange => Color32::from_rgb(251, 146, 60),
+            Tint::Pink => Color32::from_rgb(244, 114, 182),
+            Tint::Purple => Color32::from_rgb(167, 139, 250),
+            Tint::Blue => Color32::from_rgb(96, 165, 250),
+            Tint::Teal => Color32::from_rgb(45, 212, 191),
+            Tint::Green => Color32::from_rgb(52, 211, 153),
+            Tint::Gray => Color32::from_rgb(160, 174, 192),
+        }
+    }
+}
+
+/// How a card shows its kind's (or its own) color on the layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Marker {
+    None,
+    Glow,
+    StripTop,
+    StripLeft,
+    Tint,
+    Border,
+    /// The whole card in a muted shade of the color (Google Keep, Sticky Notes).
+    Fill,
+    /// A colored outline over a faint tint (Obsidian Canvas).
+    Outline,
+}
+
+/// Where the kind's icon (which opens the kind menu) sits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IconSpot {
+    BottomRight,
+    TopLeft,
+    /// Bottom right, only while the card is hovered or selected.
+    Hover,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CardStyle {
+    pub marker: Marker,
+    pub icon: IconSpot,
+    /// 0–100: how strong the marker's color is.
+    pub strength: u8,
+    /// A larger icon with thickened strokes.
+    pub bold_icon: bool,
+    /// Width of the strip markers, in points.
+    pub strip: u8,
+    /// Corner radius, in points.
+    pub radius: u8,
+    /// 0–100: how much shadow a card casts.
+    pub shadow: u8,
+    /// 30–100 %: opacity of the card's background (text stays opaque).
+    pub opacity: u8,
+    pub font: crate::theme::CardFont,
+    /// Text size in half points (29 = 14.5 pt).
+    pub text: u8,
+    pub background: crate::theme::CardBackground,
+}
+
+impl CardStyle {
+    pub fn text_size(self) -> f32 {
+        f32::from(self.text) / 2.0
+    }
+}
+
+impl Default for CardStyle {
+    fn default() -> Self {
+        PRESETS[0].style
+    }
+}
+
+impl Marker {
+    pub const ALL: [Marker; 8] =
+        [Marker::None, Marker::Glow, Marker::StripTop, Marker::StripLeft, Marker::Tint, Marker::Border, Marker::Fill, Marker::Outline];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Marker::None => "none",
+            Marker::Glow => "glow",
+            Marker::StripTop => "strip-top",
+            Marker::StripLeft => "strip-left",
+            Marker::Tint => "tint",
+            Marker::Border => "border",
+            Marker::Fill => "fill",
+            Marker::Outline => "outline",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Marker::None => "Без цвета",
+            Marker::Glow => "Свечение из угла",
+            Marker::StripTop => "Полоса сверху",
+            Marker::StripLeft => "Полоса слева",
+            Marker::Tint => "Тонировка",
+            Marker::Border => "Цветная рамка",
+            Marker::Fill => "Заливка",
+            Marker::Outline => "Рамка и тон",
+        }
+    }
+}
+
+impl IconSpot {
+    pub const ALL: [IconSpot; 3] = [IconSpot::BottomRight, IconSpot::TopLeft, IconSpot::Hover];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            IconSpot::BottomRight => "bottom-right",
+            IconSpot::TopLeft => "top-left",
+            IconSpot::Hover => "hover",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            IconSpot::BottomRight => "Снизу справа",
+            IconSpot::TopLeft => "Сверху слева",
+            IconSpot::Hover => "Только при наведении",
+        }
+    }
+}
+
+impl CardStyle {
+    /// Stored as "key=value" pairs, e.g. "marker=glow icon=bottom-right strength=50 bold=0 strip=5 radius=12";
+    /// keys it doesn't know are skipped, missing ones keep the default.
+    pub fn to_setting(self) -> String {
+        format!(
+            "marker={} icon={} strength={} bold={} strip={} radius={} shadow={} opacity={} font={} text={} background={}",
+            self.marker.key(),
+            self.icon.key(),
+            self.strength,
+            u8::from(self.bold_icon),
+            self.strip,
+            self.radius,
+            self.shadow,
+            self.opacity,
+            self.font.key(),
+            self.text,
+            self.background.key()
+        )
+    }
+
+    pub fn from_setting(s: &str) -> CardStyle {
+        let mut style = CardStyle::default();
+        let num = |v: &str| v.parse::<u32>().ok();
+        for (key, value) in s.split_whitespace().filter_map(|p| p.split_once('=')) {
+            match key {
+                "marker" => style.marker = Marker::ALL.into_iter().find(|m| m.key() == value).unwrap_or(style.marker),
+                "icon" => style.icon = IconSpot::ALL.into_iter().find(|i| i.key() == value).unwrap_or(style.icon),
+                "strength" => style.strength = num(value).map_or(style.strength, |n| n.min(100) as u8),
+                "bold" => style.bold_icon = value == "1",
+                "strip" => style.strip = num(value).map_or(style.strip, |n| n.clamp(1, 12) as u8),
+                "radius" => style.radius = num(value).map_or(style.radius, |n| n.min(20) as u8),
+                "shadow" => style.shadow = num(value).map_or(style.shadow, |n| n.min(100) as u8),
+                "opacity" => style.opacity = num(value).map_or(style.opacity, |n| n.clamp(30, 100) as u8),
+                "font" => {
+                    style.font = crate::theme::CardFont::ALL.into_iter().find(|f| f.key() == value).unwrap_or(style.font)
+                }
+                "text" => style.text = num(value).map_or(style.text, |n| n.clamp(22, 40) as u8),
+                "background" => style.background = crate::theme::CardBackground::from_key(value).unwrap_or(style.background),
+                _ => {}
+            }
+        }
+        style
+    }
+}
+
+/// A named look, modeled on an app people may be coming from.
+pub struct Preset {
+    pub name: &'static str,
+    pub hint: &'static str,
+    pub style: CardStyle,
+}
+
+/// Look: color marker, icon, strength, bold icon, strip, radius, shadow, opacity, font, text size (half pt), background.
+#[allow(clippy::too_many_arguments)]
+const fn style(
+    marker: Marker,
+    icon: IconSpot,
+    strength: u8,
+    bold_icon: bool,
+    strip: u8,
+    radius: u8,
+    shadow: u8,
+    opacity: u8,
+    font: crate::theme::CardFont,
+    text: u8,
+    background: crate::theme::CardBackground,
+) -> CardStyle {
+    CardStyle { marker, icon, strength, bold_icon, strip, radius, shadow, opacity, font, text, background }
+}
+
+use crate::theme::{CardBackground as B, CardFont as F};
+
+pub const PRESETS: [Preset; 8] = [
+    Preset {
+        name: "Ebb",
+        hint: "Стекло и свечение цвета",
+        style: style(Marker::Glow, IconSpot::BottomRight, 50, false, 5, 12, 50, 85, F::System, 29, B::Theme),
+    },
+    Preset {
+        name: "Sticky Notes",
+        hint: "Цветная шапка заметки",
+        style: style(Marker::StripTop, IconSpot::Hover, 100, false, 8, 8, 35, 100, F::System, 29, B::Theme),
+    },
+    Preset {
+        name: "Google Keep",
+        hint: "Заливка, плоско, рамка",
+        style: style(Marker::Fill, IconSpot::Hover, 50, false, 5, 8, 0, 100, F::System, 28, B::Theme),
+    },
+    Preset {
+        name: "Obsidian Canvas",
+        hint: "Рамка и лёгкий тон",
+        style: style(Marker::Outline, IconSpot::TopLeft, 60, false, 5, 8, 0, 95, F::System, 28, B::Theme),
+    },
+    Preset {
+        name: "Trello",
+        hint: "Цветная метка слева",
+        style: style(Marker::StripLeft, IconSpot::TopLeft, 80, false, 4, 6, 20, 100, F::System, 28, B::Theme),
+    },
+    Preset {
+        name: "Бумажный стикер",
+        hint: "Заливка, тень, от руки",
+        style: style(Marker::Fill, IconSpot::Hover, 70, false, 5, 2, 70, 100, F::SegoePrint, 29, B::Theme),
+    },
+    Preset {
+        name: "Минимализм",
+        hint: "Только жирная иконка",
+        style: style(Marker::None, IconSpot::BottomRight, 50, true, 5, 12, 20, 85, F::System, 29, B::Theme),
+    },
+    Preset {
+        name: "Windows",
+        hint: "Фон как у панели задач",
+        style: style(Marker::None, IconSpot::BottomRight, 50, false, 5, 8, 35, 96, F::System, 28, B::Taskbar),
+    },
+];
 
 #[derive(Clone, Debug)]
 pub struct Card {
@@ -96,6 +396,85 @@ pub struct Card {
     pub pos: Pos2,
     pub size: Vec2,
     pub created_at: i64,
+    /// Picked by hand; `None` takes the kind's color.
+    pub tint: Option<Tint>,
+}
+
+impl Card {
+    pub fn accent(&self) -> Color32 {
+        self.tint.map_or(self.kind.accent(), Tint::color)
+    }
+}
+
+const COMMANDS: &[&str] = &[
+    "ssh", "scp", "rsync", "git", "cd", "ls", "curl", "wget", "docker", "kubectl", "helm", "npm", "pnpm", "yarn",
+    "npx", "cargo", "pip", "python", "node", "ping", "sudo", "psql", "mysql", "redis-cli", "telnet", "winget",
+    "choco", "pwsh", "powershell", "systemctl", "journalctl", "tail", "cat", "export", "set",
+];
+
+/// A Reference line to set in monospace: a command, or a short line with a path,
+/// address or host in it ("vpn.staging.internal", "10.0.4.12:22", `C:\tools`).
+pub fn looks_technical(line: &str) -> bool {
+    let line = line.trim();
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let Some(first) = words.first() else { return false };
+    if matches!(*first, "$" | ">") {
+        return true;
+    }
+    let technical = words.iter().any(|w| technical_word(w.trim_end_matches([',', ';', ')'])));
+    // "git push", "kubectl get pods -n prod"; not "ping Alex about the release".
+    if COMMANDS.contains(&first.to_lowercase().as_str())
+        && words.len() > 1
+        && (words.len() <= 3 || technical || words.iter().any(|w| w.starts_with('-')))
+    {
+        return true;
+    }
+    words.len() <= 6 && technical
+}
+
+fn technical_word(w: &str) -> bool {
+    if !w.is_ascii() || w.len() < 3 {
+        return false;
+    }
+    let drive = w.as_bytes()[0].is_ascii_alphabetic() && w[1..].starts_with(":\\");
+    if w.contains("://") || w.starts_with('/') || w.starts_with("~/") || w.starts_with("./") || drive || w.contains('\\') {
+        return true;
+    }
+    // Keys, hashes, tokens: long runs of letters mixed with digits.
+    if w.len() >= 12 && w.bytes().any(|b| b.is_ascii_digit()) && w.bytes().any(|b| b.is_ascii_alphabetic()) {
+        return true;
+    }
+    // host, host:port, user@host, 10.0.4.12
+    let host = w.rsplit('@').next().unwrap_or(w);
+    let host = match host.rsplit_once(':') {
+        Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => h,
+        _ => host,
+    };
+    let labels: Vec<&str> = host.split('.').collect();
+    let ip = labels.len() == 4 && labels.iter().all(|l| !l.is_empty() && l.len() <= 3 && l.bytes().all(|b| b.is_ascii_digit()));
+    let name = labels.len() >= 2
+        && labels.iter().all(|l| !l.is_empty() && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+        && labels.last().is_some_and(|l| l.len() >= 2 && l.bytes().all(|b| b.is_ascii_alphabetic()))
+        && (labels.len() >= 3 || w.contains(['@', ':']));
+    ip || name
+}
+
+/// Host of the first http(s) URL in the text, without "www.".
+pub fn link_domain(text: &str) -> Option<&str> {
+    let at = text.find("https://").map(|i| i + 8).or_else(|| text.find("http://").map(|i| i + 7))?;
+    let rest = &text[at..];
+    let end = rest.find(|c: char| c.is_whitespace() || matches!(c, '/' | '?' | '#' | ')' | ',' | '"')).unwrap_or(rest.len());
+    let host = rest[..end].rsplit('@').next().unwrap_or("");
+    let host = host.strip_prefix("www.").unwrap_or(host).trim_end_matches(['.', ':']);
+    (!host.is_empty()).then_some(host)
+}
+
+/// A Prompt's name: its first line, when more text follows and the line is short.
+pub fn prompt_name(body: &str) -> Option<(&str, &str)> {
+    let body = body.trim_start();
+    let (first, rest) = body.split_once('\n')?;
+    let (first, rest) = (first.trim(), rest.trim());
+    (!first.is_empty() && !rest.is_empty() && first.chars().count() <= 80).then_some((first, rest))
 }
 
 /// What a hidden Private card may show: its title, or else the first line when
@@ -466,6 +845,56 @@ mod tests {
             pos: pos2(x, y),
             size: DEFAULT_SIZE,
             created_at: 0,
+            tint: None,
+        }
+    }
+
+    #[test]
+    fn technical_lines() {
+        for line in [
+            "ssh deploy@10.0.4.12",
+            "vpn staging vpn.staging.internal",
+            "C:\\tools\\bin",
+            "/etc/nginx/nginx.conf",
+            "db: postgres.local:5432",
+            "$ cargo build --release",
+            "https://egui.rs",
+            "3f9a0c7e41b2d85e6a1f",
+        ] {
+            assert!(looks_technical(line), "{line}");
+        }
+        for line in ["просто мысль", "т.е. позже", "e.g. later", "ping Alex about the release", "Wi-Fi офис", ""] {
+            assert!(!looks_technical(line), "{line}");
+        }
+    }
+
+    #[test]
+    fn link_domains() {
+        assert_eq!(link_domain("демо https://www.egui.rs/#demo"), Some("egui.rs"));
+        assert_eq!(link_domain("(http://user@host.dev:8080/x)"), Some("host.dev:8080"));
+        assert_eq!(link_domain("без ссылки"), None);
+    }
+
+    #[test]
+    fn prompt_names() {
+        assert_eq!(prompt_name("Ревью кода\nПосмотри на {{diff}}"), Some(("Ревью кода", "Посмотри на {{diff}}")));
+        assert_eq!(prompt_name("одна строка"), None);
+    }
+
+    #[test]
+    fn card_style_round_trips_and_survives_junk() {
+        let s = CardStyle { radius: 4, shadow: 10, opacity: 60, font: crate::theme::CardFont::Georgia, text: 32, background: crate::theme::CardBackground::Custom([255, 242, 171]), ..PRESETS[3].style };
+        assert_eq!(CardStyle::from_setting(&s.to_setting()), s);
+        let junk = CardStyle::from_setting("marker=what strength=999 color=red radius");
+        assert_eq!(junk, CardStyle { strength: 100, ..CardStyle::default() });
+    }
+
+    #[test]
+    fn kind_keys_and_tints_round_trip() {
+        assert_eq!(Kind::Note.key(), '1');
+        assert_eq!(Kind::Private.key(), '8');
+        for t in Tint::ALL {
+            assert_eq!(Tint::parse(t.as_str()), Some(t));
         }
     }
 

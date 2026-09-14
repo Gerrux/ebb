@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use egui::{pos2, vec2};
 use rusqlite::{Connection, params};
 
-use crate::card::{Card, DEFAULT_SIZE, Kind, Parsed};
+use crate::card::{Card, DEFAULT_SIZE, Kind, Parsed, Tint};
 
 pub struct Store {
     conn: Connection,
@@ -49,7 +49,7 @@ pub struct Hit {
     pub deleted_at: Option<i64>,
 }
 
-/// Row of `SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at`.
+/// Row of `SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint`.
 fn card_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
     let tags: String = r.get(4)?;
     Ok(Card {
@@ -63,6 +63,7 @@ fn card_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
         pos: pos2(r.get(7)?, r.get(8)?),
         size: vec2(r.get(9)?, r.get(10)?),
         created_at: r.get(11)?,
+        tint: r.get::<_, Option<String>>(12)?.as_deref().and_then(Tint::parse),
     })
 }
 
@@ -170,6 +171,12 @@ impl Store {
             conn.query_row("SELECT count(*) FROM pragma_table_info('cards') WHERE name='deleted_at'", [], |r| r.get(0))?;
         if !has_deleted_at {
             conn.execute("ALTER TABLE cards ADD COLUMN deleted_at INTEGER", [])?;
+        }
+        // A color picked by hand (card::Tint); NULL takes the kind's.
+        let has_tint: bool =
+            conn.query_row("SELECT count(*) FROM pragma_table_info('cards') WHERE name='tint'", [], |r| r.get(0))?;
+        if !has_tint {
+            conn.execute("ALTER TABLE cards ADD COLUMN tint TEXT", [])?;
         }
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS cards_kind_created ON cards(kind, created_at);
@@ -284,7 +291,7 @@ impl Store {
 
     pub fn card(&self, id: i64) -> rusqlite::Result<Option<Card>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at FROM cards WHERE id=?1",
+            "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint FROM cards WHERE id=?1",
         )?;
         let mut rows = stmt.query_map([id], card_row)?;
         rows.next().transpose()
@@ -404,7 +411,7 @@ impl Store {
 
     pub fn load(&self) -> rusqlite::Result<Vec<Card>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at
+            "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint
              FROM cards WHERE archived = 0 AND deleted_at IS NULL ORDER BY updated_at",
         )?;
         let rows = stmt.query_map([], card_row)?;
@@ -439,13 +446,14 @@ impl Store {
             pos,
             size: DEFAULT_SIZE,
             created_at: t,
+            tint: None,
         })
     }
 
     pub fn save(&self, c: &Card) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE cards SET kind=?2, title=?3, body=?4, tags=?5, pinned=?6, archived=?7,
-                 x=?8, y=?9, w=?10, h=?11, updated_at=?12 WHERE id=?1",
+                 x=?8, y=?9, w=?10, h=?11, updated_at=?12, tint=?13 WHERE id=?1",
             params![
                 c.id,
                 c.kind.as_str(),
@@ -458,7 +466,8 @@ impl Store {
                 c.pos.y,
                 c.size.x,
                 c.size.y,
-                now()
+                now(),
+                c.tint.map(Tint::as_str)
             ],
         )?;
         Ok(())
@@ -473,6 +482,11 @@ impl Store {
     /// Takes a card out of the trash, back where it was (layer or archive).
     pub fn restore(&self, id: i64) -> rusqlite::Result<()> {
         self.conn.execute("UPDATE cards SET deleted_at=NULL WHERE id=?1", [id])?;
+        Ok(())
+    }
+
+    pub fn set_kind(&self, id: i64, kind: Kind) -> rusqlite::Result<()> {
+        self.conn.execute("UPDATE cards SET kind=?2, updated_at=?3 WHERE id=?1", params![id, kind.as_str(), now()])?;
         Ok(())
     }
 
