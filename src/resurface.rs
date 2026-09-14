@@ -4,6 +4,10 @@ use crate::card::Kind;
 
 pub const DAY: i64 = 86_400;
 pub const COOLDOWN_DAYS: i64 = 14;
+/// Rediscover cards brought onto the layer a day.
+pub const REDISCOVER_LIMIT: usize = 3;
+/// A note archived or opened more recently than this isn't forgotten yet.
+pub const FORGOTTEN_AFTER_DAYS: i64 = 7;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Candidate {
@@ -40,15 +44,20 @@ fn type_weight(kind: Kind) -> i64 {
     }
 }
 
+fn due(now: i64, review_at: Option<i64>) -> bool {
+    review_at.is_some_and(|at| at <= now)
+}
+
 fn eligible(now: i64, c: &Candidate) -> bool {
     !c.deleted
         && c.archived
         && !c.pinned
         && c.kind != Kind::Private
         && !c.review_at.is_some_and(|at| at > now)
-        && !c
-            .last_resurfaced_at
-            .is_some_and(|at| now - at < COOLDOWN_DAYS * DAY)
+        // A reminder that has come due skips both waits.
+        && (due(now, c.review_at)
+            || (now - c.last_viewed_at >= FORGOTTEN_AFTER_DAYS * DAY
+                && !c.last_resurfaced_at.is_some_and(|at| now - at < COOLDOWN_DAYS * DAY)))
 }
 
 pub fn candidates(now: i64, input: &[Candidate], limit: usize) -> Vec<Pick> {
@@ -57,21 +66,9 @@ pub fn candidates(now: i64, input: &[Candidate], limit: usize) -> Vec<Pick> {
         .filter(|c| eligible(now, c))
         .map(|c| {
             let forgotten = ((now - c.last_viewed_at).max(0) / DAY).min(60);
-            let reminder = i64::from(c.review_at.is_some_and(|at| at <= now));
-            let score = forgotten * 10 + type_weight(c.kind) + c.priority * 30 + reminder * 500
-                - c.ignored_count * 20;
-            let reason = if reminder != 0 {
-                "Напоминание на сегодня".to_owned()
-            } else if forgotten > 0 {
-                format!("Ты записал это {forgotten} дн. назад")
-            } else {
-                "Давно не открывал".to_owned()
-            };
-            Pick {
-                id: c.id,
-                reason,
-                score,
-            }
+            let reminder = i64::from(due(now, c.review_at));
+            let score = forgotten * 10 + type_weight(c.kind) + c.priority * 30 + reminder * 500 - c.ignored_count * 20;
+            Pick { id: c.id, reason: reason(now, c.created_at, c.review_at), score }
         })
         .collect();
     ranked.sort_by_key(|p| (-p.score, p.id));
@@ -79,47 +76,66 @@ pub fn candidates(now: i64, input: &[Candidate], limit: usize) -> Vec<Pick> {
     ranked
 }
 
-pub fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64)
+/// Why a note is back: "Напоминание на сегодня", "Ты записал это 73 дня назад".
+pub fn reason(now: i64, created_at: i64, review_at: Option<i64>) -> String {
+    if due(now, review_at) {
+        return "Напоминание на сегодня".to_owned();
+    }
+    match (now - created_at).max(0) / DAY {
+        0 => "Давно не открывал".to_owned(),
+        n => format!("Ты записал это {n} {} назад", days_word(n)),
+    }
 }
 
-/// Parses the small reminder grammar accepted by quick capture. It deliberately
-/// stays local and predictable; richer natural-language dates belong to a later
-/// capture pass.
+/// "день" / "дня" / "дней" for `n`.
+pub fn days_word(n: i64) -> &'static str {
+    let n = n.abs();
+    match (n % 10, n % 100) {
+        (_, 11..=14) => "дней",
+        (1, _) => "день",
+        (2..=4, _) => "дня",
+        _ => "дней",
+    }
+}
+
+pub fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
+/// Parses the small reminder grammar accepted by quick capture: "через 2 недели",
+/// "через неделю", "in 3 days", "in a month". It deliberately stays local and
+/// predictable; richer natural-language dates belong to a later capture pass.
 pub fn review_at_from_text(text: &str, now: i64) -> Option<i64> {
     let lower = text.to_lowercase();
-    let tail = lower
-        .split("через ")
-        .nth(1)
-        .or_else(|| lower.split("in ").nth(1))?;
-    let words: Vec<&str> = tail.split_whitespace().take(3).collect();
-    let (amount, unit) = match words.as_slice() {
-        [unit] => (1, *unit),
-        [amount, unit, ..] => (
-            match *amount {
-                "один" | "одна" | "a" | "one" => 1,
-                "два" | "две" | "two" => 2,
-                "три" | "three" => 3,
-                n => n.parse().ok()?,
-            },
-            *unit,
-        ),
-        _ => return None,
-    };
-    let seconds = if unit.starts_with("час") || unit.starts_with("hour") {
-        amount * 3_600
-    } else if unit.starts_with("дн") || unit.starts_with("day") {
-        amount * DAY
-    } else if unit.starts_with("недел") || unit.starts_with("week") {
-        amount * 7 * DAY
-    } else if unit.starts_with("месяц") || unit.starts_with("month") {
-        amount * 30 * DAY
-    } else {
-        return None;
-    };
-    Some(now + seconds)
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    words.iter().enumerate().filter(|(_, w)| matches!(**w, "через" | "in")).find_map(|(i, _)| {
+        let unit_seconds = |w: &str| {
+            let w = w.trim_end_matches(|c: char| !c.is_alphanumeric());
+            if ["час", "hour"].iter().any(|p| w.starts_with(p)) {
+                Some(3_600)
+            } else if ["дн", "ден", "day"].iter().any(|p| w.starts_with(p)) {
+                Some(DAY)
+            } else if ["недел", "week"].iter().any(|p| w.starts_with(p)) {
+                Some(7 * DAY)
+            } else if ["месяц", "month"].iter().any(|p| w.starts_with(p)) {
+                Some(30 * DAY)
+            } else {
+                None
+            }
+        };
+        let first = *words.get(i + 1)?;
+        // "через неделю": the unit alone means one.
+        if let Some(unit) = unit_seconds(first) {
+            return Some(now + unit);
+        }
+        let amount: i64 = match first {
+            "один" | "одна" | "одну" | "a" | "an" | "one" => 1,
+            "два" | "две" | "two" => 2,
+            "три" | "three" => 3,
+            n => n.parse().ok().filter(|n| (1..=1000).contains(n))?,
+        };
+        Some(now + amount * unit_seconds(words.get(i + 2)?)?)
+    })
 }
 
 #[cfg(test)]
@@ -146,9 +162,19 @@ mod tests {
     fn cooldown_and_private_are_excluded() {
         let now = 100 * DAY;
         let mut recent = candidate(1, Kind::Idea);
-        recent.last_resurfaced_at = Some(now - 1 * DAY);
+        recent.last_resurfaced_at = Some(now - DAY);
         let private = candidate(2, Kind::Private);
         assert!(candidates(now, &[recent, private], 5).is_empty());
+    }
+
+    #[test]
+    fn just_archived_notes_are_not_forgotten_yet() {
+        let now = 100 * DAY;
+        let mut fresh = candidate(1, Kind::Idea);
+        fresh.last_viewed_at = now - DAY;
+        assert!(candidates(now, &[fresh.clone()], 5).is_empty());
+        fresh.review_at = Some(now);
+        assert_eq!(candidates(now, &[fresh], 5).len(), 1, "a due reminder comes back anyway");
     }
 
     #[test]
@@ -159,6 +185,7 @@ mod tests {
         let mut due = candidate(2, Kind::Note);
         due.review_at = Some(now);
         let picks = candidates(now, &[snoozed, due], 5);
+        assert_eq!(picks.len(), 1);
         assert_eq!(picks[0].id, 2);
         assert_eq!(picks[0].reason, "Напоминание на сегодня");
     }
@@ -185,15 +212,23 @@ mod tests {
     }
 
     #[test]
+    fn reasons_decline_days() {
+        assert_eq!(reason(73 * DAY, 0, None), "Ты записал это 73 дня назад");
+        assert_eq!(reason(21 * DAY, 0, None), "Ты записал это 21 день назад");
+        assert_eq!(reason(11 * DAY, 0, None), "Ты записал это 11 дней назад");
+        assert_eq!(reason(5, 0, Some(1)), "Напоминание на сегодня");
+    }
+
+    #[test]
     fn parses_capture_reminders() {
-        assert_eq!(
-            review_at_from_text("через две недели проверить pricing", 10),
-            Some(10 + 14 * DAY)
-        );
-        assert_eq!(
-            review_at_from_text("in 3 days review", 10),
-            Some(10 + 3 * DAY)
-        );
+        assert_eq!(review_at_from_text("через две недели проверить pricing", 10), Some(10 + 14 * DAY));
+        assert_eq!(review_at_from_text("Через неделю проверить", 10), Some(10 + 7 * DAY));
+        assert_eq!(review_at_from_text("позвонить через 3 дня", 10), Some(10 + 3 * DAY));
+        assert_eq!(review_at_from_text("in 3 days review", 10), Some(10 + 3 * DAY));
+        assert_eq!(review_at_from_text("check in a month.", 10), Some(10 + 30 * DAY));
         assert_eq!(review_at_from_text("обычная заметка", 10), None);
+        // "in" inside a word, or not followed by a duration, isn't a reminder.
+        assert_eq!(review_at_from_text("domain 3 days", 10), None);
+        assert_eq!(review_at_from_text("in the office", 10), None);
     }
 }

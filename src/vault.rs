@@ -5,7 +5,7 @@
 //! profile/database cannot be opened by another Windows user. This is a
 //! deliberate small vault, not a password-manager replacement.
 
-use windows::Win32::Foundation::{LocalFree, HLOCAL};
+use windows::Win32::Foundation::{ERROR_INVALID_DATA, HLOCAL, LocalFree};
 use windows::Win32::Security::Cryptography::{
     CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
 };
@@ -65,11 +65,14 @@ pub fn unprotect(card_id: i64, ciphertext: &[u8]) -> windows::core::Result<Strin
             &mut output,
         )?;
         let bytes = std::slice::from_raw_parts(output.pbData, output.cbData as usize);
-        let text = String::from_utf8(bytes.to_vec());
+        let text = String::from_utf8(bytes.to_vec()).map_err(|e| {
+            e.into_bytes().fill(0);
+            windows::core::Error::from_hresult(ERROR_INVALID_DATA.to_hresult())
+        });
         std::ptr::write_bytes(output.pbData, 0, output.cbData as usize);
         let _ = LocalFree(Some(HLOCAL(output.pbData as _)));
         input.fill(0);
-        text.map_err(|_| windows::core::Error::from_thread())
+        text
     }
 }
 

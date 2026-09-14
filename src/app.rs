@@ -180,7 +180,8 @@ impl EbbApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         store: Store,
-        cards: Vec<Card>,
+        mut cards: Vec<Card>,
+        fresh: Vec<i64>,
         main_started: Instant,
         autostarted: bool,
     ) -> Self {
@@ -230,6 +231,25 @@ impl EbbApp {
             win::set_window_alpha(h, 0);
         }
 
+        // Brought back from the archive today: into free slots, not where each
+        // was when it was archived, and appearing like a new card.
+        let appearing: Vec<(i64, Instant)> = fresh.iter().map(|id| (*id, Instant::now())).collect();
+        let away = pos2(-1.0e5, -1.0e5);
+        cards.iter_mut().filter(|c| fresh.contains(&c.id)).for_each(|c| c.pos = away);
+        for id in &fresh {
+            let Some(idx) = cards.iter().position(|c| c.id == *id) else { continue };
+            cards[idx].pos = card::free_slot(&cards, full_area);
+            cards[idx].size = cards[idx].size.max(MIN_SIZE);
+            if let Err(e) = store.save(&cards[idx]) {
+                eprintln!("save failed: {e}");
+            }
+        }
+        // On a full layer they land on other cards: above them, not under.
+        cards.sort_by_key(|c| fresh.contains(&c.id));
+        for id in &fresh {
+            let _ = store.raise(*id);
+        }
+
         let shell = Arc::new(shell::Shared::default());
         shell.layer_visible.store(true, Ordering::Relaxed);
         shell.pin_bottom.store(pin_bottom, Ordering::Relaxed);
@@ -265,7 +285,7 @@ impl EbbApp {
             revealed_text: None,
             highlighted: None,
             toast: None,
-            appearing: Vec::new(),
+            appearing,
             leaving: Vec::new(),
             sticky: StickyImport::default(),
             show_debug: false,
@@ -316,6 +336,12 @@ impl EbbApp {
             .filter(|t| !t.is_empty())
             .collect();
         self.save(idx);
+        if self.cards[idx].kind == Kind::Private {
+            // Encrypted by save; on the layer only the label stays in the open.
+            let c = &mut self.cards[idx];
+            c.title = card::private_parts(&c.title, &c.body).0;
+            c.body.clear();
+        }
     }
 
     /// Changes a card's kind, keeping its text; the toast can undo it.
@@ -324,27 +350,23 @@ impl EbbApp {
         if old == kind {
             return;
         }
-        if kind == Kind::Private {
-            // A Private card isn't edited in place, and its text hides right away.
-            if self.editing.as_ref().is_some_and(|(eid, _)| *eid == id) {
-                self.commit_edit();
-            }
-            if self.revealed.is_some_and(|(rid, _)| rid == id) {
-                self.revealed = None;
-                self.revealed_text = None;
-            }
+        // The editor's text is saved first, under the old kind; a card going
+        // Private hides its text right away.
+        if self.editing.as_ref().is_some_and(|(eid, _)| *eid == id) {
+            self.commit_edit();
         }
-        if old == Kind::Private && kind != Kind::Private {
-            if let Ok(Some(secret)) = self.store.secret(id) {
-                self.cards[idx].title.clear();
-                self.cards[idx].body = secret;
-            }
+        if self.revealed.is_some_and(|(rid, _)| rid == id) {
+            self.revealed = None;
+            self.revealed_text = None;
         }
-        self.cards[idx].kind = kind;
-        self.save(idx);
-        if kind == Kind::Private {
-            self.cards[idx].title = card::private_label(&self.cards[idx].title, &self.cards[idx].body).unwrap_or_else(|| "Private".into());
-            self.cards[idx].body.clear();
+        // The store splits the text into label and secret, or joins them back.
+        if let Err(e) = self.store.set_kind(id, kind) {
+            eprintln!("set kind failed: {e}");
+            return;
+        }
+        if let Ok(Some(stored)) = self.store.card(id) {
+            let c = &mut self.cards[idx];
+            (c.kind, c.title, c.body) = (stored.kind, stored.title, stored.body);
         }
         let text = format!("Тип: {} → {}", old.label(), kind.label());
         self.toast = Some(Toast::new(text, Some(Undo::Kind(id, old))));
@@ -786,7 +808,18 @@ impl EbbApp {
                     self.commit_edit();
                     let c = &self.cards[idx];
                     let _ = self.store.touch(c.id);
-                    self.editing = Some((c.id, edit_text(c)));
+                    let text = if c.kind == Kind::Private {
+                        // Without its value the editor would save the label as the secret.
+                        match self.store.secret(c.id) {
+                            Ok(Some(secret)) => card::private_text(&c.title, &secret),
+                            _ => continue,
+                        }
+                    } else {
+                        edit_text(c)
+                    };
+                    self.editing = Some((c.id, text));
+                    self.revealed = None;
+                    self.revealed_text = None;
                 }
                 Action::Reveal => {
                     let id = self.cards[idx].id;
@@ -808,11 +841,14 @@ impl EbbApp {
             self.leaving.push((card, Instant::now()));
             self.library.lock().unwrap().invalidate();
             self.bar.lock().unwrap().invalidate();
-        } else if let Some(idx) = to_front {
-            if idx + 1 != self.cards.len() {
-                let c = self.cards.remove(idx);
-                self.cards.push(c);
+        } else if let Some(idx) = to_front
+            && idx + 1 != self.cards.len()
+        {
+            let c = self.cards.remove(idx);
+            if let Err(e) = self.store.raise(c.id) {
+                eprintln!("raise failed: {e}");
             }
+            self.cards.push(c);
         }
     }
 
@@ -1126,6 +1162,8 @@ impl EbbApp {
 
     fn shutdown(&mut self) {
         self.commit_edit();
+        // A Private value copied less than 30 s ago doesn't outlive the app.
+        win::clear_private_clipboard();
         shell::remove_tray_icon(&self.shell);
     }
 
@@ -1209,6 +1247,7 @@ impl EbbApp {
         };
         let card = self.cards.remove(idx);
         self.cards.push(card);
+        let _ = self.store.raise(id);
         let _ = self.store.touch(id);
         self.highlighted = Some((id, Instant::now()));
         ctx.request_repaint();
@@ -1225,6 +1264,18 @@ impl EbbApp {
             let gone = self.cards.drain(..).filter(|old| !cards.iter().any(|c| c.id == old.id));
             self.leaving.extend(gone.map(|c| (c, now)));
             self.cards = cards;
+            // A card back from the archive (pinned in the review, say) keeps its old
+            // spot if it's still on the layer; an imported one never had one.
+            let layer = Rect::from_min_size(Pos2::ZERO, self.full_area);
+            for idx in 0..self.cards.len() {
+                let c = &self.cards[idx];
+                let fresh = self.appearing.iter().any(|(id, t)| *id == c.id && *t == now);
+                if fresh && (c.pos == Pos2::ZERO || !layer.contains_rect(Rect::from_min_size(c.pos, c.size))) {
+                    self.cards[idx].pos = pos2(-1.0e5, -1.0e5);
+                    self.cards[idx].pos = card::free_slot(&self.cards, self.full_area);
+                    self.save(idx);
+                }
+            }
         }
     }
 }
@@ -1251,17 +1302,10 @@ impl eframe::App for EbbApp {
                 Event::Exit => ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close),
                 Event::ImportSticky => self.apply_library_request(ctx, Request::ImportSticky),
                 Event::OpenLibrary(true) => self.open_settings(ctx, false),
-                Event::OpenLibrary(false) => {
+                event @ (Event::OpenLibrary(false) | Event::OpenReview) => {
                     let mut lib = self.library.lock().unwrap();
                     lib.settings = self.layer_settings();
-                    lib.open(Tab::Archive);
-                    ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::InnerSize(lib.size()));
-                    ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::Focus);
-                }
-                Event::OpenReview => {
-                    let mut lib = self.library.lock().unwrap();
-                    lib.settings = self.layer_settings();
-                    lib.open(Tab::Review);
+                    lib.open(if matches!(event, Event::OpenReview) { Tab::Review } else { Tab::Archive });
                     ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::InnerSize(lib.size()));
                     ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::Focus);
                 }
@@ -2066,7 +2110,11 @@ fn card_ui(
     let rect = Rect::from_min_size(origin + card.pos.to_vec2(), card.size);
 
     // Registration order = hit-test priority: later widgets sit on top.
-    let bg = ui.interact(rect, id.with("bg"), Sense::click());
+    // The background senses drags too, though it doesn't move the card: egui
+    // hands a press to the topmost click widget and, separately, the topmost
+    // drag widget, so a click-only background let the header or edge of a card
+    // underneath catch the drag and come to the front.
+    let bg = ui.interact(rect, id.with("bg"), Sense::click_and_drag());
     let header_rect = Rect::from_min_size(rect.min, vec2(rect.width(), HEADER_H + 6.0));
     // A pinned card is locked in place: no moving, no resizing.
     let locked = card.pinned;
@@ -2104,7 +2152,7 @@ fn card_ui(
     // doesn't lay its text open.
     // Pushed once the body is drawn: a click on a link there opens it instead.
     let edit_gesture = if card.kind == Kind::Private { bg.double_clicked() } else { bg.clicked() };
-    let start_edit = edit_gesture && editing.is_none() && card.kind != Kind::Private;
+    let start_edit = edit_gesture && editing.is_none();
 
     // The rect at the start of the gesture and the pointer's total movement live in
     // memory, so a stuck edge follows the pointer again once it moves past the snap

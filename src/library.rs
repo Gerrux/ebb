@@ -16,16 +16,27 @@ use crate::autostart;
 use crate::bar::{age, highlighted};
 use crate::card::{Card, Kind};
 use crate::search;
-use crate::store::{Hit, ReviewSnapshot, Scope, Store, TRASH_DAYS};
+use crate::resurface::{self, DAY, days_word};
+use crate::store::{Hit, ReviewAction, ReviewSnapshot, Scope, Store, TRASH_DAYS};
 use crate::theme;
 use crate::win::{self, Backdrop};
 
 pub const SIZE: Vec2 = vec2(800.0, 600.0);
 pub const SETTINGS_SIZE: Vec2 = vec2(600.0, 680.0);
-pub const REVIEW_SIZE: Vec2 = vec2(520.0, 640.0);
 const ROW_H: f32 = 58.0;
 const HEADER_H: f32 = 52.0;
 const RESULTS: usize = 200;
+/// Cards in one weekly review.
+const REVIEW_CARDS: usize = 15;
+/// Review buttons, in key order: label, action, what the summary calls it.
+const REVIEW_ACTIONS: [(&str, ReviewAction, &str); 6] = [
+    ("← Оставить", ReviewAction::Keep, "оставлено"),
+    ("→ В архив", ReviewAction::Archive, "в архиве"),
+    ("↓ Позже", ReviewAction::Snooze, "отложено"),
+    ("↑ Закрепить", ReviewAction::Pin, "закреплено"),
+    ("G  Сделать целью", ReviewAction::Goal, "стали целями"),
+    ("Del  В корзину", ReviewAction::Trash, "в корзине"),
+];
 
 pub fn viewport_id() -> ViewportId {
     ViewportId::from_hash_of("library")
@@ -140,13 +151,18 @@ pub struct LibraryState {
     request_focus: bool,
     autostart: Arc<Mutex<AutostartUi>>,
     monitors: Vec<win::Monitor>,
-    review_cards: Vec<Card>,
-    review_index: usize,
-    review_history: Vec<ReviewSnapshot>,
-    review_id: Option<i64>,
-    review_loaded: bool,
-    review_done: bool,
-    review_notice: Option<String>,
+    review: Review,
+}
+
+/// One pass of the weekly review, from opening the tab to its last card.
+#[derive(Default)]
+struct Review {
+    loaded: bool,
+    cards: Vec<Card>,
+    /// Actions taken, in order: `cards[history.len()]` is the current card.
+    history: Vec<(ReviewSnapshot, ReviewAction)>,
+    /// The `reviews` row, created with the first action: a look without one isn't logged.
+    id: Option<i64>,
 }
 
 impl LibraryState {
@@ -161,11 +177,7 @@ impl LibraryState {
         self.tab = tab;
         self.settings_only = tab == Tab::Settings;
         if tab == Tab::Review {
-            self.review_loaded = false;
-            self.review_done = false;
-            self.review_notice = None;
-            self.review_history.clear();
-            self.review_id = None;
+            self.review = Review::default();
         }
         self.searched = None;
         self.scroll_offset = 0.0;
@@ -173,13 +185,18 @@ impl LibraryState {
     }
 
     pub fn size(&self) -> Vec2 {
-        if self.settings_only {
-            SETTINGS_SIZE
-        } else if self.tab == Tab::Review {
-            REVIEW_SIZE
-        } else {
-            SIZE
-        }
+        if self.settings_only { SETTINGS_SIZE } else { SIZE }
+    }
+
+    fn switch_tab(&mut self, tab: Tab) {
+        self.tab = tab;
+        self.query.clear();
+        self.searched = None;
+        self.selected = 0;
+        self.scroll_offset = 0.0;
+        self.confirm = None;
+        self.review = Review::default();
+        self.request_focus = true;
     }
 
     fn close(&mut self) {
@@ -190,9 +207,7 @@ impl LibraryState {
         self.hits = Vec::new();
         self.query.clear();
         self.confirm = None;
-        self.review_cards.clear();
-        self.review_history.clear();
-        self.review_id = None;
+        self.review = Review::default();
     }
 
     /// Data changed elsewhere (layer, search bar): refresh on the next frame.
@@ -224,21 +239,13 @@ pub fn ui(ui: &mut Ui, state: &Mutex<LibraryState>) {
     let (close_requested, esc) = ui.input(|i| (i.viewport().close_requested(), i.key_pressed(Key::Escape)));
     let next_tab = !st.settings_only && ui.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Tab));
     if next_tab {
-        st.tab = match st.tab {
+        let next = match st.tab {
             Tab::Archive => Tab::Trash,
             Tab::Trash => Tab::Review,
             Tab::Review => Tab::Settings,
             Tab::Settings => Tab::Archive,
         };
-        st.query.clear();
-        st.searched = None;
-        st.selected = 0;
-        st.scroll_offset = 0.0;
-        st.confirm = None;
-        st.review_loaded = false;
-        st.review_done = false;
-        st.review_notice = None;
-        st.request_focus = true;
+        st.switch_tab(next);
     }
 
     let full = ui.max_rect();
@@ -297,9 +304,9 @@ fn header(ui: &mut Ui, st: &mut LibraryState) -> bool {
             Vec::new()
         } else {
             vec![
-                (Tab::Review, "Review".to_owned()),
                 (Tab::Archive, format!("Архив {archived}")),
                 (Tab::Trash, format!("Корзина {trashed}")),
+                (Tab::Review, "Обзор".to_owned()),
                 (Tab::Settings, "Настройки".to_owned()),
             ]
         };
@@ -318,16 +325,7 @@ fn header(ui: &mut Ui, st: &mut LibraryState) -> bool {
             ui.painter().rect_filled(r, CornerRadius::same(8), fill);
             ui.painter().galley(r.min + vec2(10.0, 6.0), galley, if on { theme::text() } else { theme::dim() });
             if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() && !on {
-                st.tab = tab;
-                st.query.clear();
-                st.searched = None;
-                st.selected = 0;
-                st.scroll_offset = 0.0;
-                st.confirm = None;
-                st.review_loaded = false;
-                st.review_done = false;
-                st.review_notice = None;
-                st.request_focus = true;
+                st.switch_tab(tab);
             }
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -374,151 +372,160 @@ fn refresh(st: &mut LibraryState) {
     st.searched = Some(key);
 }
 
+// ---------------------------------------------------------------------------
+// Weekly review
+// ---------------------------------------------------------------------------
+
 fn ensure_review(st: &mut LibraryState) {
-    if st.review_loaded {
+    if st.review.loaded {
         return;
     }
     if st.store.is_none() {
         st.store = Store::open().ok();
     }
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-        st.review_cards = st.store.as_ref().and_then(|store| store.review_queue(now, 15).ok()).unwrap_or_default();
-    st.review_id = st.store.as_ref().and_then(|store| store.begin_review(now).ok());
-    st.review_index = 0;
-    st.review_history.clear();
-    st.review_done = st.review_cards.is_empty();
-    st.review_loaded = true;
+    let cards = st.store.as_ref().and_then(|store| store.review_queue(resurface::unix_now(), REVIEW_CARDS).ok());
+    st.review = Review { loaded: true, cards: cards.unwrap_or_default(), ..Review::default() };
 }
 
-fn review_apply(st: &mut LibraryState, action: &str) {
-    ensure_review(st);
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-    let Some(id) = st.review_cards.get(st.review_index).map(|card| card.id) else { return };
+fn review_apply(st: &mut LibraryState, action: ReviewAction) {
     let Some(store) = st.store.as_ref() else { return };
+    let Some(id) = st.review.cards.get(st.review.history.len()).map(|card| card.id) else { return };
     let Ok(snapshot) = store.review_action(id, action) else { return };
-    if let Some(review_id) = st.review_id {
-        let _ = store.record_review_item(review_id, id, action, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64));
+    let now = resurface::unix_now();
+    let review = &mut st.review;
+    if review.id.is_none() {
+        review.id = store.begin_review(now).ok();
     }
-    st.review_history.push(snapshot);
-    st.review_index += 1;
-    st.review_done = st.review_index >= st.review_cards.len();
-    if st.review_done && !st.review_cards.is_empty() {
-        if let Some(review_id) = st.review_id {
-            let _ = store.finish_review(review_id, now);
-        }
+    if let Some(review_id) = review.id {
+        let _ = store.record_review_item(review_id, id, action, now);
     }
+    review.history.push((snapshot, action));
+    if review.history.len() == review.cards.len()
+        && let Some(review_id) = review.id
+    {
+        let _ = store.finish_review(review_id, now);
+    }
+    st.counts = store.counts().unwrap_or(st.counts);
     st.outbox.push(Request::Changed);
 }
 
 fn review_undo(st: &mut LibraryState) {
-    let Some(snapshot) = st.review_history.pop() else { return };
     let Some(store) = st.store.as_ref() else { return };
-    if store.undo_review(&snapshot).is_ok() {
-        st.review_index = st.review_index.saturating_sub(1);
-        st.review_done = false;
-        st.outbox.push(Request::Changed);
+    let Some((snapshot, _)) = st.review.history.pop() else { return };
+    if store.undo_review(&snapshot).is_err() {
+        return;
     }
+    if let Some(review_id) = st.review.id {
+        let _ = store.forget_review_item(review_id, snapshot.id);
+    }
+    st.counts = store.counts().unwrap_or(st.counts);
+    st.outbox.push(Request::Changed);
+}
+
+fn review_message(ui: &mut Ui, title: &str, text: &str) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(90.0);
+        ui.label(RichText::new(title).font(theme::semibold(20.0)).color(theme::text()));
+        ui.add_space(8.0);
+        ui.label(RichText::new(text).color(theme::muted()));
+    });
 }
 
 fn review_tab(ui: &mut Ui, st: &mut LibraryState) {
     ensure_review(st);
-    let (left, right, down, up, delete, goal, undo) = ui.input_mut(|i| {
-        (
-            i.consume_key(Modifiers::NONE, Key::ArrowLeft),
-            i.consume_key(Modifiers::NONE, Key::ArrowRight),
-            i.consume_key(Modifiers::NONE, Key::ArrowDown),
-            i.consume_key(Modifiers::NONE, Key::ArrowUp),
-            i.consume_key(Modifiers::NONE, Key::Delete),
-            i.consume_key(Modifiers::NONE, Key::G),
-            i.consume_key(Modifiers::CTRL, Key::Z),
-        )
+    const KEYS: [(Key, ReviewAction); 6] = [
+        (Key::ArrowLeft, ReviewAction::Keep),
+        (Key::ArrowRight, ReviewAction::Archive),
+        (Key::ArrowDown, ReviewAction::Snooze),
+        (Key::ArrowUp, ReviewAction::Pin),
+        (Key::G, ReviewAction::Goal),
+        (Key::Delete, ReviewAction::Trash),
+    ];
+    let (pressed, undo) = ui.input_mut(|i| {
+        let pressed = KEYS.iter().find(|(k, _)| i.consume_key(Modifiers::NONE, *k)).map(|(_, a)| *a);
+        (pressed, i.consume_key(Modifiers::COMMAND, Key::Z))
     });
     if undo {
         review_undo(st);
-        return;
-    }
-    if left {
-        review_apply(st, "keep");
-    } else if right {
-        review_apply(st, "archive");
-    } else if down {
-        review_apply(st, "snooze");
-    } else if up {
-        review_apply(st, "pin");
-    } else if delete {
-        review_apply(st, "trash");
-    } else if goal {
-        review_apply(st, "goal");
+    } else if let Some(action) = pressed {
+        review_apply(st, action);
     }
 
-    if st.review_done && !st.review_cards.is_empty() {
+    let (done, total) = (st.review.history.len(), st.review.cards.len());
+    if total == 0 {
+        review_message(ui, "Для обзора пока нет карточек", "Старые и отложенные мысли появятся здесь позже.");
+        return;
+    }
+    if done == total {
+        let count = |a: ReviewAction| st.review.history.iter().filter(|(_, x)| *x == a).count();
+        let summary = REVIEW_ACTIONS
+            .iter()
+            .map(|(_, a, outcome)| (count(*a), outcome))
+            .filter(|(n, _)| *n > 0)
+            .map(|(n, outcome)| format!("{outcome}: {n}"))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        review_message(ui, "Обзор завершён", &summary);
         ui.vertical_centered(|ui| {
-            ui.add_space(90.0);
-            ui.label(RichText::new("Обзор завершён").font(theme::semibold(22.0)).color(theme::text()));
-            ui.add_space(10.0);
-            ui.label(RichText::new(format!("Разобрано карточек: {}", st.review_history.len())).color(theme::muted()));
-            ui.add_space(18.0);
-            if ui.button("Начать заново").clicked() {
-                st.review_loaded = false;
-                st.review_done = false;
-                st.review_history.clear();
-                st.review_id = None;
-            }
+            ui.add_space(16.0);
+            ui.label(RichText::new("Ctrl+Z — вернуть последнюю карточку").size(12.0).color(theme::dim()));
         });
         return;
     }
-    let Some(card) = st.review_cards.get(st.review_index).cloned() else {
-        ui.vertical_centered(|ui| {
-            ui.add_space(90.0);
-            ui.label(RichText::new("Для обзора пока нет карточек").font(theme::semibold(18.0)).color(theme::text()));
-            ui.add_space(8.0);
-            ui.label(RichText::new("Старые и отложенные мысли появятся здесь позже.").color(theme::muted()));
-        });
-        return;
+    let card = st.review.cards[done].clone();
+
+    let now = resurface::unix_now();
+    let why = if card.review_at.is_some_and(|at| at <= now) {
+        "Напоминание"
+    } else if card.archived {
+        "Из архива"
+    } else {
+        "Давно не открывали"
     };
-
-    ui.label(RichText::new(format!("{} / {}", st.review_index + 1, st.review_cards.len())).color(theme::muted()));
-    ui.add_space(12.0);
-    ui.label(RichText::new(card.kind.label()).size(12.0).color(theme::link()));
-    ui.add_space(4.0);
-    if !card.title.is_empty() {
-        ui.label(RichText::new(card.title.clone()).font(theme::semibold(20.0)).color(theme::text()));
-        ui.add_space(8.0);
-    }
+    let age = match (now - card.created_at).max(0) / DAY {
+        0 => "записано сегодня".to_owned(),
+        n => format!("записано {n} {} назад", days_word(n)),
+    };
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(card.kind.label()).size(12.5).color(theme::link()));
+        ui.label(RichText::new(format!("{why} · {age}")).size(12.5).color(theme::muted()));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(RichText::new(format!("{} из {total}", done + 1)).size(12.5).color(theme::muted()));
+        });
+    });
+    ui.add_space(8.0);
     egui::Frame::NONE
         .fill(theme::wash(12))
         .corner_radius(CornerRadius::same(12))
         .inner_margin(egui::Margin::same(16))
         .show(ui, |ui| {
-            ui.set_min_height(150.0);
-            ui.label(RichText::new(card.body.clone()).size(17.0).color(theme::text()).line_height(Some(25.0)));
+            ui.set_width(ui.available_width());
+            // A long note scrolls; the actions below stay in view.
+            egui::ScrollArea::vertical()
+                .id_salt(("review-card", card.id))
+                .auto_shrink([false, true])
+                .max_height((ui.available_height() - 150.0).clamp(120.0, 340.0))
+                .show(ui, |ui| {
+                    if !card.title.is_empty() {
+                        ui.label(RichText::new(&card.title).font(theme::semibold(19.0)).color(theme::text()));
+                        ui.add_space(6.0);
+                    }
+                    ui.label(RichText::new(&card.body).size(16.0).color(theme::text()).line_height(Some(24.0)));
+                });
         });
-    ui.add_space(12.0);
-    let age = days_ago(card.created_at);
-    let reason = if card.review_at.is_some_and(|at| at <= std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)) {
-        "Напоминание"
-    } else if age == 0 {
-        "Недавняя карточка"
-    } else {
-        "Давно не открывали"
-    };
-    ui.label(RichText::new(format!("{reason} · {age} дн. назад")).color(theme::muted()));
-    if let Some(notice) = &st.review_notice {
-        ui.label(RichText::new(notice).color(theme::link()));
-    }
-    ui.add_space(20.0);
+    ui.add_space(16.0);
 
     let mut action = None;
     ui.horizontal_wrapped(|ui| {
-        if ui.button("← Оставить").clicked() { action = Some("keep"); }
-        if ui.button("→ В архив").clicked() { action = Some("archive"); }
-        if ui.button("↓ Позже").clicked() { action = Some("snooze"); }
-        if ui.button("↑ Закрепить").clicked() { action = Some("pin"); }
-        if ui.button("В корзину").clicked() { action = Some("trash"); }
-        if ui.button("Сделать целью").clicked() { action = Some("goal"); }
+        for (label, a, _) in REVIEW_ACTIONS {
+            if ui.button(label).clicked() {
+                action = Some(a);
+            }
+        }
     });
-    ui.add_space(12.0);
-    ui.label(RichText::new("← оставить · → архив · ↓ позже · ↑ закрепить · G цель · Delete корзина · Ctrl+Z отмена").size(11.0).color(theme::dim()));
+    ui.add_space(10.0);
+    let hint = "«Оставить» не спросит о карточке 8 недель, «Позже» — 2 недели · Ctrl+Z — отменить";
+    ui.label(RichText::new(hint).size(11.5).color(theme::dim()));
     if let Some(action) = action {
         review_apply(st, action);
     }

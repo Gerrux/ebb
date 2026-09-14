@@ -5,31 +5,30 @@ use std::path::PathBuf;
 use egui::{pos2, vec2};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::card::{Card, DEFAULT_SIZE, Kind, Parsed, Placement, Tint};
+use crate::card::{Card, DEFAULT_SIZE, Kind, Parsed, Placement, Tint, private_parts, private_text};
+use crate::resurface::DAY;
+
+/// Local day number of the last Rediscover pick.
+const SET_REDISCOVER_DAY: &str = "rediscover_day";
 
 fn vault_error(error: windows::core::Error) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error.to_string())))
 }
 
-/// Split a legacy/plain Private card into its visible label and protected value.
-fn private_parts(title: &str, body: &str) -> (String, String) {
-    if !title.trim().is_empty() {
-        return (title.trim().to_owned(), body.to_owned());
-    }
-    match body.trim().split_once('\n') {
-        Some((label, secret)) if !label.trim().is_empty() && !secret.trim().is_empty() => {
-            (label.trim().to_owned(), secret.trim_start().to_owned())
-        }
-        _ => ("Private".to_owned(), body.to_owned()),
-    }
-}
-
+/// Encrypts Private cards still stored in the open, and hides labels that look
+/// like the secret itself (an early build kept any first line as the label).
 fn migrate_private_cards(conn: &Connection) -> rusqlite::Result<()> {
-    let mut stmt = conn.prepare("SELECT id, title, body FROM cards WHERE kind='private' AND secret IS NULL")?;
-    let rows: Vec<(i64, String, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+    let mut stmt = conn.prepare("SELECT id, title, body, secret FROM cards WHERE kind='private'")?;
+    let rows: Vec<(i64, String, String, Option<Vec<u8>>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
+    let rows: Vec<_> = rows
+        .into_iter()
+        .filter(|(_, title, _, secret)| {
+            secret.is_none() || (title != crate::card::PRIVATE_PLACEHOLDER && !crate::card::fits_label(title))
+        })
+        .collect();
     if rows.is_empty() {
         return Ok(());
     }
@@ -37,12 +36,20 @@ fn migrate_private_cards(conn: &Connection) -> rusqlite::Result<()> {
     // Secure deletion plus a checkpoint/VACUUM makes this one-way migration
     // remove those plaintext copies before the database is used normally again.
     conn.execute_batch("PRAGMA secure_delete=ON;")?;
-    for (id, title, body) in rows {
+    for (id, title, body, secret) in rows {
+        let body = match secret {
+            // Not this Windows user's: leave it be rather than fail to open.
+            Some(bytes) => match crate::vault::unprotect(id, &bytes) {
+                Ok(text) => text,
+                Err(_) => continue,
+            },
+            None => body,
+        };
         let (label, secret) = private_parts(&title, &body);
         let encrypted = crate::vault::protect(id, &secret).map_err(vault_error)?;
         conn.execute("UPDATE cards SET title=?2, body='', secret=?3 WHERE id=?1", params![id, label, encrypted])?;
     }
-    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA secure_delete=OFF;")?;
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA secure_delete=FAST;")?;
     Ok(())
 }
 
@@ -88,6 +95,31 @@ pub struct Hit {
     pub deleted_at: Option<i64>,
 }
 
+/// What the weekly review does with a card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewAction {
+    Keep,
+    Archive,
+    Snooze,
+    Pin,
+    Trash,
+    Goal,
+}
+
+impl ReviewAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Keep => "keep",
+            Self::Archive => "archive",
+            Self::Snooze => "snooze",
+            Self::Pin => "pin",
+            Self::Trash => "trash",
+            Self::Goal => "goal",
+        }
+    }
+}
+
+/// A card's state before a review action, for undo.
 #[derive(Clone, Debug)]
 pub struct ReviewSnapshot {
     pub id: i64,
@@ -98,6 +130,7 @@ pub struct ReviewSnapshot {
     pub review_at: Option<i64>,
     pub ignored_count: i64,
     pub deleted_at: Option<i64>,
+    pub last_viewed_at: i64,
 }
 
 /// Row of the live card projection used by the layer.
@@ -168,6 +201,8 @@ impl Store {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
+             -- Text a card turned Private leaves behind is zeroed where that's free.
+             PRAGMA secure_delete = FAST;
              CREATE TABLE IF NOT EXISTS cards (
                  id INTEGER PRIMARY KEY,
                  kind TEXT NOT NULL,
@@ -261,6 +296,8 @@ impl Store {
             ("resurface_count", "INTEGER NOT NULL DEFAULT 0"),
             ("ignored_count", "INTEGER NOT NULL DEFAULT 0"),
             ("priority", "INTEGER NOT NULL DEFAULT 0"),
+            // Stacking order on the layer: higher is drawn above.
+            ("z", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             let exists: bool = conn.query_row(
                 "SELECT count(*) FROM pragma_table_info('cards') WHERE name=?1",
@@ -401,16 +438,42 @@ impl Store {
         row.map(|bytes| crate::vault::unprotect(id, &bytes).map_err(vault_error)).transpose()
     }
 
+    /// Puts a card above every other on the layer, for the next launch too.
+    pub fn raise(&self, id: i64) -> rusqlite::Result<()> {
+        self.conn.execute("UPDATE cards SET z=(SELECT coalesce(max(z), 0) + 1 FROM cards) WHERE id=?1", [id])?;
+        Ok(())
+    }
+
     /// Records that the user looked at a card (input for resurfacing).
     pub fn touch(&self, id: i64) -> rusqlite::Result<()> {
         self.conn.execute("UPDATE cards SET last_viewed_at=?2 WHERE id=?1", params![id, now()])?;
         Ok(())
     }
 
-    /// Selects a stable daily set of archived notes and puts it back on the layer.
-    /// The operation only changes placement metadata; it never rewrites note text.
-    pub fn refresh_resurfacing(&self, at: i64, limit: usize) -> rusqlite::Result<Vec<crate::resurface::Pick>> {
-        let mut stmt = self.conn.prepare(
+    /// Once a local day (`utc_offset` in seconds), takes yesterday's Rediscover
+    /// cards that got no reaction back to the archive and brings up to `limit`
+    /// forgotten ones onto the layer. A restart the same day changes nothing.
+    /// Only placement metadata changes; note text is never rewritten.
+    pub fn refresh_resurfacing(&self, at: i64, utc_offset: i64, limit: usize) -> rusqlite::Result<Vec<crate::resurface::Pick>> {
+        let day = (at + utc_offset).div_euclid(DAY);
+        if self.setting(SET_REDISCOVER_DAY).and_then(|v| v.parse::<i64>().ok()) == Some(day) {
+            return Ok(Vec::new());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        // Opened since it came back: it stays, as if placed by hand. Either way a
+        // reminder that brought it has been shown and doesn't bring it again.
+        tx.execute(
+            "UPDATE cards SET placement='manual', review_at=CASE WHEN review_at <= ?1 THEN NULL ELSE review_at END
+             WHERE placement='rediscover' AND archived=0 AND last_viewed_at >= last_resurfaced_at",
+            [at],
+        )?;
+        tx.execute(
+            "UPDATE cards SET archived=1, placement='archive', ignored_count=ignored_count+1,
+                 review_at=CASE WHEN review_at <= ?1 THEN NULL ELSE review_at END
+             WHERE placement='rediscover' AND archived=0 AND deleted_at IS NULL",
+            [at],
+        )?;
+        let mut stmt = tx.prepare(
             "SELECT id, kind, created_at, last_viewed_at, review_at, last_resurfaced_at,
                     ignored_count, priority, pinned, archived, deleted_at
              FROM cards WHERE archived=1 AND deleted_at IS NULL",
@@ -432,14 +495,20 @@ impl Store {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
         let picks = crate::resurface::candidates(at, &candidates, limit);
         for pick in &picks {
-            self.conn.execute(
+            tx.execute(
                 "UPDATE cards SET archived=0, placement='rediscover', last_resurfaced_at=?2,
                  resurface_count=resurface_count+1 WHERE id=?1",
                 params![pick.id, at],
             )?;
         }
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![SET_REDISCOVER_DAY, day.to_string()],
+        )?;
+        tx.commit()?;
         Ok(picks)
     }
 
@@ -453,7 +522,7 @@ impl Store {
              ORDER BY archived DESC, (review_at IS NOT NULL AND review_at <= ?1) DESC, ignored_count DESC, last_viewed_at ASC
              LIMIT ?3",
         )?;
-        stmt.query_map(params![at, 30 * crate::resurface::DAY, limit as i64], card_row)?.collect()
+        stmt.query_map(params![at, 30 * DAY, limit as i64], card_row)?.collect()
     }
 
     pub fn begin_review(&self, at: i64) -> rusqlite::Result<i64> {
@@ -461,11 +530,17 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
-    pub fn record_review_item(&self, review_id: i64, card_id: i64, action: &str, at: i64) -> rusqlite::Result<()> {
+    pub fn record_review_item(&self, review_id: i64, card_id: i64, action: ReviewAction, at: i64) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO review_items (review_id, card_id, action, at) VALUES (?1, ?2, ?3, ?4)",
-            params![review_id, card_id, action, at],
+            params![review_id, card_id, action.as_str(), at],
         )?;
+        Ok(())
+    }
+
+    /// An undone review action no longer counts.
+    pub fn forget_review_item(&self, review_id: i64, card_id: i64) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM review_items WHERE review_id=?1 AND card_id=?2", params![review_id, card_id])?;
         Ok(())
     }
 
@@ -483,9 +558,10 @@ impl Store {
         Ok(())
     }
 
-    pub fn review_action(&self, id: i64, action: &str) -> rusqlite::Result<ReviewSnapshot> {
+    pub fn review_action(&self, id: i64, action: ReviewAction) -> rusqlite::Result<ReviewSnapshot> {
         let snapshot = self.conn.query_row(
-            "SELECT id, kind, archived, pinned, placement, review_at, ignored_count, deleted_at FROM cards WHERE id=?1",
+            "SELECT id, kind, archived, pinned, placement, review_at, ignored_count, deleted_at, last_viewed_at
+             FROM cards WHERE id=?1",
             [id],
             |r| {
                 Ok(ReviewSnapshot {
@@ -497,43 +573,45 @@ impl Store {
                     review_at: r.get(5)?,
                     ignored_count: r.get(6)?,
                     deleted_at: r.get(7)?,
+                    last_viewed_at: r.get(8)?,
                 })
             },
         )?;
         let t = now();
         match action {
-            "keep" => {
+            ReviewAction::Keep => {
                 let placement = if snapshot.archived { Placement::Archive } else { Placement::Manual };
                 self.conn.execute(
                     "UPDATE cards SET review_at=?2, ignored_count=0, placement=?3, last_viewed_at=?4 WHERE id=?1",
-                    params![id, t + 56 * crate::resurface::DAY, placement.as_str(), t],
+                    params![id, t + 56 * DAY, placement.as_str(), t],
                 )?;
             }
-            "archive" => {
+            ReviewAction::Archive => {
                 self.conn.execute(
                     "UPDATE cards SET archived=1, placement='archive', review_at=?2, last_viewed_at=?3 WHERE id=?1",
-                    params![id, t + 56 * crate::resurface::DAY, t],
+                    params![id, t + 56 * DAY, t],
                 )?;
             }
-            "snooze" => {
+            ReviewAction::Snooze => {
                 self.conn.execute(
                     "UPDATE cards SET review_at=?2, ignored_count=ignored_count+1, last_viewed_at=?3 WHERE id=?1",
-                    params![id, t + 14 * crate::resurface::DAY, t],
+                    params![id, t + 14 * DAY, t],
                 )?;
             }
-            "pin" => {
-                self.conn.execute("UPDATE cards SET pinned=1, archived=0, placement='pinned', last_viewed_at=?2 WHERE id=?1", params![id, t])?;
-            }
-            "trash" => {
-                self.conn.execute("UPDATE cards SET deleted_at=?2 WHERE id=?1", params![id, t])?;
-            }
-            "goal" => {
+            ReviewAction::Pin => {
                 self.conn.execute(
-                    "UPDATE cards SET kind='goal', archived=0, pinned=0, placement='manual', review_at=NULL, last_viewed_at=?2 WHERE id=?1",
+                    "UPDATE cards SET pinned=1, archived=0, placement='pinned', last_viewed_at=?2 WHERE id=?1",
                     params![id, t],
                 )?;
             }
-            _ => {}
+            ReviewAction::Trash => self.delete(id)?,
+            ReviewAction::Goal => {
+                self.conn.execute(
+                    "UPDATE cards SET kind='goal', archived=0, pinned=0, placement='manual', review_at=NULL, last_viewed_at=?2
+                     WHERE id=?1",
+                    params![id, t],
+                )?;
+            }
         }
         Ok(snapshot)
     }
@@ -541,7 +619,7 @@ impl Store {
     pub fn undo_review(&self, snapshot: &ReviewSnapshot) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE cards SET kind=?2, archived=?3, pinned=?4, placement=?5, review_at=?6,
-             ignored_count=?7, deleted_at=?8 WHERE id=?1",
+             ignored_count=?7, deleted_at=?8, last_viewed_at=?9 WHERE id=?1",
             params![
                 snapshot.id,
                 snapshot.kind.as_str(),
@@ -551,6 +629,7 @@ impl Store {
                 snapshot.review_at,
                 snapshot.ignored_count,
                 snapshot.deleted_at,
+                snapshot.last_viewed_at,
             ],
         )?;
         Ok(())
@@ -655,9 +734,9 @@ impl Store {
                 ])?;
                 let id = tx.last_insert_rowid();
                 if n.kind == Kind::Private {
-                    let (_, secret) = private_parts(&n.title, &n.body);
+                    let (label, secret) = private_parts(&n.title, &n.body);
                     let encrypted = crate::vault::protect(id, &secret).map_err(vault_error)?;
-                    protect.execute(params![id, private_parts(&n.title, &n.body).0, encrypted])?;
+                    protect.execute(params![id, label, encrypted])?;
                 }
                 link.execute(params![format!("{prefix}{}", n.source_id), id, batch])?;
             }
@@ -678,7 +757,7 @@ impl Store {
     pub fn load(&self) -> rusqlite::Result<Vec<Card>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint, placement, review_at
-             FROM cards WHERE archived = 0 AND deleted_at IS NULL ORDER BY updated_at",
+             FROM cards WHERE archived = 0 AND deleted_at IS NULL ORDER BY z, updated_at",
         )?;
         let rows = stmt.query_map([], card_row)?;
         rows.collect()
@@ -693,8 +772,8 @@ impl Store {
             (p.title.clone(), p.body.clone())
         };
         self.conn.execute(
-            "INSERT INTO cards (kind, title, body, tags, x, y, w, h, created_at, updated_at, last_viewed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?9)",
+            "INSERT INTO cards (kind, title, body, tags, x, y, w, h, created_at, updated_at, last_viewed_at, z)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?9, (SELECT coalesce(max(z), 0) + 1 FROM cards))",
             params![
                 p.kind.as_str(),
                 title,
@@ -713,10 +792,12 @@ impl Store {
             let encrypted = crate::vault::protect(id, &secret).map_err(vault_error)?;
             self.conn.execute("UPDATE cards SET secret=?2 WHERE id=?1", params![id, encrypted])?;
         }
-        if p.kind == Kind::Reminder {
-            if let Some(review_at) = crate::resurface::review_at_from_text(&p.body, t) {
-                self.conn.execute("UPDATE cards SET review_at=?2 WHERE id=?1", params![id, review_at])?;
-            }
+        let review_at = (p.kind == Kind::Reminder)
+            .then(|| crate::resurface::review_at_from_text(&format!("{}
+{}", p.title, p.body), t))
+            .flatten();
+        if let Some(review_at) = review_at {
+            self.conn.execute("UPDATE cards SET review_at=?2 WHERE id=?1", params![id, review_at])?;
         }
         Ok(Card {
             id,
@@ -729,7 +810,7 @@ impl Store {
             pos,
             size: DEFAULT_SIZE,
             created_at: t,
-            review_at: (p.kind == Kind::Reminder).then(|| crate::resurface::review_at_from_text(&p.body, t)).flatten(),
+            review_at,
             placement: Placement::Manual,
             tint: None,
         })
@@ -783,10 +864,11 @@ impl Store {
         let old_kind = Kind::parse(&old_kind);
         match (old_kind, kind) {
             (Kind::Private, new) if new != Kind::Private => {
-                let secret = self.secret(id)?.unwrap_or_default();
+                // The label comes back as the first line: nothing the note had is lost.
+                let text = private_text(&title, &self.secret(id)?.unwrap_or_default());
                 self.conn.execute(
                     "UPDATE cards SET kind=?2, title='', body=?3, secret=NULL, updated_at=?4 WHERE id=?1",
-                    params![id, new.as_str(), secret, now()],
+                    params![id, new.as_str(), text, now()],
                 )?;
             }
             (old, Kind::Private) if old != Kind::Private => {
@@ -953,19 +1035,90 @@ mod tests {
     }
 
     #[test]
-    fn refresh_puts_an_old_archived_idea_back_on_the_layer() {
+    fn refresh_puts_an_old_archived_idea_back_on_the_layer_once_a_day() {
         let (store, dir) = temp_store("resurface");
-        let idea = add(&store, "идея: annual pricing");
-        let private = add(&store, "секрет: Wi-Fi\nsecret");
-        store.set_archived(idea.id, true).unwrap();
-        store.set_archived(private.id, true).unwrap();
-        store.conn.execute("UPDATE cards SET created_at=1, last_viewed_at=1 WHERE id IN (?1, ?2)", params![idea.id, private.id]).unwrap();
+        let ideas: Vec<Card> = (0..4).map(|i| add(&store, &format!("идея: annual pricing {i}"))).collect();
+        let private = add(&store, "секрет: Wi-Fi
+secret");
+        for c in ideas.iter().chain([&private]) {
+            store.set_archived(c.id, true).unwrap();
+        }
+        store.conn.execute("UPDATE cards SET created_at=1, last_viewed_at=1", []).unwrap();
 
-        let picks = store.refresh_resurfacing(100 * crate::resurface::DAY, 3).unwrap();
-        assert_eq!(picks.iter().map(|p| p.id).collect::<Vec<_>>(), vec![idea.id]);
-        let resurfaced = store.card(idea.id).unwrap().unwrap();
-        assert_eq!(resurfaced.placement, Placement::Rediscover);
+        let day = 100 * DAY;
+        let picks = store.refresh_resurfacing(day, 0, 3).unwrap();
+        let picked: Vec<i64> = picks.iter().map(|p| p.id).collect();
+        assert_eq!(picked, ideas[..3].iter().map(|c| c.id).collect::<Vec<_>>());
+        assert_eq!(store.card(ideas[0].id).unwrap().unwrap().placement, Placement::Rediscover);
         assert_eq!(store.card(private.id).unwrap().unwrap().placement, Placement::Archive);
+
+        // A restart the same day neither changes nor grows the set.
+        assert!(store.refresh_resurfacing(day + 3_600, 0, 3).unwrap().is_empty());
+        assert_eq!(store.load().unwrap().len(), 3);
+
+        // Next day: the one that was opened stays, the ignored ones go back, and
+        // the one left over comes up; the rest wait out their cooldown.
+        store.conn.execute("UPDATE cards SET last_viewed_at=?2 WHERE id=?1", params![ideas[0].id, day + 60]).unwrap();
+        let picks = store.refresh_resurfacing(day + DAY, 0, 3).unwrap();
+        assert_eq!(picks.iter().map(|p| p.id).collect::<Vec<_>>(), vec![ideas[3].id]);
+        let mut live: Vec<(i64, &str)> = store.load().unwrap().iter().map(|c| (c.id, c.placement.as_str())).collect();
+        live.sort();
+        assert_eq!(live, [(ideas[0].id, "manual"), (ideas[3].id, "rediscover")]);
+        let ignored: i64 = store.conn.query_row("SELECT ignored_count FROM cards WHERE id=?1", [ideas[1].id], |r| r.get(0)).unwrap();
+        assert_eq!(ignored, 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn raised_cards_load_on_top() {
+        let (store, dir) = temp_store("z-order");
+        let ids: Vec<i64> = ["a", "b", "c"].iter().map(|t| add(&store, t).id).collect();
+        assert_eq!(store.load().unwrap().iter().map(|c| c.id).collect::<Vec<_>>(), ids);
+        store.raise(ids[0]).unwrap();
+        assert_eq!(store.load().unwrap().iter().map(|c| c.id).collect::<Vec<_>>(), [ids[1], ids[2], ids[0]]);
+        // A new card starts above the raised one.
+        let d = add(&store, "d").id;
+        assert_eq!(store.load().unwrap().last().map(|c| c.id), Some(d));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn labels_that_look_like_secrets_are_hidden_on_open() {
+        let (store, dir) = temp_store("relabel");
+        let card = add(&store, "note");
+        let path = store.conn.path().unwrap().to_owned();
+        // As an early build left it: the credential line as the open label.
+        let encrypted = crate::vault::protect(card.id, "rest").unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE cards SET kind='private', title='API_KEY=abc123', body='', secret=?2 WHERE id=?1",
+                params![card.id, encrypted],
+            )
+            .unwrap();
+        drop(store);
+        let store = Store::open_at(PathBuf::from(path)).unwrap();
+        let hidden = store.card(card.id).unwrap().unwrap();
+        assert_eq!(hidden.title, crate::card::PRIVATE_PLACEHOLDER);
+        assert_eq!(store.secret(card.id).unwrap().as_deref(), Some("API_KEY=abc123\nrest"));
+        assert!(find(&store, "abc123").is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn private_kind_round_trip_keeps_label_and_value() {
+        let (store, dir) = temp_store("private-kind");
+        let card = add(&store, "Wi-Fi офис
+guest / pass");
+        store.set_kind(card.id, Kind::Private).unwrap();
+        let hidden = store.card(card.id).unwrap().unwrap();
+        assert_eq!((hidden.title.as_str(), hidden.body.as_str()), ("Wi-Fi офис", ""));
+        assert_eq!(store.secret(card.id).unwrap().as_deref(), Some("guest / pass"));
+        store.set_kind(card.id, Kind::Note).unwrap();
+        let open = store.card(card.id).unwrap().unwrap();
+        assert_eq!(open.body, "Wi-Fi офис
+guest / pass");
+        assert!(store.secret(card.id).unwrap().is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -978,21 +1131,30 @@ mod tests {
         assert_eq!(queue.iter().map(|c| c.id).collect::<Vec<_>>(), vec![card.id]);
 
         let review_id = store.begin_review(now()).unwrap();
-        let snapshot = store.review_action(card.id, "snooze").unwrap();
-        store.record_review_item(review_id, card.id, "snooze", now()).unwrap();
+        let snapshot = store.review_action(card.id, ReviewAction::Snooze).unwrap();
+        store.record_review_item(review_id, card.id, ReviewAction::Snooze, now()).unwrap();
         let snoozed = store.card(card.id).unwrap().unwrap();
         assert!(snoozed.review_at.is_some());
         assert_eq!(snoozed.placement, Placement::Archive);
 
         store.undo_review(&snapshot).unwrap();
+        store.forget_review_item(review_id, card.id).unwrap();
         let restored = store.card(card.id).unwrap().unwrap();
         assert!(restored.review_at.is_none());
         assert!(restored.archived);
-        store.review_action(card.id, "keep").unwrap();
+        store.review_action(card.id, ReviewAction::Keep).unwrap();
+        store.record_review_item(review_id, card.id, ReviewAction::Keep, now()).unwrap();
         assert!(store.review_queue(now(), 15).unwrap().is_empty());
         store.finish_review(review_id, now()).unwrap();
-        let logged: i64 = store.conn.query_row("SELECT count(*) FROM review_items WHERE review_id=?1", [review_id], |r| r.get(0)).unwrap();
-        assert_eq!(logged, 1);
+        let (kept, snoozed): (i64, i64) =
+            store.conn.query_row("SELECT kept, snoozed FROM reviews WHERE id=?1", [review_id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((kept, snoozed), (1, 0));
+
+        // Trash from the review goes through the trash, and undo brings it back.
+        let snapshot = store.review_action(card.id, ReviewAction::Trash).unwrap();
+        assert_eq!(store.counts().unwrap().2, 1);
+        store.undo_review(&snapshot).unwrap();
+        assert_eq!(store.counts().unwrap().2, 0);
         let _ = std::fs::remove_dir_all(dir);
     }
 

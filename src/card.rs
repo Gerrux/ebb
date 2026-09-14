@@ -440,19 +440,9 @@ impl Card {
         self.tint.map_or(self.kind.accent(), Tint::color)
     }
 
+    /// The caption of a card brought back from the archive.
     pub fn resurface_reason(&self, now: i64) -> Option<String> {
-        if self.placement != Placement::Rediscover {
-            return None;
-        }
-        if self.review_at.is_some_and(|at| at <= now) {
-            return Some("Напоминание на сегодня".to_owned());
-        }
-        let days = (now - self.created_at).max(0) / 86_400;
-        Some(if days == 0 {
-            "Давно не открывал".to_owned()
-        } else {
-            format!("Ты записал это {days} дн. назад")
-        })
+        (self.placement == Placement::Rediscover).then(|| crate::resurface::reason(now, self.created_at, self.review_at))
     }
 }
 
@@ -535,9 +525,64 @@ pub fn private_label(title: &str, body: &str) -> Option<String> {
         return Some(title.to_owned());
     }
     let mut lines = body.lines().map(str::trim).filter(|l| !l.is_empty());
-    let first = lines.next()?;
+    let first = lines.next().filter(|l| fits_label(l))?;
     lines.next()?;
-    Some(first.chars().take(60).collect())
+    Some(first.to_owned())
+}
+
+/// The label of a Private card that has nothing to show.
+pub const PRIVATE_PLACEHOLDER: &str = "Private";
+
+/// Splits a Private note into the label that stays in the open and the value
+/// that is encrypted: the title, else the first line when more lines follow.
+/// A lone line may be the secret itself, so it's all value.
+pub fn private_parts(title: &str, body: &str) -> (String, String) {
+    let title = title.trim();
+    if !title.is_empty() {
+        return if fits_label(title) {
+            (title.to_owned(), body.to_owned())
+        } else {
+            (PRIVATE_PLACEHOLDER.to_owned(), private_text(title, body))
+        };
+    }
+    match body.trim().split_once('\n') {
+        Some((label, secret)) if fits_label(label.trim()) && !secret.trim().is_empty() => {
+            (label.trim().to_owned(), secret.trim_start().to_owned())
+        }
+        _ => (PRIVATE_PLACEHOLDER.to_owned(), body.to_owned()),
+    }
+}
+
+/// Whether a line may stay in the open as a Private card's label: short, and
+/// nothing like a credential — no assignments, keys, long tokens or addresses.
+/// Errs on the side of hiding; a hidden label only costs the card its name.
+pub fn fits_label(line: &str) -> bool {
+    const SECRETS: &[&str] = &["pass", "парол", "token", "токен", "secret", "секрет", "key", "ключ", "begin", "root@", "ssh-"];
+    let lower = line.to_lowercase();
+    let token_like = |w: &str| {
+        w.chars().count() >= 16 && w.chars().any(|c| c.is_ascii_digit()) && w.chars().any(char::is_alphabetic)
+    };
+    let ip_like = |w: &str| {
+        let parts: Vec<&str> = w.trim_matches(|c: char| !c.is_ascii_digit()).split('.').collect();
+        parts.len() == 4 && parts.iter().all(|p| !p.is_empty() && p.len() <= 3 && p.chars().all(|c| c.is_ascii_digit()))
+    };
+    !line.is_empty()
+        && line.chars().count() <= 60
+        && !line.contains('=')
+        && !SECRETS.iter().any(|s| lower.contains(s))
+        && !line.split_whitespace().any(|w| token_like(w) || ip_like(w))
+}
+
+/// The note as written, back from its label and value: what the editor opens
+/// with, and what a card turned from Private into another kind keeps.
+pub fn private_text(label: &str, secret: &str) -> String {
+    // Without a label of its own, a multi-line value keeps the placeholder as
+    // its first line, so saving it again doesn't lay that line open.
+    if label == PRIVATE_PLACEHOLDER && !secret.trim().contains('\n') {
+        secret.to_owned()
+    } else {
+        format!("{label}\n{secret}")
+    }
 }
 
 pub const MIN_SIZE: Vec2 = vec2(200.0, 96.0);
@@ -647,7 +692,12 @@ pub fn free_slot(cards: &[Card], area: Vec2) -> Pos2 {
             }
         }
     }
-    origin + vec2(24.0, 24.0) * (cards.len() % 10) as f32
+    // A full layer: a cascade, each card a step past the last one placed there,
+    // so several cards placed in a row don't hide one another.
+    (0..10)
+        .map(|k| origin + vec2(24.0, 24.0) * k as f32)
+        .find(|p| !cards.iter().any(|c| !c.archived && c.pos == *p))
+        .unwrap_or(origin)
 }
 
 /// Where a copy of `of` goes: right against it, else below, left or above, the
@@ -999,6 +1049,47 @@ mod tests {
         assert_eq!(private_label("", "Wi-Fi офис\nguest / pass").as_deref(), Some("Wi-Fi офис"));
         assert_eq!(private_label("", "hunter2"), None);
         assert_eq!(private_label("Title", "x").as_deref(), Some("Title"));
+    }
+
+    #[test]
+    fn free_slot_on_a_full_layer_cascades() {
+        let area = vec2(400.0, 300.0);
+        let mut cards = vec![card_at(1, 0.0, 0.0)];
+        cards[0].size = area;
+        let first = free_slot(&cards, area);
+        cards.push(card_at(2, first.x, first.y));
+        let second = free_slot(&cards, area);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn labels_that_look_like_credentials_stay_hidden() {
+        for ok in ["Wi-Fi офис", "ALL MY SSH", "host: nl-home", "Домашнее задание на 3 декабря:"] {
+            assert!(fits_label(ok), "{ok}");
+        }
+        for secret in [
+            "$env:DB_PASSWORD='x'",
+            "ssh root@10.0.0.1",
+            "IPv4: 85.31.45.44",
+            "-----BEGIN CERTIFICATE-----",
+            "export TAVILY_API_KEY",
+            "sk-52f6ed63b1a4f789ffd",
+            "пароль от роутера",
+        ] {
+            assert!(!fits_label(secret), "{secret}");
+        }
+        assert_eq!(private_parts("", "ssh root@10.0.0.1\npass").0, PRIVATE_PLACEHOLDER);
+        assert_eq!(private_label("", "token=abc\nmore"), None);
+    }
+
+    #[test]
+    fn private_parts_round_trip_through_the_editor() {
+        for text in ["Wi-Fi офис\nguest / pass", "hunter2", "Private\nline one\nline two"] {
+            let (label, secret) = private_parts("", text);
+            assert_eq!(private_parts("", &private_text(&label, &secret)), (label, secret), "{text}");
+        }
+        assert_eq!(private_parts("", "hunter2"), (PRIVATE_PLACEHOLDER.to_owned(), "hunter2".to_owned()));
+        assert_eq!(private_text("Wi-Fi", "pass"), "Wi-Fi\npass");
     }
 
     #[test]

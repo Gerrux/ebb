@@ -316,15 +316,17 @@ fn perform(ui: &Ui, st: &mut BarState, kind: ActionKind) -> bool {
         }
         ActionKind::Copy => {
             if let Ok(Some(card)) = store.card(hit.id) {
-                if card.kind == Kind::Private {
-                    if let Ok(Some(secret)) = store.secret(card.id) {
-                        let _ = win::copy_private(&secret);
+                let notice = if card.kind == Kind::Private {
+                    match store.secret(card.id) {
+                        Ok(Some(secret)) if win::copy_private(&secret) => "Скопировано, очистится через 30 с",
+                        _ => "Не удалось скопировать",
                     }
                 } else {
                     let text = if card.title.is_empty() { card.body } else { format!("{}\n{}", card.title, card.body) };
                     ui.ctx().copy_text(text);
-                }
-                st.notice = Some(("Скопировано".into(), Instant::now()));
+                    "Скопировано"
+                };
+                st.notice = Some((notice.into(), Instant::now()));
             }
         }
         ActionKind::Pin => {

@@ -61,7 +61,13 @@ fn main() -> eframe::Result {
 
     store::migrate_legacy_data();
     let store = Store::open().expect("open database");
-    let _ = store.refresh_resurfacing(resurface::unix_now(), 3);
+    let fresh = match store.refresh_resurfacing(resurface::unix_now(), search::local_offset_secs(), resurface::REDISCOVER_LIMIT) {
+        Ok(picks) => picks.into_iter().map(|p| p.id).collect(),
+        Err(e) => {
+            eprintln!("resurfacing failed: {e}");
+            Vec::new()
+        }
+    };
     let cards = store.load().expect("load cards");
 
     let mut options = eframe::NativeOptions {
@@ -83,6 +89,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Ebb",
         options,
-        Box::new(move |cc| Ok(Box::new(app::EbbApp::new(cc, store, cards, main_started, autostarted)))),
+        Box::new(move |cc| Ok(Box::new(app::EbbApp::new(cc, store, cards, fresh, main_started, autostarted)))),
     )
 }
