@@ -904,6 +904,20 @@ impl Store {
 
     /// Folds a card to one line on the layer, or opens it. Layout only: the note
     /// doesn't count as changed.
+    /// How many live cards carry each tag, the most used first (then by name).
+    pub fn tag_counts(&self) -> rusqlite::Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare("SELECT tags FROM cards WHERE deleted_at IS NULL AND tags != ''")?;
+        let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for tags in stmt.query_map([], |r| r.get::<_, String>(0))? {
+            for tag in tags?.split(',').filter(|t| !t.is_empty()) {
+                *counts.entry(tag.to_owned()).or_default() += 1;
+            }
+        }
+        let mut counts: Vec<(String, i64)> = counts.into_iter().collect();
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(counts)
+    }
+
     pub fn set_collapsed(&self, id: i64, collapsed: bool) -> rusqlite::Result<()> {
         self.conn.execute("UPDATE cards SET collapsed=?2 WHERE id=?1", params![id, collapsed])?;
         Ok(())
@@ -1271,6 +1285,17 @@ secret");
         // A later save of the card (a drag) leaves it collapsed.
         store.save(&loaded[0]).unwrap();
         assert!(store.card(card.id).unwrap().unwrap().collapsed);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tag_counts_skip_the_trash() {
+        let (store, dir) = temp_store("tag-counts");
+        add(&store, "#дом #еда");
+        add(&store, "#дом");
+        let gone = add(&store, "#еда #работа");
+        store.delete(gone.id).unwrap();
+        assert_eq!(store.tag_counts().unwrap(), [("дом".to_owned(), 2), ("еда".to_owned(), 1)]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

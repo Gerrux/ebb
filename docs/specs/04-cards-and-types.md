@@ -12,6 +12,13 @@
 всегда, когда задан, иначе — «Статус» при наведении; клик открывает меню. Хранится в `cards.meta`
 (JSON через функции SQLite `json_set`/`json_extract`, без serde_json) и переживает смену типа.
 «Важно» считается высоким приоритетом в Rediscover.
+Теги: текст остаётся источником правды. При наведении чип тега с × убирает его `#слова` из текста
+(стили остального сохраняются, опустевшая строка уходит; тост с отменой), «+» открывает поле:
+Enter добавляет набранный тег, ниже — до 6 самых частых тегов по набранному началу. Тег
+дописывается в последнюю строку, если она из одних тегов, иначе отдельной строкой. Частоты —
+`Store::tag_counts` по живым карточкам, кешируются до следующего изменения текста (вместо
+производной таблицы `tags`). У Private теги чипами не правятся. Не поместившиеся в подвал теги
+по-прежнему не видны.
 
 ## Зачем
 
@@ -55,7 +62,7 @@ product.txt §3, §4, §14, §18. Сейчас тип определяется �
 ALTER TABLE cards ADD COLUMN meta TEXT NOT NULL DEFAULT '{}';   -- JSON полей типа; сделано (idea_status)
 ALTER TABLE cards ADD COLUMN collapsed INTEGER NOT NULL DEFAULT 0;   -- сделано
 ALTER TABLE cards ADD COLUMN accent TEXT;                         -- переопределение цвета, NULL = по типу
-CREATE TABLE tags(name TEXT PRIMARY KEY, uses INTEGER NOT NULL);  -- для автодополнения, пересчёт триггером
+CREATE TABLE tags(name TEXT PRIMARY KEY, uses INTEGER NOT NULL);  -- не понадобилась: частоты считаются из cards.tags по запросу
 ```
 
 `meta` пример: `{"idea_status":"explore"}`, `{"goal":{"target":"…","deadline":1790000000,"status":"active","cadence":"week"}}`,

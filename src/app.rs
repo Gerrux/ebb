@@ -78,7 +78,7 @@ const SET_THEME: &str = "app.theme";
 /// (the taskbar does, on mouse down) counts as a click on the summoned layer.
 const TRAY_CLICK_AFTER_LOWER_MS: u64 = 500;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Undo {
     Unarchive(i64),
     Restore(i64),
@@ -86,6 +86,18 @@ enum Undo {
     Kind(i64, Kind),
     /// Back on the layer as it was before "Позже".
     Snooze(ReviewSnapshot),
+    /// A card's title and text as they were before a tag change.
+    Text(i64, String, String),
+}
+
+/// The field that adds a tag to a card, under its "+" chip.
+struct TagInput {
+    card: i64,
+    /// Where it hangs from (the "+" chip's bottom left), in screen points.
+    at: Pos2,
+    text: String,
+    focused: bool,
+    opened_pass: u64,
 }
 
 struct PromptFill {
@@ -139,6 +151,10 @@ enum Action {
     /// Fold the card to one line, or open it.
     ToggleCollapse,
     SetIdeaStatus(Option<card::IdeaStatus>),
+    /// Take the tag's `#words` out of the text.
+    RemoveTag(String),
+    /// Open the tag field, hanging from this point.
+    AddTag(Pos2),
     /// Off the layer for this many days.
     Snooze(i64),
     /// The first address in a Link card, in the browser.
@@ -202,6 +218,9 @@ pub struct EbbApp {
     toast: Option<Toast>,
     /// Copying a Prompt with `{{variables}}`: the values asked for before it's copied.
     prompt_fill: Option<PromptFill>,
+    tag_input: Option<TagInput>,
+    /// Tags by use, for suggestions; read when the tag field opens, dropped when text changes.
+    tag_counts: Option<Vec<(String, i64)>>,
     /// Cards that just arrived on the layer / just left it, for their animations.
     appearing: Vec<(i64, Instant)>,
     leaving: Vec<(Card, Instant)>,
@@ -319,6 +338,8 @@ impl EbbApp {
             highlighted: None,
             toast: None,
             prompt_fill: None,
+            tag_input: None,
+            tag_counts: None,
             appearing,
             leaving: Vec::new(),
             sticky: StickyImport::default(),
@@ -398,6 +419,7 @@ impl EbbApp {
         let inserted = self.store.insert(&parsed, pos);
         match self.report(inserted, "сохранить заметку, текст остался в окне захвата") {
             Some(c) => {
+                self.tag_counts = None;
                 self.appearing.push((c.id, Instant::now()));
                 self.cards.push(c);
             }
@@ -432,12 +454,8 @@ impl EbbApp {
         // Saved as written; an old separate title becomes the first line of the text.
         c.title.clear();
         // Tags come from the visible text: "**#idea**" is the tag "idea".
-        c.tags = rich_text::strip_markup(&buf)
-            .split_whitespace()
-            .filter_map(|w| w.strip_prefix('#'))
-            .map(|t| t.trim_end_matches([',', '.', ';']).to_lowercase())
-            .filter(|t| !t.is_empty())
-            .collect();
+        c.tags = card::tags_of(&rich_text::strip_markup(&buf));
+        self.tag_counts = None;
         c.body = buf;
         self.save(idx);
         if self.cards[idx].kind == Kind::Private && self.cards[idx].body.is_empty() {
@@ -454,6 +472,77 @@ impl EbbApp {
     }
 
     /// Closes the editor if it's this card's, saving what was typed.
+    /// Rewrites a card's text for a tag change; its tags follow from the text, as
+    /// after editing. The title and text it had, if the change was saved.
+    fn retag(&mut self, idx: usize, change: impl FnOnce(&str) -> String) -> Option<(String, String)> {
+        self.commit_edit_of(self.cards[idx].id);
+        let c = &mut self.cards[idx];
+        let old = (c.title.clone(), c.body.clone());
+        let text = if c.title.is_empty() { c.body.clone() } else { format!("{}\n{}", c.title, c.body) };
+        c.title.clear();
+        c.body = change(&text);
+        c.tags = card::tags_of(&rich_text::strip_markup(&c.body));
+        if !self.save(idx) {
+            let c = &mut self.cards[idx];
+            (c.title, c.body) = old;
+            c.tags = card::tags_of(&rich_text::strip_markup(&text));
+            return None;
+        }
+        self.tag_counts = None;
+        self.library.lock().unwrap().invalidate();
+        self.bar.lock().unwrap().invalidate();
+        Some(old)
+    }
+
+    /// The field under a card's "+" chip: type a tag and Enter, or pick one of
+    /// the most used; Esc or a click elsewhere closes it.
+    fn tag_input_ui(&mut self, ui: &mut Ui) {
+        let Some(input) = &mut self.tag_input else { return };
+        let Some(idx) = self.cards.iter().position(|c| c.id == input.card) else {
+            self.tag_input = None;
+            return;
+        };
+        if self.tag_counts.is_none() {
+            self.tag_counts = Some(self.store.tag_counts().unwrap_or_default());
+        }
+        let suggestions = card::suggest_tags(self.tag_counts.as_deref().unwrap_or_default(), &input.text, &self.cards[idx].tags, 6);
+        let (mut chosen, mut cancel) = (None, false);
+        let area = egui::Area::new(Id::new("tag-input")).order(egui::Order::Foreground).fixed_pos(input.at + vec2(0.0, 4.0)).show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).inner_margin(8).show(ui, |ui| {
+                ui.set_width(200.0);
+                let field = egui::TextEdit::singleline(&mut input.text).id(Id::new("tag-input-field")).hint_text("новый тег").desired_width(f32::INFINITY);
+                let resp = ui.add(field);
+                if !input.focused {
+                    resp.request_focus();
+                    input.focused = true;
+                }
+                if resp.lost_focus() && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+                    chosen = card::normalize_tag(&input.text);
+                    cancel = chosen.is_none();
+                }
+                if !suggestions.is_empty() {
+                    ui.add_space(4.0);
+                }
+                for tag in &suggestions {
+                    let button = egui::Button::new(RichText::new(format!("#{tag}")).size(13.5)).min_size(vec2(ui.available_width(), 0.0));
+                    if ui.add(button).clicked() {
+                        chosen = Some(tag.clone());
+                    }
+                }
+            });
+        });
+        let cancelled = cancel
+            || ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+            || (ui.ctx().cumulative_pass_nr() > input.opened_pass
+                && ui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p))));
+        if let Some(tag) = chosen {
+            self.tag_input = None;
+            self.retag(idx, |text| card::with_tag(text, &tag));
+        } else if cancelled {
+            self.tag_input = None;
+        }
+    }
+
     fn commit_edit_of(&mut self, id: i64) {
         if self.editing.as_ref().is_some_and(|(eid, _)| *eid == id) {
             self.commit_edit();
@@ -1058,6 +1147,16 @@ impl EbbApp {
                     self.toast = Some(Toast::new("Останется на слое", None));
                 }
                 Action::SetKind(kind) => self.set_kind(idx, kind),
+                Action::RemoveTag(tag) => {
+                    let id = self.cards[idx].id;
+                    if let Some((title, body)) = self.retag(idx, |text| card::without_tag(text, &tag)) {
+                        self.toast = Some(Toast::new(format!("Тег #{tag} убран"), Some(Undo::Text(id, title, body))));
+                    }
+                }
+                Action::AddTag(at) => {
+                    let card = self.cards[idx].id;
+                    self.tag_input = Some(TagInput { card, at, text: String::new(), focused: false, opened_pass: ui.ctx().cumulative_pass_nr() });
+                }
                 Action::SetIdeaStatus(status) => {
                     let set = self.store.set_idea_status(self.cards[idx].id, status);
                     if self.report(set, "поменять статус идеи").is_some() {
@@ -1104,6 +1203,7 @@ impl EbbApp {
             }
         }
         self.prompt_fill_ui(ui, origin);
+        self.tag_input_ui(ui);
         if let Some(idx) = remove {
             let card = self.cards.remove(idx);
             self.leaving.push((card, Instant::now()));
@@ -1150,7 +1250,7 @@ impl EbbApp {
             glass_panel(ui, rect, false);
             ui.painter().galley(pos2(rect.left() + 20.0, rect.center().y - text.size().y / 2.0), text, theme::text());
 
-            if let Some(action) = toast.undo {
+            if let Some(action) = toast.undo.clone() {
                 let button = Rect::from_min_size(pos2(rect.right() - undo_w - 8.0, rect.top() + 8.0), vec2(undo_w, 28.0));
                 let resp = ui.interact(button, Id::new("toast-undo"), Sense::click());
                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Отменить"));
@@ -1169,6 +1269,16 @@ impl EbbApp {
                 Undo::Restore(id) => self.store.restore(id),
                 Undo::Kind(id, kind) => self.store.set_kind(id, kind),
                 Undo::Snooze(snapshot) => self.store.undo_review(&snapshot),
+                Undo::Text(id, title, body) => match self.cards.iter().position(|c| c.id == id) {
+                    Some(idx) => {
+                        let c = &mut self.cards[idx];
+                        c.tags = card::tags_of(&rich_text::strip_markup(&format!("{title}\n{body}")));
+                        (c.title, c.body) = (title, body);
+                        self.tag_counts = None;
+                        self.store.save(&self.cards[idx])
+                    }
+                    None => Ok(()),
+                },
             };
             self.report(undone, "отменить");
             self.reload_cards();
@@ -1532,6 +1642,7 @@ impl EbbApp {
 
     fn reload_cards(&mut self) {
         self.commit_edit();
+        self.tag_counts = None;
         if let Ok(cards) = self.store.load() {
             let now = Instant::now();
             // Cards that weren't on the layer before appear; ones that left fade out.
@@ -3101,18 +3212,44 @@ fn card_ui(
             x = chip.right() + 4.0;
         }
     }
+    // Tags. While the details show, a click on a chip takes the tag out of the
+    // text and "+" adds one; a Private card's text is its secret, not edited here.
+    let editable_tags = card.kind != Kind::Private && !toolbar_shown && !card.collapsed && details > 0.5;
+    const PLUS_W: f32 = 22.0;
+    let room = age.left() - 8.0 - if editable_tags { PLUS_W + 4.0 } else { 0.0 };
     for tag in &card.tags {
         let galley = painter.layout_no_wrap(format!("#{tag}"), FontId::proportional(11.5), theme::card_dim());
+        let cross = if editable_tags { 12.0 } else { 0.0 };
         let chip = Rect::from_min_size(
             pos2(x, footer.center().y - galley.size().y / 2.0 - 2.0),
-            galley.size() + vec2(12.0, 4.0),
+            galley.size() + vec2(12.0 + cross, 4.0),
         );
-        if chip.right() > age.left() - 8.0 {
+        if chip.right() > room {
             break;
         }
-        painter.rect_filled(chip, CornerRadius::same(6), theme::chip_fill());
+        let resp = editable_tags.then(|| ui.interact(chip, id.with(("tag", tag.as_str())), Sense::click()));
+        let chip_hovered = resp.as_ref().is_some_and(egui::Response::hovered);
+        painter.rect_filled(chip, CornerRadius::same(6), if chip_hovered { theme::wash(30) } else { theme::chip_fill() });
         painter.galley(chip.min + vec2(6.0, 2.0), galley, theme::card_dim());
+        if let Some(resp) = resp {
+            let color = if chip_hovered { theme::card_text() } else { theme::card_muted() };
+            painter.text(pos2(chip.right() - 9.0, chip.center().y), Align2::CENTER_CENTER, "\u{E711}", theme::icons(7.5), color);
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Убрать тег #{tag}")));
+            if resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Убрать тег").clicked() {
+                out.push(Action::RemoveTag(tag.clone()));
+            }
+        }
         x = chip.right() + 4.0;
+    }
+    if editable_tags {
+        let plus = Rect::from_min_size(pos2(x, footer.center().y - 9.0), vec2(PLUS_W, 18.0));
+        let resp = ui.interact(plus, id.with("add-tag"), Sense::click());
+        painter.rect_filled(plus, CornerRadius::same(6), if resp.hovered() { theme::wash(30) } else { theme::chip_fill() });
+        painter.text(plus.center(), Align2::CENTER_CENTER, "\u{E710}", theme::icons(9.5), theme::card_dim());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Добавить тег"));
+        if resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Добавить тег").clicked() {
+            out.push(Action::AddTag(plus.left_bottom()));
+        }
     }
 
     // The resize grip, where a card can be resized.

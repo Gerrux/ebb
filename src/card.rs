@@ -708,6 +708,107 @@ pub fn fill_prompt(text: &str, values: &[(String, String)]) -> String {
     out
 }
 
+/// A card's tags: the `#words` of its text (without markup), lowercased, once
+/// each, trailing `,.;` dropped.
+pub fn tags_of(plain: &str) -> Vec<String> {
+    let mut tags: Vec<String> = Vec::new();
+    for tag in plain.split_whitespace().filter_map(tag_word) {
+        if !tags.contains(&tag) {
+            tags.push(tag);
+        }
+    }
+    tags
+}
+
+/// The tag a word stands for, if it's a `#tag`.
+fn tag_word(word: &str) -> Option<String> {
+    let tag = word.strip_prefix('#')?.trim_end_matches([',', '.', ';']).to_lowercase();
+    (!tag.is_empty()).then_some(tag)
+}
+
+/// A tag typed into the tag field: without `#`, lowercased, words joined by `-`
+/// (a tag lives in the text as one word). None when nothing usable is left.
+pub fn normalize_tag(input: &str) -> Option<String> {
+    let words: Vec<&str> = input.split(|c: char| c.is_whitespace() || c == '#').filter(|w| !w.is_empty()).collect();
+    let tag = words.join("-").trim_end_matches([',', '.', ';']).to_lowercase();
+    (!tag.is_empty() && tag.chars().count() <= 40).then_some(tag)
+}
+
+/// The text with `#tag` added: on the last line if that line is only tags,
+/// else on a line of its own. Unchanged if the tag is there already.
+pub fn with_tag(text: &str, tag: &str) -> String {
+    let plain = crate::rich_text::strip_markup(text);
+    if tags_of(&plain).iter().any(|t| t == tag) {
+        return text.to_owned();
+    }
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() {
+        return format!("#{tag}");
+    }
+    let last_line_is_tags = plain.trim_end().lines().last().is_some_and(|l| l.split_whitespace().all(|w| tag_word(w).is_some()));
+    if last_line_is_tags { format!("{trimmed} #{tag}") } else { format!("{trimmed}\n#{tag}") }
+}
+
+/// The text without its `#tag` words (styles of the rest kept). A space goes
+/// with each; a line left empty goes too.
+pub fn without_tag(text: &str, tag: &str) -> String {
+    let (plain, styles) = crate::rich_text::parse(text);
+    let chars: Vec<char> = plain.chars().collect();
+    let mut keep = vec![true; chars.len()];
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_whitespace() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        let word: String = chars[start..i].iter().collect();
+        if tag_word(&word).is_some_and(|t| t == tag) {
+            let (mut from, mut to) = (start, i);
+            if from > 0 && chars[from - 1] == ' ' {
+                from -= 1;
+            } else if to < chars.len() && chars[to] == ' ' {
+                to += 1;
+            }
+            keep[from..to].iter_mut().for_each(|k| *k = false);
+        }
+    }
+    // A line that had a tag taken out and holds nothing else now goes, with its line break.
+    let mut line_start = 0;
+    for end in (0..=chars.len()).filter(|&j| j == chars.len() || chars[j] == '\n') {
+        let line = line_start..end;
+        let touched = keep[line.clone()].iter().any(|k| !k);
+        let empty = line.clone().all(|j| !keep[j] || chars[j].is_whitespace());
+        if touched && empty {
+            line.clone().for_each(|j| keep[j] = false);
+            if end < chars.len() {
+                keep[end] = false;
+            } else if line_start > 0 {
+                keep[line_start - 1] = false;
+            }
+        }
+        line_start = end + 1;
+    }
+    let (plain, styles): (String, Vec<crate::rich_text::Style>) =
+        chars.iter().zip(styles).zip(&keep).filter(|(_, k)| **k).map(|((c, s), _)| (*c, s)).unzip();
+    crate::rich_text::serialize(&plain, &styles)
+}
+
+/// Tags to offer while typing `typed`: the most used first, starting with what's
+/// typed, none the card has already.
+pub fn suggest_tags(counts: &[(String, i64)], typed: &str, have: &[String], limit: usize) -> Vec<String> {
+    let prefix = typed.trim().trim_start_matches('#').to_lowercase();
+    counts
+        .iter()
+        .filter(|(t, _)| t.starts_with(&prefix) && !have.contains(t) && *t != prefix)
+        .take(limit)
+        .map(|(t, _)| t.clone())
+        .collect()
+}
+
 /// What copying a Prompt takes: its text without the name line.
 pub fn prompt_text(title: &str, body: &str) -> String {
     let full = if title.is_empty() { body.to_owned() } else { format!("{title}\n{body}") };
@@ -1256,6 +1357,46 @@ mod tests {
         assert_eq!(link_domain("демо https://www.egui.rs/#demo"), Some("egui.rs"));
         assert_eq!(link_domain("(http://user@host.dev:8080/x)"), Some("host.dev:8080"));
         assert_eq!(link_domain("без ссылки"), None);
+    }
+
+    #[test]
+    fn tags_come_from_the_text_once_each() {
+        assert_eq!(tags_of("#Идея про #pricing, и снова #идея. # и #"), ["идея", "pricing"]);
+        assert_eq!(normalize_tag("  #Новый Тег, "), Some("новый-тег".to_owned()));
+        assert_eq!(normalize_tag(" # "), None);
+    }
+
+    #[test]
+    fn adding_a_tag_writes_it_into_the_text() {
+        assert_eq!(with_tag("", "дом"), "#дом");
+        assert_eq!(with_tag("Купить молоко\n", "дом"), "Купить молоко\n#дом");
+        assert_eq!(with_tag("Купить молоко\n#еда", "дом"), "Купить молоко\n#еда #дом");
+        assert_eq!(with_tag("Купить #Дом молоко", "дом"), "Купить #Дом молоко");
+        // After a styled end the tag is plain text.
+        assert_eq!(crate::rich_text::strip_markup(&with_tag("**важно**", "дом")), "важно\n#дом");
+    }
+
+    #[test]
+    fn removing_a_tag_takes_its_words_out_and_keeps_styles() {
+        assert_eq!(without_tag("Купить #дом молоко #Дом,", "дом"), "Купить молоко");
+        assert_eq!(without_tag("Купить молоко\n#дом\nпотом", "дом"), "Купить молоко\nпотом");
+        assert_eq!(without_tag("Купить молоко\n#еда #дом", "дом"), "Купить молоко\n#еда");
+        assert_eq!(without_tag("#дом", "дом"), "");
+        let styled = crate::rich_text::serialize("жирный #дом текст", &[crate::rich_text::Style { bold: true, ..Default::default() }; 17]);
+        let out = without_tag(&styled, "дом");
+        let (plain, styles) = crate::rich_text::parse(&out);
+        assert_eq!(plain, "жирный текст");
+        assert!(styles.iter().all(|s| s.bold));
+        // Words that only look alike stay.
+        assert_eq!(without_tag("#домик и #дом2", "дом"), "#домик и #дом2");
+    }
+
+    #[test]
+    fn suggestions_follow_what_is_typed_by_use() {
+        let counts = [("работа".to_owned(), 9), ("рецепт".to_owned(), 4), ("дом".to_owned(), 7)];
+        assert_eq!(suggest_tags(&counts, "", &[], 5), ["работа", "рецепт", "дом"]);
+        assert_eq!(suggest_tags(&counts, "#Ре", &[], 5), ["рецепт"]);
+        assert_eq!(suggest_tags(&counts, "р", &["работа".to_owned()], 5), ["рецепт"]);
     }
 
     #[test]
