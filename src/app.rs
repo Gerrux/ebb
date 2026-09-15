@@ -421,16 +421,17 @@ impl EbbApp {
             pos2(logo.right() + 14.0, logo.center().y),
             Align2::LEFT_CENTER,
             {
-                let label = |l: &std::sync::OnceLock<Option<&'static str>>| match l.get() {
-                    Some(Some(label)) => *label,
+                let keys = self.shell.hotkeys();
+                let label = |key: Option<Option<&'static str>>| match key {
+                    Some(Some(label)) => label,
                     Some(None) => "хоткей занят",
                     None => "…",
                 };
                 format!(
                     "{} карточек  ·  {} — записать  ·  {} — найти  ·  F1 — debug",
                     self.cards.len(),
-                    label(&self.shell.hotkey_label),
-                    label(&self.shell.search_hotkey_label),
+                    label(keys.map(|k| k.capture)),
+                    label(keys.map(|k| k.search)),
                 )
             },
             FontId::proportional(13.0),
@@ -450,8 +451,8 @@ impl EbbApp {
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, "\u{E712}", theme::icons(16.0), theme::dim().lerp_to_gamma(theme::text(), t));
         let button = button.on_hover_cursor(CursorIcon::PointingHand);
 
-        let hotkey = |l: &std::sync::OnceLock<Option<&'static str>>| l.get().copied().flatten().unwrap_or("");
-        let (capture_key, search_key) = (hotkey(&self.shell.hotkey_label), hotkey(&self.shell.search_hotkey_label));
+        let keys = self.shell.hotkeys().unwrap_or_default();
+        let (capture_key, search_key) = (keys.capture.unwrap_or(""), keys.search.unwrap_or(""));
         let dismiss_label = if self.dismiss_hides { "Скрыть слой" } else { "Убрать на фон" };
         let mut chosen = None;
         egui::Popup::menu(&button)
@@ -1003,8 +1004,8 @@ impl EbbApp {
             backdrop: self.backdrop,
             tint: self.tint,
             pin_bottom: win::PIN_BOTTOM.load(Ordering::Relaxed),
-            capture_hotkey: self.shell.hotkey_label.get().copied().flatten(),
-            search_hotkey: self.shell.search_hotkey_label.get().copied().flatten(),
+            capture_hotkey: self.shell.hotkeys().and_then(|k| k.capture),
+            search_hotkey: self.shell.hotkeys().and_then(|k| k.search),
             dismiss_hides: self.dismiss_hides,
             curtain_top: self.curtain_top,
             settings_on_launch: self.settings_on_launch,
@@ -1016,6 +1017,8 @@ impl EbbApp {
 
     /// Opens the settings window; `welcome` on the first run.
     fn open_settings(&mut self, ctx: &egui::Context, welcome: bool) {
+        // Settings show the hotkeys: a moment to pick up one freed since startup.
+        shell::retry_hotkeys(&self.shell);
         let mut lib = self.library.lock().unwrap();
         lib.settings = self.layer_settings();
         lib.open(Tab::Settings);
@@ -1348,6 +1351,12 @@ impl eframe::App for EbbApp {
                     }
                 }
                 Event::SystemColors => self.refresh_theme(ctx),
+                Event::HotkeysChanged => {
+                    let keys = self.shell.hotkeys().unwrap_or_default();
+                    let mut lib = self.library.lock().unwrap();
+                    (lib.settings.capture_hotkey, lib.settings.search_hotkey) = (keys.capture, keys.search);
+                    ctx.request_repaint_of(library::viewport_id());
+                }
                 Event::TogglePinBottom => self.set_pin_bottom(!win::PIN_BOTTOM.load(Ordering::Relaxed)),
                 Event::Exit => ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close),
                 Event::ImportSticky => self.apply_library_request(ctx, Request::ImportSticky),

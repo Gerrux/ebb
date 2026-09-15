@@ -48,6 +48,7 @@ const WM_DWMCOLORIZATIONCOLORCHANGED: u32 = 0x0320;
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_SHOW_LAYER: u32 = WM_APP + 2;
 const WM_QUIT_APP: u32 = WM_APP + 3;
+const WM_RETRY_HOTKEYS: u32 = WM_APP + 4;
 const TRAY_ID: u32 = 1;
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 
@@ -68,6 +69,8 @@ pub enum Event {
     OpenReview,
     /// Windows' light/dark mode or accent color changed.
     SystemColors,
+    /// A hotkey taken at startup was registered later; see [`Shared::hotkeys`].
+    HotkeysChanged,
     Exit,
 }
 
@@ -78,15 +81,38 @@ pub struct Shared {
     /// Mirrors of UI state, read when the tray menu opens.
     pub layer_visible: AtomicBool,
     pub pin_bottom: AtomicBool,
-    /// The capture hotkey that could be registered; set once the shell thread is up.
-    pub hotkey_label: std::sync::OnceLock<Option<&'static str>>,
-    pub search_hotkey_label: std::sync::OnceLock<Option<&'static str>>,
+    /// Hotkeys registered so far; `None` until the shell thread is up.
+    hotkeys: Mutex<Option<Hotkeys>>,
     hwnd: AtomicIsize,
+}
+
+/// Which combination each hotkey got; `None` = every candidate was taken.
+#[derive(Clone, Copy, Default, PartialEq)]
+pub struct Hotkeys {
+    pub capture: Option<&'static str>,
+    pub search: Option<&'static str>,
+    pub library: Option<&'static str>,
 }
 
 impl Shared {
     pub fn take_events(&self) -> Vec<Event> {
         std::mem::take(&mut *self.events.lock().unwrap())
+    }
+
+    pub fn hotkeys(&self) -> Option<Hotkeys> {
+        *self.hotkeys.lock().unwrap()
+    }
+}
+
+/// Asks the shell thread to try again for hotkeys that were taken when Ebb
+/// started (the app holding them may have quit). Answered with
+/// [`Event::HotkeysChanged`] if one could be registered now.
+pub fn retry_hotkeys(shared: &Shared) {
+    let raw = shared.hwnd.load(Ordering::Relaxed);
+    if raw != 0 {
+        unsafe {
+            let _ = PostMessageW(Some(HWND(raw as *mut c_void)), WM_RETRY_HOTKEYS, WPARAM(0), LPARAM(0));
+        }
     }
 }
 
@@ -172,11 +198,34 @@ unsafe fn register_first(hwnd: HWND, base: i32, candidates: &[(&'static str, HOT
         .map(|(_, (name, ..))| *name)
 }
 
+/// Registers whichever of the three hotkeys is still missing. Runs on the shell
+/// thread, which owns the window the hotkeys are registered to.
+unsafe fn register_missing(hwnd: HWND, mut keys: Hotkeys) -> Hotkeys {
+    unsafe {
+        keys.capture = keys.capture.or_else(|| register_first(hwnd, 1, CAPTURE_HOTKEYS));
+        keys.search = keys.search.or_else(|| register_first(hwnd, SEARCH_ID_BASE, SEARCH_HOTKEYS));
+        keys.library = keys.library.or_else(|| register_first(hwnd, LIBRARY_ID_BASE, LIBRARY_HOTKEYS));
+    }
+    keys
+}
+
+/// Retries the missing hotkeys and tells the UI when something changed.
+unsafe fn retry_missing(hwnd: HWND) {
+    let Some((shared, before)) = STATE.with_borrow(|s| s.as_ref().map(|s| (s.shared.clone(), s.shared.hotkeys()))) else { return };
+    let Some(before) = before else { return };
+    if before.capture.is_some() && before.search.is_some() && before.library.is_some() {
+        return;
+    }
+    let after = unsafe { register_missing(hwnd, before) };
+    if after != before {
+        *shared.hotkeys.lock().unwrap() = Some(after);
+        push(Event::HotkeysChanged);
+    }
+}
+
 struct ThreadState {
     ctx: egui::Context,
     shared: Arc<Shared>,
-    hotkey_label: Option<&'static str>,
-    search_hotkey_label: Option<&'static str>,
     taskbar_created: u32,
 }
 
@@ -225,26 +274,15 @@ pub fn spawn(ctx: egui::Context, shared: Arc<Shared>) {
                 None,
             );
             let Ok(hwnd) = hwnd else {
-                let _ = shared.hotkey_label.set(None);
-                let _ = shared.search_hotkey_label.set(None);
+                *shared.hotkeys.lock().unwrap() = Some(Hotkeys::default());
                 return;
             };
             shared.hwnd.store(hwnd.0 as isize, Ordering::Relaxed);
 
-            let hotkey_label = register_first(hwnd, 1, CAPTURE_HOTKEYS);
-            let search_hotkey_label = register_first(hwnd, SEARCH_ID_BASE, SEARCH_HOTKEYS);
-            let _ = register_first(hwnd, LIBRARY_ID_BASE, LIBRARY_HOTKEYS);
-            let _ = shared.hotkey_label.set(hotkey_label);
-            let _ = shared.search_hotkey_label.set(search_hotkey_label);
+            *shared.hotkeys.lock().unwrap() = Some(register_missing(hwnd, Hotkeys::default()));
             ctx.request_repaint();
 
-            STATE.set(Some(ThreadState {
-                ctx,
-                shared,
-                hotkey_label,
-                search_hotkey_label,
-                taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
-            }));
+            STATE.set(Some(ThreadState { ctx, shared, taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")) }));
             add_tray_icon(hwnd);
 
             let mut msg = MSG::default();
@@ -269,6 +307,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_DWMCOLORIZATIONCOLORCHANGED => push(Event::SystemColors),
         WM_QUIT_APP => push(Event::Exit),
+        WM_RETRY_HOTKEYS => unsafe { retry_missing(hwnd) },
         WM_TRAY => match (lparam.0 & 0xFFFF) as u32 {
             NIN_SELECT | NIN_KEYSELECT => push(Event::TrayClick),
             WM_CONTEXTMENU => {
@@ -301,15 +340,13 @@ unsafe fn tray_menu(hwnd: HWND, pt: POINT) {
     const SETTINGS: usize = 8;
     const EXIT: usize = 9;
 
-    let (visible, bottom, hotkey, search_hotkey) = STATE.with_borrow(|s| {
+    // Opening the menu is a natural moment to pick up a hotkey freed since startup.
+    unsafe { retry_missing(hwnd) };
+    let (visible, bottom, keys) = STATE.with_borrow(|s| {
         let s = s.as_ref().unwrap();
-        (
-            s.shared.layer_visible.load(Ordering::Relaxed),
-            s.shared.pin_bottom.load(Ordering::Relaxed),
-            s.hotkey_label,
-            s.search_hotkey_label,
-        )
+        (s.shared.layer_visible.load(Ordering::Relaxed), s.shared.pin_bottom.load(Ordering::Relaxed), s.shared.hotkeys().unwrap_or_default())
     });
+    let (hotkey, search_hotkey) = (keys.capture, keys.search);
     let with_hotkey = |label: &str, key: Option<&str>| match key {
         Some(k) => format!("{label}\t{k}"),
         None => label.to_owned(),
@@ -324,7 +361,7 @@ unsafe fn tray_menu(hwnd: HWND, pt: POINT) {
             (MF_STRING, LAYER, Some(if visible { "Скрыть слой" } else { "Показать слой" }.into())),
             (MF_STRING, CAPTURE, Some(with_hotkey("Записать мысль", hotkey))),
             (MF_STRING, SEARCH, Some(with_hotkey("Найти", search_hotkey))),
-            (MF_STRING, LIBRARY, Some(with_hotkey("Архив и корзина…", Some("Win+Alt+L")))),
+            (MF_STRING, LIBRARY, Some(with_hotkey("Архив и корзина…", keys.library))),
             (MF_SEPARATOR, 0, None),
             (check(bottom), BOTTOM, Some("Слой под окнами".into())),
             (check(autostart_on), AUTOSTART, Some("Запускать при входе в Windows".into())),
