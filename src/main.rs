@@ -42,8 +42,84 @@ fn autostart_cli(arg: &str) -> Option<i32> {
     }))
 }
 
+/// Drops what a panic message quotes: `…` and '…' spans can hold note text
+/// (a string slice panic quotes the string), which must not reach a log.
+fn without_quoted(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut open: Option<char> = None;
+    for c in message.chars() {
+        match open {
+            Some(q) if c == q => {
+                out.push('…');
+                out.push(c);
+                open = None;
+            }
+            Some(_) => {}
+            None if c == '`' || c == '\'' => {
+                out.push(c);
+                open = Some(c);
+            }
+            None => out.push(c),
+        }
+    }
+    if open.is_some() {
+        out.push('…');
+    }
+    out
+}
+
+/// Appends a panic's place and message to `%LOCALAPPDATA%\Ebb\crash.log`
+/// (release builds have no console, and `panic = "abort"` leaves nothing else).
+/// Written before the abort; kept small, and without note text.
+fn install_crash_log() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        let at = resurface::unix_now();
+        let (y, m, d) = search::civil_from_days(at.div_euclid(86_400));
+        let secs = at.rem_euclid(86_400);
+        let line = format!(
+            "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} UTC  v{}  thread {}  at {}: {}\n",
+            secs / 3600,
+            secs / 60 % 60,
+            secs % 60,
+            env!("CARGO_PKG_VERSION"),
+            std::thread::current().name().unwrap_or("?"),
+            info.location().map_or_else(|| "?".into(), |l| format!("{}:{}", l.file(), l.line())),
+            without_quoted(&message),
+        );
+        let base = std::env::var_os("LOCALAPPDATA").map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from);
+        let path = base.join("Ebb").join("crash.log");
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > 64 * 1024) {
+            let _ = std::fs::remove_file(&path);
+        }
+        let _ = std::fs::create_dir_all(base.join("Ebb"));
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+        }
+        default(info);
+    }));
+}
+
+#[cfg(test)]
+#[test]
+fn crash_log_drops_quoted_text() {
+    assert_eq!(
+        without_quoted("byte index 3 is not a char boundary; it is inside 'п' (bytes 2..4) of `пароль hunter2`"),
+        "byte index 3 is not a char boundary; it is inside '…' (bytes 2..4) of `…`"
+    );
+    assert_eq!(without_quoted("called `Option::unwrap()` on a `None` value"), "called `…` on a `…` value");
+    assert_eq!(without_quoted("unterminated `secret"), "unterminated `…");
+}
+
 fn main() -> eframe::Result {
     let main_started = Instant::now();
+    install_crash_log();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(code) = args.first().and_then(|a| autostart_cli(a)) {
         std::process::exit(code);
