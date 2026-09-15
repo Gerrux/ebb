@@ -1,6 +1,6 @@
 # 08 — Разбор импорта Sticky Notes
 
-Статус: импорт готов, разбора нет · Зависит от: 03, 04 · Оценка: 3 дня
+Статус: классификация и экран разбора готовы (вкладка «Импорт»); нет почти-дубликатов · Зависит от: 03, 04
 
 ## Зачем
 
@@ -38,10 +38,12 @@ product.txt §20. Импорт уже переносит заметки (отк�
 ## Данные
 
 ```sql
-ALTER TABLE imported ADD COLUMN suggested_kind TEXT;
-ALTER TABLE imported ADD COLUMN group_key TEXT;      -- secrets | links | prompts | ideas | reference | old | duplicate | other
 ALTER TABLE imported ADD COLUMN reviewed INTEGER NOT NULL DEFAULT 0;
 ```
+
+Сделано иначе, чем предлагалось (2026-09-15): `suggested_kind`/`group_key` не хранятся. Группа
+считается при открытии вкладки из текущего текста карточки (`sticky::import_group`), поэтому
+не устаревает после правок и не требует миграции старых импортов; 100 карточек — ~3 мс в debug.
 
 ## Критерии приёмки
 
