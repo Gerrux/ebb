@@ -576,9 +576,18 @@ impl Card {
         self.hue().color()
     }
 
-    /// The caption of a card brought back from the archive.
+    /// The caption of a card brought back from the archive, or of one on the
+    /// layer whose reminder has come due (the Today part of spec 01).
     pub fn resurface_reason(&self, now: i64) -> Option<String> {
-        (self.placement == Placement::Rediscover).then(|| crate::resurface::reason(now, self.created_at, self.review_at))
+        if self.placement == Placement::Rediscover {
+            return Some(crate::resurface::reason(now, self.created_at, self.review_at));
+        }
+        self.due_reminder(now).map(|at| crate::resurface::reminder_reason(now, at))
+    }
+
+    /// When this card's reminder came due, if it has and nobody has seen it since.
+    pub fn due_reminder(&self, now: i64) -> Option<i64> {
+        self.review_at.filter(|at| *at <= now && !self.archived)
     }
 }
 

@@ -589,6 +589,12 @@ impl Store {
              WHERE placement='rediscover' AND archived=0 AND deleted_at IS NULL",
             [at],
         )?;
+        // Today: reminders on the layer that have come due go on top, where they are.
+        tx.execute(
+            "UPDATE cards SET z = (SELECT coalesce(max(z), 0) FROM cards) + id, last_resurfaced_at = ?1
+             WHERE archived=0 AND deleted_at IS NULL AND pinned=0 AND review_at <= ?1",
+            [at],
+        )?;
         let mut stmt = tx.prepare(
             "SELECT id, kind, created_at, last_viewed_at, review_at, last_resurfaced_at,
                     ignored_count,
@@ -1418,6 +1424,32 @@ secret");
         let picks = store.refresh_resurfacing(third, 0, 3).unwrap();
         assert_eq!(picks.iter().map(|p| p.id).collect::<Vec<_>>(), vec![card.id]);
         assert!(store.resurfaced_today(third + 3_600, 0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reminders_due_on_the_layer_go_on_top_where_they_are() {
+        let (store, dir) = temp_store("today");
+        let day = 100 * DAY;
+        let due = add(&store, "напомни: renew the domain");
+        let later = add(&store, "напомни: call the bank");
+        let other = add(&store, "обычная заметка");
+        let pinned = add(&store, "напомни: pinned one");
+        store.conn.execute("UPDATE cards SET x=500, y=300, z=0", []).unwrap();
+        store.raise(other.id).unwrap();
+        store.conn.execute("UPDATE cards SET pinned=1, placement='pinned' WHERE id=?1", [pinned.id]).unwrap();
+        for (id, at) in [(due.id, day - 3_600), (later.id, day + DAY), (pinned.id, day - 3_600)] {
+            store.conn.execute("UPDATE cards SET review_at=?2 WHERE id=?1", params![id, at]).unwrap();
+        }
+
+        store.refresh_resurfacing(day, 0, 3).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.len(), 4, "nothing leaves the layer");
+        assert_eq!(loaded.last().unwrap().id, due.id, "the due reminder is drawn on top");
+        let card = loaded.iter().find(|c| c.id == due.id).unwrap();
+        assert_eq!((card.pos, card.placement), (egui::pos2(500.0, 300.0), Placement::Manual));
+        assert_eq!(card.resurface_reason(day).as_deref(), Some("Напоминание на сегодня"));
+        assert_eq!(loaded.iter().find(|c| c.id == later.id).unwrap().resurface_reason(day), None);
         let _ = std::fs::remove_dir_all(dir);
     }
 

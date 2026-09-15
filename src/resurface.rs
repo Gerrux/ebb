@@ -76,14 +76,23 @@ pub fn candidates(now: i64, input: &[Candidate], limit: usize) -> Vec<Pick> {
     ranked
 }
 
-/// Why a note is back: "Напоминание на сегодня", "Ты записал это 73 дня назад".
+/// Why a note is back: "Напоминание на сегодня", "Напоминание: прошло 2 дня",
+/// "Ты записал это 73 дня назад".
 pub fn reason(now: i64, created_at: i64, review_at: Option<i64>) -> String {
-    if due(now, review_at) {
-        return "Напоминание на сегодня".to_owned();
+    if let Some(at) = review_at.filter(|at| *at <= now) {
+        return reminder_reason(now, at);
     }
     match (now - created_at).max(0) / DAY {
         0 => "Давно не открывал".to_owned(),
         n => format!("Ты записал это {n} {} назад", days_word(n)),
+    }
+}
+
+/// A reminder that has come due: today, or how long ago.
+pub fn reminder_reason(now: i64, review_at: i64) -> String {
+    match (now - review_at).max(0) / DAY {
+        0 => "Напоминание на сегодня".to_owned(),
+        n => format!("Напоминание: прошло {n} {}", days_word(n)),
     }
 }
 
@@ -248,6 +257,7 @@ mod tests {
         assert_eq!(reason(21 * DAY, 0, None), "Ты записал это 21 день назад");
         assert_eq!(reason(11 * DAY, 0, None), "Ты записал это 11 дней назад");
         assert_eq!(reason(5, 0, Some(1)), "Напоминание на сегодня");
+        assert_eq!(reason(3 * DAY + 5, 0, Some(1)), "Напоминание: прошло 3 дня");
     }
 
     #[test]

@@ -266,6 +266,10 @@ impl EbbApp {
             self.rediscover_job = None;
         }
         let (now, offset) = (resurface::unix_now(), crate::search::local_offset_secs());
+        // A reminder on the layer coming due later today gets its caption then.
+        if let Some(at) = self.cards.iter().filter_map(|c| c.review_at).filter(|at| *at > now).min() {
+            ctx.request_repaint_after(Duration::from_secs((at - now) as u64));
+        }
         if now < self.next_rediscover {
             ctx.request_repaint_after(Duration::from_secs((self.next_rediscover - now) as u64));
             return;

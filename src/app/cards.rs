@@ -350,8 +350,13 @@ impl EbbApp {
                 Action::Front => {
                     to_front = Some(idx);
                     self.active = Some(self.cards[idx].id);
+                    let now = resurface::unix_now();
                     if self.cards[idx].placement == Placement::Rediscover {
                         self.cards[idx].placement = Placement::Manual;
+                        self.save(idx);
+                    } else if self.cards[idx].due_reminder(now).is_some() {
+                        // Seen: a reminder that came due has done its job.
+                        self.cards[idx].review_at = None;
                         self.save(idx);
                     }
                     let _ = self.store.touch(self.cards[idx].id);
@@ -423,12 +428,17 @@ impl EbbApp {
                 Action::Archive | Action::Done => {
                     // What's typed is saved before the card goes.
                     self.commit_edit_of(self.cards[idx].id);
-                    let placement = self.cards[idx].placement;
+                    let (placement, review_at) = (self.cards[idx].placement, self.cards[idx].review_at);
+                    // A reminder already due is dealt with; left set, Rediscover
+                    // would bring the card straight back tomorrow.
+                    if self.cards[idx].due_reminder(resurface::unix_now()).is_some() {
+                        self.cards[idx].review_at = None;
+                    }
                     self.cards[idx].archived = true;
                     self.cards[idx].placement = Placement::Archive;
                     if !self.save(idx) {
                         // Still in the database as it was: stays on the layer.
-                        (self.cards[idx].archived, self.cards[idx].placement) = (false, placement);
+                        (self.cards[idx].archived, self.cards[idx].placement, self.cards[idx].review_at) = (false, placement, review_at);
                         continue;
                     }
                     let text = if done { "Сделано, карточка в архиве" } else { "Карточка в архиве" };
