@@ -167,13 +167,15 @@ impl StickyImport {
         }
     }
 
-    /// Draws the panel, if any, in the top-right corner of the layer.
-    pub fn ui(&self, ui: &mut Ui, store: &mut Store, cards: &mut Vec<Card>, layer: Option<isize>) {
+    /// Draws the panel, if any, in the top-right corner of the layer. Returns
+    /// true when the user asked to sort out the import (the library's Import tab).
+    pub fn ui(&self, ui: &mut Ui, store: &mut Store, cards: &mut Vec<Card>, layer: Option<isize>) -> bool {
         let mut state = self.state.lock().unwrap();
         if matches!(*state, State::Idle | State::Scanning) {
             *self.shown.lock().unwrap() = None;
-            return;
+            return false;
         }
+        let mut sort_out = false;
         // Slide in from the right while fading in, each time a new panel shows up.
         let since = {
             let mut shown = self.shown.lock().unwrap();
@@ -282,6 +284,10 @@ impl StickyImport {
                     line(ui, "Оригиналы в Sticky Notes остались на месте.".into(), theme::muted());
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
+                        if ui.button("Разобрать").on_hover_text("Группы: пароли, ссылки, промпты, идеи… — решение одной кнопкой").clicked() {
+                            sort_out = true;
+                            next = Some(State::Idle);
+                        }
                         if ui.button("Готово").clicked() {
                             next = Some(State::Idle);
                         }
@@ -315,5 +321,6 @@ impl StickyImport {
         if let Some(next) = next {
             *state = next;
         }
+        sort_out
     }
 }

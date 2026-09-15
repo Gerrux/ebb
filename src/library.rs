@@ -18,7 +18,10 @@ use crate::card::{Card, Kind};
 use crate::search;
 use crate::rich_text;
 use crate::resurface::{self, DAY, days_word};
-use crate::store::{Hit, ReviewAction, ReviewSnapshot, STORE_FAILED, Scope, Store, TRASH_DAYS};
+use crate::sticky::ImportGroup;
+use crate::store::{
+    Hit, ImportAction, ImportItem, ImportSnapshot, ReviewAction, ReviewSnapshot, STORE_FAILED, Scope, Store, TRASH_DAYS,
+};
 use crate::theme;
 use crate::win::{self, Backdrop};
 
@@ -48,6 +51,8 @@ pub enum Tab {
     #[default]
     Archive,
     Review,
+    /// Sorting out what came from Sticky Notes (spec 08).
+    Import,
     Trash,
     Settings,
 }
@@ -157,6 +162,20 @@ pub struct LibraryState {
     autostart: Arc<Mutex<AutostartUi>>,
     monitors: Vec<win::Monitor>,
     review: Review,
+    import: ImportReview,
+    /// Imported cards not yet sorted out; the Import tab shows while there are any.
+    import_left: usize,
+}
+
+/// The import review: groups of imported cards and what was done to them.
+#[derive(Default)]
+struct ImportReview {
+    loaded: bool,
+    items: Vec<ImportItem>,
+    /// The group whose cards are listed one by one.
+    expanded: Option<ImportGroup>,
+    /// Each action's cards as they were, for Ctrl+Z; newest last.
+    history: Vec<Vec<ImportSnapshot>>,
 }
 
 /// One pass of the weekly review, from opening the tab to its last card.
@@ -184,6 +203,9 @@ impl LibraryState {
         if tab == Tab::Review {
             self.review = Review::default();
         }
+        if tab == Tab::Import {
+            self.import = ImportReview::default();
+        }
         self.searched = None;
         self.scroll_offset = 0.0;
         self.request_focus = true;
@@ -201,6 +223,7 @@ impl LibraryState {
         self.scroll_offset = 0.0;
         self.confirm = None;
         self.review = Review::default();
+        self.import.loaded = false;
         self.request_focus = true;
     }
 
@@ -213,6 +236,7 @@ impl LibraryState {
         self.query.clear();
         self.confirm = None;
         self.review = Review::default();
+        self.import = ImportReview::default();
     }
 
     /// Data changed elsewhere (layer, search bar): refresh on the next frame.
@@ -247,7 +271,8 @@ pub fn ui(ui: &mut Ui, state: &Mutex<LibraryState>) {
         let next = match st.tab {
             Tab::Archive => Tab::Trash,
             Tab::Trash => Tab::Review,
-            Tab::Review => Tab::Settings,
+            Tab::Review if st.import_left > 0 => Tab::Import,
+            Tab::Review | Tab::Import => Tab::Settings,
             Tab::Settings => Tab::Archive,
         };
         st.switch_tab(next);
@@ -262,6 +287,7 @@ pub fn ui(ui: &mut Ui, state: &Mutex<LibraryState>) {
     ui.scope_builder(UiBuilder::new().max_rect(body), |ui| match st.tab {
         Tab::Archive | Tab::Trash => list_tab(ui, &mut st),
         Tab::Review => review_tab(ui, &mut st),
+        Tab::Import => import_tab(ui, &mut st),
         Tab::Settings => settings_tab(ui, &mut st),
     });
 
@@ -303,12 +329,16 @@ fn header(ui: &mut Ui, st: &mut LibraryState) -> bool {
         let tabs = if st.settings_only {
             Vec::new()
         } else {
-            vec![
+            let mut tabs = vec![
                 (Tab::Archive, format!("Архив {archived}")),
                 (Tab::Trash, format!("Корзина {trashed}")),
                 (Tab::Review, "Обзор".to_owned()),
-                (Tab::Settings, "Настройки".to_owned()),
-            ]
+            ];
+            if st.import_left > 0 || st.tab == Tab::Import {
+                tabs.push((Tab::Import, format!("Импорт {}", st.import_left)));
+            }
+            tabs.push((Tab::Settings, "Настройки".to_owned()));
+            tabs
         };
         for (tab, label) in tabs {
             let on = st.tab == tab;
@@ -346,7 +376,7 @@ fn header(ui: &mut Ui, st: &mut LibraryState) -> bool {
 // ---------------------------------------------------------------------------
 
 fn refresh(st: &mut LibraryState) {
-    if st.tab == Tab::Review {
+    if matches!(st.tab, Tab::Review | Tab::Import) {
         return;
     }
     let key = (st.tab, st.query.clone());
@@ -366,6 +396,7 @@ fn refresh(st: &mut LibraryState) {
     let selected_id = st.hits.get(st.selected).map(|h| h.id);
     st.hits = store.search(&st.parsed, scope, RESULTS).unwrap_or_default();
     st.counts = store.counts().unwrap_or_default();
+    st.import_left = store.import_left().unwrap_or(0);
     let same_view = st.searched.as_ref().is_some_and(|(t, q)| *t == key.0 && *q == key.1);
     st.selected = match (same_view, selected_id) {
         (true, Some(id)) => st.hits.iter().position(|h| h.id == id).unwrap_or(st.selected),
@@ -535,6 +566,212 @@ fn review_tab(ui: &mut Ui, st: &mut LibraryState) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Import review
+// ---------------------------------------------------------------------------
+
+fn ensure_import(st: &mut LibraryState) {
+    if st.import.loaded {
+        return;
+    }
+    if st.store.is_none() {
+        st.store = Store::open().ok();
+    }
+    let Some(store) = st.store.as_ref() else {
+        st.notice = Some((STORE_FAILED.into(), Instant::now()));
+        return;
+    };
+    let started = Instant::now();
+    st.import.items = store.import_review(resurface::unix_now()).unwrap_or_default();
+    crate::app::append_timing_log(&format!(
+        "import review: {} cards grouped in {:.1} ms\n",
+        st.import.items.len(),
+        started.elapsed().as_secs_f64() * 1000.0
+    ));
+    st.import.loaded = true;
+    st.import_left = st.import.items.len();
+    st.counts = store.counts().unwrap_or(st.counts);
+}
+
+/// Applies `action` to `ids` and takes them out of the review; `done` names it for the notice.
+fn import_apply(st: &mut LibraryState, ids: Vec<i64>, action: ImportAction, done: String) {
+    let Some(store) = st.store.as_ref() else { return };
+    if ids.is_empty() {
+        return;
+    }
+    match store.apply_import_review(&ids, action) {
+        Ok(snapshots) => {
+            st.import.items.retain(|item| !ids.contains(&item.card_id));
+            st.import.history.push(snapshots);
+            st.import_left = st.import.items.len();
+            st.counts = store.counts().unwrap_or(st.counts);
+            st.notice = Some((format!("{done} · Ctrl+Z — отменить"), Instant::now()));
+            st.outbox.push(Request::Changed);
+            if action == ImportAction::SetKind(Kind::Private) {
+                // The text is encrypted now; wipe the copies SQLite keeps in freed
+                // pages, the log and the search index. It rewrites the file.
+                let _ = std::thread::Builder::new().name("scrub-plaintext".into()).spawn(|| {
+                    crate::import_ui::background_priority();
+                    if let Err(e) = Store::open().and_then(|store| store.scrub_plaintext()) {
+                        eprintln!("scrub after import review failed: {e}");
+                    }
+                });
+            }
+        }
+        Err(_) => st.notice = Some(("Не получилось, ничего не изменено".into(), Instant::now())),
+    }
+}
+
+fn import_undo(st: &mut LibraryState) {
+    let Some(store) = st.store.as_ref() else { return };
+    let Some(snapshots) = st.import.history.pop() else { return };
+    let notice = match store.undo_import_review(&snapshots) {
+        Ok(()) => format!("Отменено: {}", notes_word(snapshots.len())),
+        Err(_) => {
+            st.import.history.push(snapshots);
+            "Отменить не получилось".to_owned()
+        }
+    };
+    st.notice = Some((notice, Instant::now()));
+    st.import.loaded = false;
+    st.outbox.push(Request::Changed);
+}
+
+/// "1 заметка", "3 заметки", "11 заметок".
+fn notes_word(n: usize) -> String {
+    let word = match (n % 10, n % 100) {
+        (_, 11..=14) => "заметок",
+        (1, _) => "заметка",
+        (2..=4, _) => "заметки",
+        _ => "заметок",
+    };
+    format!("{n} {word}")
+}
+
+fn import_tab(ui: &mut Ui, st: &mut LibraryState) {
+    ensure_import(st);
+    if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Z)) {
+        import_undo(st);
+        ensure_import(st);
+    }
+
+    let notice = st.notice.as_ref().filter(|(_, t)| t.elapsed() < Duration::from_millis(4000)).map(|(s, _)| s.clone());
+    if notice.is_some() {
+        ui.ctx().request_repaint_after(Duration::from_millis(4000));
+    }
+    let left = st.import.items.len();
+    ui.horizontal(|ui| {
+        let text = notice.unwrap_or_else(|| {
+            if left == 0 {
+                String::new()
+            } else {
+                format!("Из Sticky Notes осталось разобрать {}. Решение для группы — одной кнопкой, Ctrl+Z отменяет.", notes_word(left))
+            }
+        });
+        ui.label(RichText::new(text).size(12.5).color(theme::muted()));
+        if !st.import.history.is_empty() {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("Отменить последнее").clicked() {
+                    import_undo(st);
+                }
+            });
+        }
+    });
+    ensure_import(st);
+    if st.import.items.is_empty() {
+        review_message(ui, "Импорт разобран", "Все заметки из Sticky Notes на своих местах. Их найдёт поиск.");
+        return;
+    }
+    ui.add_space(6.0);
+
+    let now = resurface::unix_now();
+    let mut request: Option<(Vec<i64>, ImportAction, String)> = None;
+    egui::ScrollArea::vertical().id_salt("import-review").auto_shrink([false, false]).show(ui, |ui| {
+        for group in ImportGroup::ALL {
+            let items: Vec<&ImportItem> = st.import.items.iter().filter(|i| i.group == group).collect();
+            if items.is_empty() {
+                continue;
+            }
+            let ids: Vec<i64> = items.iter().map(|i| i.card_id).collect();
+            let on_layer = items.iter().filter(|i| !i.archived).count();
+            egui::Frame::NONE
+                .fill(theme::wash(10))
+                .corner_radius(CornerRadius::same(10))
+                .inner_margin(egui::Margin::symmetric(14, 12))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(group.label()).font(theme::semibold(15.0)).color(theme::text()));
+                        let count = if on_layer > 0 { format!("{} · {on_layer} на слое", items.len()) } else { items.len().to_string() };
+                        ui.label(RichText::new(count).size(13.0).color(theme::muted()));
+                    });
+                    let hint = match group {
+                        ImportGroup::Secrets => "Станут Private: значение зашифруется и пропадёт из поиска, останется подпись.".to_owned(),
+                        ImportGroup::Old => "Не менялись больше года. В архиве их по-прежнему найдёт поиск.".to_owned(),
+                        ImportGroup::Other => "Обычные заметки. Оставь как есть или убери в архив.".to_owned(),
+                        _ => format!("Похоже на тип «{}».", group.kind().map_or("", |k| k.label())),
+                    };
+                    ui.label(RichText::new(hint).size(12.0).color(theme::dim()));
+                    ui.add_space(4.0);
+                    for item in items.iter().take(3) {
+                        ui.label(RichText::new(format!("· {}", item.preview)).size(13.0).color(theme::text()));
+                    }
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        let n = notes_word(ids.len());
+                        if let Some(kind) = group.kind() {
+                            if ui.button(format!("Принять: {}", kind.label())).clicked() {
+                                request = Some((ids.clone(), ImportAction::SetKind(kind), format!("{n} → {}", kind.label())));
+                            }
+                        } else if ui.button("Оставить как есть").clicked() {
+                            request = Some((ids.clone(), ImportAction::Keep, format!("{n} оставлены как есть")));
+                        }
+                        if ui.button("Всё в архив").clicked() {
+                            request = Some((ids.clone(), ImportAction::Archive, format!("{n} в архиве")));
+                        }
+                        if ui.button("Всё в корзину").clicked() {
+                            request = Some((ids.clone(), ImportAction::Trash, format!("{n} в корзине, {TRASH_DAYS} дней можно вернуть")));
+                        }
+                        let expanded = st.import.expanded == Some(group);
+                        if ui.button(if expanded { "Свернуть" } else { "Посмотреть" }).clicked() {
+                            st.import.expanded = if expanded { None } else { Some(group) };
+                        }
+                    });
+                    if st.import.expanded == Some(group) {
+                        ui.add_space(6.0);
+                        for item in &items {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(item.kind.icon()).font(theme::icons(13.0)).color(item.kind.accent()));
+                                let mut picked = item.kind;
+                                egui::ComboBox::from_id_salt(("import-kind", item.card_id))
+                                    .selected_text(item.kind.label())
+                                    .width(110.0)
+                                    .show_ui(ui, |ui| {
+                                        for kind in Kind::ALL {
+                                            ui.selectable_value(&mut picked, kind, kind.label());
+                                        }
+                                    });
+                                if picked != item.kind {
+                                    request = Some((vec![item.card_id], ImportAction::SetKind(picked), format!("Тип: {}", picked.label())));
+                                }
+                                let age = match (now - item.updated_at).max(0) / DAY {
+                                    0 => "сегодня".to_owned(),
+                                    d => format!("{d} {} назад", days_word(d)),
+                                };
+                                ui.label(RichText::new(&item.preview).size(13.0).color(theme::text()));
+                                ui.label(RichText::new(age).size(11.5).color(theme::muted()));
+                            });
+                        }
+                    }
+                });
+            ui.add_space(8.0);
+        }
+    });
+    if let Some((ids, action, done)) = request {
+        import_apply(st, ids, action, done);
+    }
+}
+
 fn days_ago(ts: i64) -> i64 {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
     ((now - ts).max(0)) / 86_400
@@ -580,8 +817,7 @@ fn act(st: &mut LibraryState, primary: bool) {
             st.notice = Some((notice.into(), Instant::now()));
             st.confirm = None;
         }
-        (Tab::Settings, _) => return,
-        (Tab::Review, _) => return,
+        (Tab::Settings | Tab::Review | Tab::Import, _) => return,
     }
     st.searched = None;
 }
@@ -969,6 +1205,7 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
     }
     if let Some(store) = st.store.as_ref() {
         st.counts = store.counts().unwrap_or(st.counts);
+        st.import_left = store.import_left().unwrap_or(st.import_left);
     }
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 6.0;
@@ -1172,9 +1409,18 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
         note(ui, "Если сочетание занято, берётся следующее свободное. Выбор своих сочетаний появится позже.");
 
         section(ui, "Импорт");
-        if ui.button("Импорт из Sticky Notes…").clicked() {
-            st.outbox.push(Request::ImportSticky);
-        }
+        ui.horizontal(|ui| {
+            if ui.button("Импорт из Sticky Notes…").clicked() {
+                st.outbox.push(Request::ImportSticky);
+            }
+            if st.import_left > 0 && ui.button(format!("Разобрать импорт ({})", st.import_left)).clicked() {
+                // From the settings window: grow into the full library.
+                st.settings_only = false;
+                st.welcome = false;
+                st.switch_tab(Tab::Import);
+                ui.ctx().send_viewport_cmd(ViewportCommand::InnerSize(SIZE));
+            }
+        });
         note(ui, "Открытые заметки встанут на слой как на экране, остальные уйдут в архив. Повторный импорт заменит прошлый, изменённые тобой карточки останутся.");
 
         section(ui, "Данные");

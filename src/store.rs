@@ -158,6 +158,39 @@ pub struct ReviewSnapshot {
     pub last_viewed_at: i64,
 }
 
+/// An imported card waiting in the import review.
+#[derive(Clone, Debug)]
+pub struct ImportItem {
+    pub card_id: i64,
+    pub kind: Kind,
+    pub group: crate::sticky::ImportGroup,
+    /// First line, or for anything that looks like a credential only a safe label.
+    pub preview: String,
+    pub archived: bool,
+    pub updated_at: i64,
+}
+
+/// What the import review does with a set of cards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportAction {
+    /// Accept a kind (the group's suggestion, or one picked for a card).
+    SetKind(Kind),
+    Archive,
+    Trash,
+    /// Leave as is, just done with.
+    Keep,
+}
+
+/// A card's state before an import review action, for undo.
+#[derive(Clone, Copy, Debug)]
+pub struct ImportSnapshot {
+    pub card_id: i64,
+    pub kind: Kind,
+    pub archived: bool,
+    pub placement: Placement,
+    pub deleted_at: Option<i64>,
+}
+
 /// Row of the live card projection used by the layer.
 fn card_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
     let tags: String = r.get(4)?;
@@ -382,6 +415,12 @@ impl Store {
              CREATE INDEX IF NOT EXISTS cards_review ON cards(review_at) WHERE review_at IS NOT NULL;
              CREATE INDEX IF NOT EXISTS review_items_card ON review_items(card_id, at);",
         )?;
+        // Import review (spec 08): done with in the review, or not yet.
+        let has_reviewed: bool =
+            conn.query_row("SELECT count(*) FROM pragma_table_info('imported') WHERE name='reviewed'", [], |r| r.get(0))?;
+        if !has_reviewed {
+            conn.execute("ALTER TABLE imported ADD COLUMN reviewed INTEGER NOT NULL DEFAULT 0", [])?;
+        }
         let cleared: bool =
             conn.query_row("SELECT count(*) FROM settings WHERE key=?1", [SET_REVIEW_DATES_CLEARED], |r| r.get(0))?;
         if !cleared {
@@ -889,6 +928,110 @@ impl Store {
         tx.execute("DELETE FROM imported WHERE batch=?1", [batch])?;
         tx.commit()?;
         Ok(n)
+    }
+
+    /// Imported cards not yet dealt with in the import review, newest first,
+    /// each with its group worked out from the text as it is now.
+    pub fn import_review(&self, now: i64) -> rusqlite::Result<Vec<ImportItem>> {
+        use crate::sticky::{ImportGroup, import_group};
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id, c.kind, c.title, c.body, c.archived, c.updated_at
+             FROM imported i JOIN cards c ON c.id = i.card_id
+             WHERE i.reviewed = 0 AND c.deleted_at IS NULL
+             ORDER BY c.updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let (kind, title, body): (String, String, String) = (r.get(1)?, r.get(2)?, r.get(3)?);
+            let kind = Kind::parse(&kind);
+            let updated_at: i64 = r.get(5)?;
+            let text = if title.is_empty() { body.clone() } else { format!("{title}\n{body}") };
+            let group = import_group(kind, &text, updated_at, now);
+            let preview = if kind == Kind::Private || group == ImportGroup::Secrets {
+                crate::card::private_label(&title, &body).unwrap_or_else(|| crate::card::PRIVATE_PLACEHOLDER.to_owned())
+            } else {
+                let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+                let line = crate::rich_text::strip_markup(line);
+                match line.char_indices().nth(90) {
+                    Some((cut, _)) => format!("{}…", &line[..cut]),
+                    None => line,
+                }
+            };
+            Ok(ImportItem { card_id: r.get(0)?, kind, group, preview, archived: r.get(4)?, updated_at })
+        })?;
+        rows.collect()
+    }
+
+    /// How many imported cards the import review still holds.
+    pub fn import_left(&self) -> rusqlite::Result<usize> {
+        self.conn.query_row(
+            "SELECT count(*) FROM imported i JOIN cards c ON c.id = i.card_id WHERE i.reviewed = 0 AND c.deleted_at IS NULL",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n as usize)
+    }
+
+    /// Applies an import review decision to `ids` in one transaction and marks
+    /// them done with. Returns what undo needs. A card turned Private leaves
+    /// plaintext in freed pages and the log until `scrub_plaintext`.
+    pub fn apply_import_review(&self, ids: &[i64], action: ImportAction) -> rusqlite::Result<Vec<ImportSnapshot>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut snapshots = Vec::with_capacity(ids.len());
+        for &id in ids {
+            let snapshot = self.conn.query_row(
+                "SELECT kind, archived, placement, deleted_at FROM cards WHERE id=?1",
+                [id],
+                |r| {
+                    Ok(ImportSnapshot {
+                        card_id: id,
+                        kind: Kind::parse(&r.get::<_, String>(0)?),
+                        archived: r.get(1)?,
+                        placement: Placement::parse(&r.get::<_, String>(2)?),
+                        deleted_at: r.get(3)?,
+                    })
+                },
+            )?;
+            match action {
+                ImportAction::SetKind(kind) => self.set_kind(id, kind)?,
+                ImportAction::Archive => {
+                    self.conn.execute("UPDATE cards SET archived=1, pinned=0, placement='archive' WHERE id=?1", [id])?;
+                }
+                ImportAction::Trash => self.delete(id)?,
+                ImportAction::Keep => {}
+            }
+            self.conn.execute("UPDATE imported SET reviewed=1 WHERE card_id=?1", [id])?;
+            snapshots.push(snapshot);
+        }
+        tx.commit()?;
+        Ok(snapshots)
+    }
+
+    /// Puts cards back as they were before an import review action, in one transaction.
+    pub fn undo_import_review(&self, snapshots: &[ImportSnapshot]) -> rusqlite::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for s in snapshots {
+            let kind: String = self.conn.query_row("SELECT kind FROM cards WHERE id=?1", [s.card_id], |r| r.get(0))?;
+            if Kind::parse(&kind) != s.kind {
+                self.set_kind(s.card_id, s.kind)?;
+            }
+            self.conn.execute(
+                "UPDATE cards SET archived=?2, placement=?3, deleted_at=?4 WHERE id=?1",
+                params![s.card_id, s.archived, s.placement.as_str(), s.deleted_at],
+            )?;
+            self.conn.execute("UPDATE imported SET reviewed=0 WHERE card_id=?1", [s.card_id])?;
+        }
+        tx.commit()
+    }
+
+    /// Wipes plaintext that cards turned Private left behind: FTS segments,
+    /// freed pages and the log. Rewrites the whole file: run it off the UI thread.
+    pub fn scrub_plaintext(&self) -> rusqlite::Result<()> {
+        self.conn.execute_batch(
+            "INSERT INTO cards_fts(cards_fts) VALUES ('optimize');
+             PRAGMA secure_delete=ON;
+             PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);
+             PRAGMA secure_delete=FAST;",
+        )
     }
 
     pub fn load(&self) -> rusqlite::Result<Vec<Card>> {
@@ -1481,6 +1624,95 @@ guest / pass");
         let snapshot = store.review_action(card.id, ReviewAction::Trash, t, 0).unwrap();
         assert_eq!(store.counts().unwrap().2, 1);
         store.undo_review(&snapshot).unwrap();
+        assert_eq!(store.counts().unwrap().2, 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn import_notes(store: &mut Store, notes: &[(&str, &str, bool)]) -> Vec<i64> {
+        let planned: Vec<Planned> = notes
+            .iter()
+            .map(|(id, text, on_layer)| Planned { body: (*text).into(), ..planned(id, *on_layer) })
+            .collect();
+        let rects: Vec<Option<egui::Rect>> =
+            notes.iter().map(|(_, _, on)| on.then(|| egui::Rect::from_min_size(egui::pos2(0.0, 0.0), DEFAULT_SIZE))).collect();
+        store.import("sticky:", &planned, &rects, &[]).unwrap();
+        notes
+            .iter()
+            .map(|(id, _, _)| {
+                store.conn.query_row("SELECT card_id FROM imported WHERE source_id=?1", [format!("sticky:{id}")], |r| r.get(0)).unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn import_review_groups_cards_and_hides_secrets_in_previews() {
+        use crate::sticky::ImportGroup;
+        let (mut store, dir) = temp_store("import-groups");
+        let ids = import_notes(
+            &mut store,
+            &[
+                ("a", "wifi дома\nпароль: Tr0ub4dor-8812", false),
+                ("b", "https://example.com/articles/habits", true),
+                ("c", "А что если убрать регистрацию?", false),
+                ("d", "Купить молоко", false),
+            ],
+        );
+        // An import before these rules: everything came in as a plain note.
+        store.conn.execute("UPDATE cards SET kind='note'", []).unwrap();
+        let now = 1_650_000_000 + 400 * DAY;
+        let items = store.import_review(now).unwrap();
+        let group = |id: i64| items.iter().find(|i| i.card_id == id).unwrap();
+        assert_eq!(group(ids[0]).group, ImportGroup::Secrets);
+        assert_eq!(group(ids[0]).preview, "wifi дома", "the password line never shows");
+        assert_eq!(group(ids[1]).group, ImportGroup::Links);
+        assert_eq!(group(ids[2]).group, ImportGroup::Ideas);
+        assert_eq!(group(ids[3]).group, ImportGroup::Old);
+        assert!(store.import_review(1_650_000_000 + DAY).unwrap().iter().any(|i| i.group == ImportGroup::Other));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn accepting_the_secrets_group_encrypts_and_undo_brings_the_text_back() {
+        let (mut store, dir) = temp_store("import-secrets");
+        let secret = "Tr0ub4dor-8812-unique";
+        let ids = import_notes(&mut store, &[("a", &format!("wifi дома\nпароль: {secret}"), false), ("b", "Купить молоко", false)]);
+        store.conn.execute("UPDATE cards SET kind='note'", []).unwrap();
+
+        let snapshots = store.apply_import_review(&ids[..1], ImportAction::SetKind(Kind::Private)).unwrap();
+        assert_eq!(store.card(ids[0]).unwrap().unwrap().kind, Kind::Private);
+        assert_eq!(store.secret(ids[0]).unwrap().as_deref(), Some(format!("пароль: {secret}").as_str()));
+        assert_eq!(store.import_review(now()).unwrap().len(), 1, "done with: out of the review");
+        store.scrub_plaintext().unwrap();
+        for file in ["t.db", "t.db-wal"] {
+            let bytes = std::fs::read(dir.join(file)).unwrap_or_default();
+            assert!(!bytes.windows(secret.len()).any(|w| w == secret.as_bytes()), "plaintext left in {file}");
+        }
+
+        store.undo_import_review(&snapshots).unwrap();
+        let back = store.card(ids[0]).unwrap().unwrap();
+        assert_eq!((back.kind, back.body.as_str()), (Kind::Note, format!("wifi дома\nпароль: {secret}").as_str()));
+        assert_eq!(store.import_review(now()).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn import_review_group_actions_are_one_transaction_and_undoable() {
+        let (mut store, dir) = temp_store("import-actions");
+        let ids = import_notes(&mut store, &[("a", "одна", true), ("b", "две", false), ("c", "три", true)]);
+        let snapshots = store.apply_import_review(&ids, ImportAction::Archive).unwrap();
+        assert!(store.load().unwrap().is_empty());
+        store.undo_import_review(&snapshots).unwrap();
+        assert_eq!(store.load().unwrap().len(), 2, "the two from the layer are back on it");
+
+        // A failing card rolls the whole group back.
+        let missing = ids.iter().copied().chain([9_999]).collect::<Vec<_>>();
+        assert!(store.apply_import_review(&missing, ImportAction::Trash).is_err());
+        assert_eq!(store.counts().unwrap().2, 0);
+        assert_eq!(store.import_review(now()).unwrap().len(), 3);
+
+        let snapshots = store.apply_import_review(&ids[..1], ImportAction::Trash).unwrap();
+        assert_eq!(store.counts().unwrap().2, 1);
+        store.undo_import_review(&snapshots).unwrap();
         assert_eq!(store.counts().unwrap().2, 0);
         let _ = std::fs::remove_dir_all(dir);
     }

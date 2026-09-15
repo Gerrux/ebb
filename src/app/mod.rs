@@ -356,6 +356,16 @@ impl EbbApp {
         }
     }
 
+    /// Opens the library window on `tab`.
+    fn open_library(&mut self, ctx: &egui::Context, tab: Tab) {
+        let mut lib = self.library.lock().unwrap();
+        lib.settings = self.layer_settings();
+        lib.open(tab);
+        ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::InnerSize(lib.size()));
+        ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::Focus);
+        ctx.request_repaint();
+    }
+
     /// Opens the settings window; `welcome` on the first run.
     fn open_settings(&mut self, ctx: &egui::Context, welcome: bool) {
         // Settings show the hotkeys: a moment to pick up one freed since startup.
@@ -600,11 +610,7 @@ impl eframe::App for EbbApp {
                 Event::ImportSticky => self.apply_library_request(ctx, Request::ImportSticky),
                 Event::OpenLibrary(true) => self.open_settings(ctx, false),
                 event @ (Event::OpenLibrary(false) | Event::OpenReview) => {
-                    let mut lib = self.library.lock().unwrap();
-                    lib.settings = self.layer_settings();
-                    lib.open(if matches!(event, Event::OpenReview) { Tab::Review } else { Tab::Archive });
-                    ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::InnerSize(lib.size()));
-                    ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::Focus);
+                    self.open_library(ctx, if matches!(event, Event::OpenReview) { Tab::Review } else { Tab::Archive });
                 }
             }
         }
@@ -845,7 +851,9 @@ impl eframe::App for EbbApp {
                 self.cards_ui(ui);
             });
             ui.scope_builder(UiBuilder::new().max_rect(moved), |ui| {
-                self.sticky.ui(ui, &mut self.store, &mut self.cards, self.hwnd);
+                if self.sticky.ui(ui, &mut self.store, &mut self.cards, self.hwnd) {
+                    self.open_library(ui.ctx(), Tab::Import);
+                }
                 self.toast_ui(ui);
                 self.menu_ui(ui);
                 if self.show_debug {

@@ -251,6 +251,63 @@ pub fn classify(plain: &str) -> Kind {
     Kind::Note
 }
 
+/// Groups of the import review (spec 08), in the order the screen lists them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ImportGroup {
+    Secrets,
+    Links,
+    Prompts,
+    Ideas,
+    Reference,
+    /// Plain notes not changed for over a year.
+    Old,
+    Other,
+}
+
+impl ImportGroup {
+    pub const ALL: [Self; 7] = [Self::Secrets, Self::Links, Self::Prompts, Self::Ideas, Self::Reference, Self::Old, Self::Other];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Secrets => "Похоже на пароли и доступы",
+            Self::Links => "Ссылки",
+            Self::Prompts => "Промпты",
+            Self::Ideas => "Идеи",
+            Self::Reference => "Справка: команды, хосты, пути",
+            Self::Old => "Давно не менялись",
+            Self::Other => "Остальное",
+        }
+    }
+
+    /// The kind "accept" gives the group's cards; none for groups that aren't a kind.
+    pub fn kind(self) -> Option<Kind> {
+        match self {
+            Self::Secrets => Some(Kind::Private),
+            Self::Links => Some(Kind::Link),
+            Self::Prompts => Some(Kind::Prompt),
+            Self::Ideas => Some(Kind::Idea),
+            Self::Reference => Some(Kind::Reference),
+            Self::Old | Self::Other => None,
+        }
+    }
+}
+
+/// Which review group an imported card falls in, from its text as it is now:
+/// the suggestion follows edits and never goes stale. A card already Private
+/// has no text to read and stays with the secrets.
+pub fn import_group(kind: Kind, text: &str, updated_at: i64, now: i64) -> ImportGroup {
+    let suggested = if kind == Kind::Private { Kind::Private } else { classify(text) };
+    match suggested {
+        Kind::Private => ImportGroup::Secrets,
+        Kind::Link => ImportGroup::Links,
+        Kind::Prompt => ImportGroup::Prompts,
+        Kind::Idea => ImportGroup::Ideas,
+        Kind::Reference => ImportGroup::Reference,
+        _ if now - updated_at > OLD_AFTER_DAYS * 86_400 => ImportGroup::Old,
+        _ => ImportGroup::Other,
+    }
+}
+
 fn has_prefix(line: &str) -> bool {
     let lower = line.trim_start().to_lowercase();
     ["идея:", "idea:", "промпт:", "prompt:", "цель:", "goal:", "ref:", "private:", "секрет:"].iter().any(|p| lower.starts_with(p))
