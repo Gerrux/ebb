@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use egui::{pos2, vec2};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::card::{Card, DEFAULT_SIZE, Kind, Parsed, Placement, Tint, private_parts, private_text};
+use crate::card::{Card, DEFAULT_SIZE, IdeaStatus, Kind, Parsed, Placement, Tint, private_parts, private_text};
 use crate::resurface::DAY;
 
 /// Local day number of the last Rediscover pick.
@@ -151,6 +151,7 @@ fn card_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
         placement: Placement::parse(&r.get::<_, String>(13)?),
         review_at: r.get(14)?,
         collapsed: r.get(15)?,
+        idea_status: r.get::<_, Option<String>>(16)?.as_deref().and_then(IdeaStatus::parse),
     })
 }
 
@@ -335,6 +336,9 @@ impl Store {
             ("z", "INTEGER NOT NULL DEFAULT 0"),
             // Folded to one line on the layer (card::Card::collapsed).
             ("collapsed", "INTEGER NOT NULL DEFAULT 0"),
+            // Fields of a card's kind as JSON, read and written with SQLite's
+            // json functions: {"idea_status": "explore"}. Kept across kind changes.
+            ("meta", "TEXT NOT NULL DEFAULT '{}'"),
         ] {
             let exists: bool = conn.query_row(
                 "SELECT count(*) FROM pragma_table_info('cards') WHERE name=?1",
@@ -459,7 +463,8 @@ impl Store {
 
     pub fn card(&self, id: i64) -> rusqlite::Result<Option<Card>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint, placement, review_at, collapsed
+            "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint, placement, review_at, collapsed,
+                    json_extract(meta, '$.idea_status')
              FROM cards WHERE id=?1",
         )?;
         let mut rows = stmt.query_map([id], card_row)?;
@@ -516,7 +521,10 @@ impl Store {
         )?;
         let mut stmt = tx.prepare(
             "SELECT id, kind, created_at, last_viewed_at, review_at, last_resurfaced_at,
-                    ignored_count, priority, pinned, archived, deleted_at
+                    ignored_count,
+                    -- An idea marked important counts as high priority.
+                    priority + coalesce(kind = 'idea' AND json_extract(meta, '$.idea_status') = 'important', 0),
+                    pinned, archived, deleted_at
              FROM cards WHERE archived=1 AND deleted_at IS NULL",
         )?;
         let candidates = stmt
@@ -561,7 +569,8 @@ impl Store {
 
     pub fn review_queue(&self, at: i64, limit: usize) -> rusqlite::Result<Vec<Card>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint, placement, review_at, collapsed
+            "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint, placement, review_at, collapsed,
+                    json_extract(meta, '$.idea_status')
              FROM cards
              WHERE deleted_at IS NULL AND kind != 'private' AND pinned=0
                AND (review_at IS NULL OR review_at <= ?1)
@@ -819,7 +828,8 @@ impl Store {
 
     pub fn load(&self) -> rusqlite::Result<Vec<Card>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint, placement, review_at, collapsed
+            "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint, placement, review_at, collapsed,
+                    json_extract(meta, '$.idea_status')
              FROM cards WHERE archived = 0 AND deleted_at IS NULL ORDER BY z, updated_at",
         )?;
         let rows = stmt.query_map([], card_row)?;
@@ -877,7 +887,18 @@ impl Store {
             placement: Placement::Manual,
             tint: None,
             collapsed: false,
+            idea_status: None,
         })
+    }
+
+    /// Sets or clears an idea's status. Layout-like metadata: the note doesn't
+    /// count as changed.
+    pub fn set_idea_status(&self, id: i64, status: Option<IdeaStatus>) -> rusqlite::Result<()> {
+        match status {
+            Some(s) => self.conn.execute("UPDATE cards SET meta=json_set(meta, '$.idea_status', ?2) WHERE id=?1", params![id, s.as_str()])?,
+            None => self.conn.execute("UPDATE cards SET meta=json_remove(meta, '$.idea_status') WHERE id=?1", [id])?,
+        };
+        Ok(())
     }
 
     /// Folds a card to one line on the layer, or opens it. Layout only: the note
@@ -1301,6 +1322,37 @@ guest / pass");
         assert_eq!(open.body, "Wi-Fi офис
 guest / pass");
         assert!(store.secret(card.id).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn idea_status_survives_a_change_of_kind() {
+        let (store, dir) = temp_store("idea-status");
+        let card = add(&store, "идея: annual pricing");
+        store.set_idea_status(card.id, Some(IdeaStatus::Explore)).unwrap();
+        store.set_kind(card.id, Kind::Goal).unwrap();
+        store.set_kind(card.id, Kind::Idea).unwrap();
+        let loaded = store.card(card.id).unwrap().unwrap();
+        assert_eq!((loaded.kind, loaded.idea_status), (Kind::Idea, Some(IdeaStatus::Explore)));
+        store.set_idea_status(card.id, None).unwrap();
+        assert_eq!(store.card(card.id).unwrap().unwrap().idea_status, None);
+        let meta: String = store.conn.query_row("SELECT meta FROM cards WHERE id=?1", [card.id], |r| r.get(0)).unwrap();
+        assert_eq!(meta, "{}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn important_ideas_come_back_first() {
+        let (store, dir) = temp_store("idea-important");
+        let plain = add(&store, "идея: first");
+        let important = add(&store, "идея: second");
+        for c in [&plain, &important] {
+            store.set_archived(c.id, true).unwrap();
+        }
+        store.set_idea_status(important.id, Some(IdeaStatus::Important)).unwrap();
+        store.conn.execute("UPDATE cards SET created_at=1, last_viewed_at=1", []).unwrap();
+        let picks = store.refresh_resurfacing(100 * DAY, 0, 1).unwrap();
+        assert_eq!(picks.iter().map(|p| p.id).collect::<Vec<_>>(), vec![important.id]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

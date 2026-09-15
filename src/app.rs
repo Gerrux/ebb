@@ -136,6 +136,7 @@ enum Action {
     SetTint(Option<card::Tint>),
     /// Fold the card to one line, or open it.
     ToggleCollapse,
+    SetIdeaStatus(Option<card::IdeaStatus>),
     /// Off the layer for this many days.
     Snooze(i64),
 }
@@ -1034,6 +1035,12 @@ impl EbbApp {
                     }
                 }
                 Action::SetKind(kind) => self.set_kind(idx, kind),
+                Action::SetIdeaStatus(status) => {
+                    let set = self.store.set_idea_status(self.cards[idx].id, status);
+                    if self.report(set, "поменять статус идеи").is_some() {
+                        self.cards[idx].idea_status = status;
+                    }
+                }
                 Action::ToggleCollapse => {
                     let id = self.cards[idx].id;
                     self.commit_edit_of(id);
@@ -2486,6 +2493,23 @@ fn place_resurfaced(store: &Store, cards: &mut [Card], fresh: &[i64], area: Vec2
     }
 }
 
+/// An idea's statuses, and none.
+fn idea_status_menu(anchor: &egui::Response, popup: Id, current: Option<card::IdeaStatus>, out: &mut Vec<Action>) {
+    egui::Popup::menu(anchor).id(popup).align(egui::RectAlign::TOP_START).gap(4.0).width(170.0).show(|ui| {
+        ui.spacing_mut().button_padding = vec2(8.0, 5.0);
+        let options = card::IdeaStatus::ALL.into_iter().map(Some).chain(std::iter::once(None));
+        for status in options {
+            let label = status.map_or("Без статуса", card::IdeaStatus::label);
+            let button = egui::Button::new(RichText::new(label).size(14.0))
+                .selected(status == current)
+                .min_size(vec2(ui.available_width(), 0.0));
+            if ui.add(button).clicked() {
+                out.push(Action::SetIdeaStatus(status));
+            }
+        }
+    });
+}
+
 /// "Позже": which morning the card comes back on.
 fn snooze_menu(anchor: &egui::Response, popup: Id, out: &mut Vec<Action>) {
     egui::Popup::menu(anchor).id(popup).align(egui::RectAlign::BOTTOM_END).gap(4.0).width(170.0).show(|ui| {
@@ -2889,6 +2913,34 @@ fn card_ui(
         theme::card_muted(),
     );
     let mut x = footer.left();
+    // An idea's status leads the footer: always there once set (it's what the
+    // idea is), offered with the other details while it isn't.
+    if card.kind == Kind::Idea && !card.collapsed && !toolbar_shown {
+        let popup = id.with("idea-status");
+        let menu_open = egui::Popup::is_id_open(ui.ctx(), popup);
+        let shown = if card.idea_status.is_some() || menu_open { 1.0 } else { details };
+        if shown > 0.0 {
+            let (text, color) = match card.idea_status {
+                Some(s) => (s.label(), s.color()),
+                None => ("Статус", theme::card_muted()),
+            };
+            let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(11.5), color);
+            let chip = Rect::from_min_size(pos2(x, footer.center().y - galley.size().y / 2.0 - 2.0), galley.size() + vec2(12.0, 4.0));
+            let resp = ui.interact(chip, popup.with("chip"), if shown > 0.5 { Sense::click() } else { Sense::hover() });
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Статус идеи: {text}")));
+            let mut p = ui.painter().with_clip_rect(footer);
+            p.multiply_opacity(shown);
+            let fill = if resp.hovered() || menu_open { theme::wash(30) } else { theme::chip_fill() };
+            p.rect_filled(chip, CornerRadius::same(6), fill);
+            if card.idea_status.is_some() {
+                p.rect_stroke(chip, CornerRadius::same(6), Stroke::new(1.0, color.gamma_multiply(0.6)), StrokeKind::Inside);
+            }
+            p.galley(chip.min + vec2(6.0, 2.0), galley, color);
+            let resp = if shown > 0.5 { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
+            idea_status_menu(&resp, popup, card.idea_status, &mut out);
+            x = chip.right() + 4.0;
+        }
+    }
     for tag in &card.tags {
         let galley = painter.layout_no_wrap(format!("#{tag}"), FontId::proportional(11.5), theme::card_dim());
         let chip = Rect::from_min_size(

@@ -128,6 +128,53 @@ impl Kind {
     }
 }
 
+/// Where an idea stands (product.txt §4). Kept in `cards.meta`, so it survives
+/// a change of kind and comes back when the card is an idea again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdeaStatus {
+    Potential,
+    Maybe,
+    Explore,
+    Important,
+}
+
+impl IdeaStatus {
+    pub const ALL: [IdeaStatus; 4] = [IdeaStatus::Potential, IdeaStatus::Maybe, IdeaStatus::Explore, IdeaStatus::Important];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IdeaStatus::Potential => "potential",
+            IdeaStatus::Maybe => "maybe",
+            IdeaStatus::Explore => "explore",
+            IdeaStatus::Important => "important",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<IdeaStatus> {
+        IdeaStatus::ALL.into_iter().find(|v| v.as_str() == s)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            IdeaStatus::Potential => "Потенциал",
+            IdeaStatus::Maybe => "Может быть",
+            IdeaStatus::Explore => "Изучить",
+            IdeaStatus::Important => "Важно",
+        }
+    }
+
+    /// Readable on a card (see theme::on_card).
+    pub fn color(self) -> Color32 {
+        let tint = match self {
+            IdeaStatus::Potential => Tint::Blue,
+            IdeaStatus::Maybe => Tint::Gray,
+            IdeaStatus::Explore => Tint::Teal,
+            IdeaStatus::Important => Tint::Orange,
+        };
+        crate::theme::on_card(tint.color())
+    }
+}
+
 /// A color picked for a card by hand; replaces its kind's accent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tint {
@@ -435,6 +482,8 @@ pub struct Card {
     pub tint: Option<Tint>,
     /// Folded to one line on the layer; `size` stays what it opens to.
     pub collapsed: bool,
+    /// Set while it was an idea; shown only while it is one.
+    pub idea_status: Option<IdeaStatus>,
 }
 
 /// Height of a collapsed card.
@@ -1086,6 +1135,7 @@ mod tests {
             placement: Placement::Manual,
             tint: None,
             collapsed: false,
+            idea_status: None,
         }
     }
 

@@ -8,6 +8,10 @@
 Свернуть: пункт «Свернуть в строку» в меню типа (оно же «⋯»); свёрнутая карточка — строка 40 pt
 на всю ширину с иконкой типа и первой строкой текста (у Private — только метка), без изменения
 размера; клик разворачивает к прежнему размеру, открытие из поиска тоже. `cards.collapsed`.
+Статус идеи: чип первым в подвале Idea-карточки (Потенциал / Может быть / Изучить / Важно), виден
+всегда, когда задан, иначе — «Статус» при наведении; клик открывает меню. Хранится в `cards.meta`
+(JSON через функции SQLite `json_set`/`json_extract`, без serde_json) и переживает смену типа.
+«Важно» считается высоким приоритетом в Rediscover.
 
 ## Зачем
 
@@ -48,7 +52,7 @@ product.txt §3, §4, §14, §18. Сейчас тип определяется �
 ## Данные
 
 ```sql
-ALTER TABLE cards ADD COLUMN meta TEXT NOT NULL DEFAULT '{}';   -- JSON полей типа
+ALTER TABLE cards ADD COLUMN meta TEXT NOT NULL DEFAULT '{}';   -- JSON полей типа; сделано (idea_status)
 ALTER TABLE cards ADD COLUMN collapsed INTEGER NOT NULL DEFAULT 0;   -- сделано
 ALTER TABLE cards ADD COLUMN accent TEXT;                         -- переопределение цвета, NULL = по типу
 CREATE TABLE tags(name TEXT PRIMARY KEY, uses INTEGER NOT NULL);  -- для автодополнения, пересчёт триггером
@@ -78,7 +82,7 @@ CREATE TABLE tags(name TEXT PRIMARY KEY, uses INTEGER NOT NULL);  -- для ав
 
 - [ ] Все действия наведения доступны с клавиатуры в режиме выбора карточки (Tab по карточкам,
       Enter — правка, Delete — в корзину) и видны egui_mcp по подписям.
-- [ ] Смена типа Idea → Goal → Idea не теряет статус идеи.
+- [x] Смена типа Idea → Goal → Idea не теряет статус идеи.
 - [x] Prompt с `{{topic}}` копирует текст с подставленным значением.
 - [ ] Ни одного сетевого запроса без нажатия «Подтянуть заголовок» (проверка: Resource Monitor /
       `netstat -b` во время работы).
