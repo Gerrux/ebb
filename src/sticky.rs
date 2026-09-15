@@ -12,7 +12,7 @@ use std::time::SystemTime;
 
 use rusqlite::{Connection, OpenFlags};
 
-use crate::card::{Kind, looks_secret, parse_capture};
+use crate::card::{Kind, Tint, looks_secret, parse_capture};
 
 /// .NET ticks (100 ns since 0001-01-01) at the Unix epoch.
 const TICKS_AT_UNIX_EPOCH: i64 = 621_355_968_000_000_000;
@@ -67,6 +67,25 @@ pub struct SourceNote {
     pub window: Option<WindowPos>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// The note's color in Sticky Notes: Yellow, Green, Pink, Purple, Blue, Gray, Charcoal.
+    pub theme: Option<String>,
+}
+
+/// Sticky Notes' default color; a set of notes all in it never picked a color.
+const DEFAULT_THEME: &str = "Yellow";
+
+/// The card color for a Sticky Notes color. Charcoal (the dark note) is the
+/// neutral one here: on the dark glass it reads as "no color".
+pub fn tint_from_theme(theme: &str) -> Option<Tint> {
+    match theme.trim() {
+        "Yellow" => Some(Tint::Yellow),
+        "Green" => Some(Tint::Green),
+        "Pink" => Some(Tint::Pink),
+        "Purple" => Some(Tint::Purple),
+        "Blue" => Some(Tint::Blue),
+        "Gray" | "Charcoal" => Some(Tint::Gray),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -131,7 +150,7 @@ pub fn read_notes(src: &Path) -> Result<Vec<SourceNote>, String> {
         let conn = Connection::open_with_flags(&copy, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)
             .map_err(|e| format!("open copy: {e}"))?;
         let mut stmt = conn
-            .prepare("SELECT Id, Text, IsOpen, CreatedAt, UpdatedAt, WindowPosition FROM Note WHERE DeletedAt IS NULL")
+            .prepare("SELECT Id, Text, IsOpen, CreatedAt, UpdatedAt, WindowPosition, Theme FROM Note WHERE DeletedAt IS NULL")
             .map_err(|e| format!("query: {e}"))?;
         let rows = stmt
             .query_map([], |r| {
@@ -142,6 +161,7 @@ pub fn read_notes(src: &Path) -> Result<Vec<SourceNote>, String> {
                     window: r.get::<_, Option<String>>(5)?.as_deref().and_then(parse_window_position),
                     created_at: ticks_to_unix(r.get::<_, Option<i64>>(3)?.unwrap_or(TICKS_AT_UNIX_EPOCH)),
                     updated_at: ticks_to_unix(r.get::<_, Option<i64>>(4)?.unwrap_or(TICKS_AT_UNIX_EPOCH)),
+                    theme: r.get::<_, Option<String>>(6)?,
                 })
             })
             .map_err(|e| format!("query: {e}"))?;
@@ -251,6 +271,8 @@ pub struct Planned {
     pub on_layer: bool,
     pub window: Option<WindowPos>,
     pub old: bool,
+    /// The note's Sticky Notes color, when colors were used at all (see [`plan`]).
+    pub tint: Option<Tint>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -264,6 +286,8 @@ pub struct Stats {
     pub duplicates: usize,
     pub already_imported: usize,
     pub by_kind: Vec<(Kind, usize)>,
+    /// Notes that keep their Sticky Notes color.
+    pub colored: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -282,6 +306,11 @@ pub fn plan(notes: &[SourceNote], already: &std::collections::HashSet<String>, n
     // screen, or else the most recently edited.
     let mut sorted: Vec<&SourceNote> = notes.iter().collect();
     sorted.sort_by_key(|n| (std::cmp::Reverse(n.is_open), std::cmp::Reverse(n.updated_at)));
+
+    // Colors carry over only when the person used them: with every note in the
+    // default yellow, the color says nothing, and yellow on every card would
+    // hide the kinds' own colors.
+    let uses_colors = notes.iter().any(|n| n.theme.as_deref().is_some_and(|t| t.trim() != DEFAULT_THEME));
 
     let mut seen: HashMap<String, ()> = HashMap::new();
     let mut planned = Vec::new();
@@ -313,6 +342,7 @@ pub fn plan(notes: &[SourceNote], already: &std::collections::HashSet<String>, n
             on_layer: note.is_open,
             window: note.window.clone(),
             old: !note.is_open && now - note.updated_at > OLD_AFTER_DAYS * 86_400,
+            tint: if uses_colors { note.theme.as_deref().and_then(tint_from_theme) } else { None },
         });
     }
 
@@ -320,6 +350,7 @@ pub fn plan(notes: &[SourceNote], already: &std::collections::HashSet<String>, n
     stats.on_layer = planned.iter().filter(|p| p.on_layer).count();
     stats.archived = planned.len() - stats.on_layer;
     stats.old = planned.iter().filter(|p| p.old).count();
+    stats.colored = planned.iter().filter(|p| p.tint.is_some()).count();
     stats.by_kind = Kind::ALL
         .iter()
         .map(|k| (*k, planned.iter().filter(|p| p.kind == *k).count()))
@@ -462,7 +493,30 @@ mod tests {
             window: None,
             created_at: now - updated_days_ago * 86_400,
             updated_at: now - updated_days_ago * 86_400,
+            theme: None,
         }
+    }
+
+    #[test]
+    fn colors_carry_over_only_when_they_were_used() {
+        let mut a = note("a", "жёлтая", true, 1);
+        a.theme = Some("Yellow".into());
+        let mut b = note("b", "серая", true, 1);
+        b.theme = Some("Charcoal".into());
+        let mut c = note("c", "без цвета", true, 1);
+        c.theme = None;
+        let tints = |notes: &[SourceNote]| -> Vec<Option<Tint>> {
+            let mut p = plan(notes, &Default::default(), 2_000_000_000).notes;
+            p.sort_by(|x, y| x.source_id.cmp(&y.source_id));
+            p.iter().map(|n| n.tint).collect()
+        };
+        // All default yellow: nobody picked a color.
+        assert_eq!(tints(&[a.clone(), c.clone()]), [None, None]);
+        // One other color: every color counts, yellow included.
+        assert_eq!(tints(&[a.clone(), b.clone(), c.clone()]), [Some(Tint::Yellow), Some(Tint::Gray), None]);
+        assert_eq!(plan(&[a, b, c], &Default::default(), 2_000_000_000).stats.colored, 2);
+        assert_eq!(tint_from_theme("Green"), Some(Tint::Green));
+        assert_eq!(tint_from_theme("Magenta"), None);
     }
 
     #[test]
@@ -532,6 +586,7 @@ mod tests {
             on_layer: true,
             window: Some(WindowPos { device: device.into(), pos, size }),
             old: false,
+            tint: None,
         };
         let notes = [
             planned("here", r"\\?\DISPLAY#AAA#1&2&UID1#{other-guid}", (1263, 170), (317, 285)),

@@ -762,8 +762,8 @@ impl Store {
         let batch: i64 = tx.query_row("SELECT COALESCE(MAX(batch), 0) + 1 FROM imported", [], |r| r.get(0))?;
         {
             let mut card = tx.prepare(
-                "INSERT INTO cards (kind, title, body, tags, archived, x, y, w, h, created_at, updated_at, last_viewed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                "INSERT INTO cards (kind, title, body, tags, archived, x, y, w, h, created_at, updated_at, last_viewed_at, tint)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             )?;
             let mut protect = tx.prepare("UPDATE cards SET title=?2, body='', secret=?3 WHERE id=?1")?;
             let mut link = tx.prepare("INSERT INTO imported (source_id, card_id, batch) VALUES (?1, ?2, ?3)")?;
@@ -791,6 +791,7 @@ impl Store {
                     // One second back: timestamps are in seconds, and a move right
                     // after the import must still count as a change (import_state).
                     if rect.is_some() { (viewed - 1).max(n.updated_at) } else { n.updated_at },
+                    n.tint.map(Tint::as_str),
                 ])?;
                 let id = tx.last_insert_rowid();
                 if n.kind == Kind::Private {
@@ -1007,6 +1008,7 @@ mod tests {
             on_layer,
             window: None,
             old: false,
+            tint: None,
         }
     }
 
@@ -1384,7 +1386,8 @@ guest / pass");
     #[test]
     fn import_replace_keeps_changed_cards_and_undo() {
         let (mut store, dir) = temp_store("import");
-        let notes = [planned("a", true), planned("b", false), planned("c", false)];
+        let mut notes = [planned("a", true), planned("b", false), planned("c", false)];
+        notes[0].tint = Some(Tint::Green);
         let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(317.0, 285.0));
         store.import("sticky:", &notes, &[Some(rect), None, None], &[]).unwrap();
 
@@ -1392,6 +1395,7 @@ guest / pass");
         assert_eq!(visible.len(), 1, "only the on-layer note is loaded");
         assert_eq!(visible[0].created_at, 1_600_000_000, "original timestamps are kept");
         assert_eq!((visible[0].pos, visible[0].size), (rect.min, rect.size()), "position and size kept");
+        assert_eq!(visible[0].tint, Some(Tint::Green), "the Sticky Notes color is kept");
 
         // Untouched: everything can be replaced.
         let (keep, replace) = store.import_state("sticky:").unwrap();
@@ -1418,6 +1422,7 @@ guest / pass");
                 window: None,
                 created_at: 0,
                 updated_at: 1_650_000_000,
+                theme: None,
             })
             .collect();
         let again = plan(&source, &keep, 1_700_000_000);

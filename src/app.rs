@@ -2026,6 +2026,9 @@ fn card_body(
         let (selection, typing) = format_state(ui, editor_id);
         let typing = typing.filter(|_| selection.is_empty());
         let layout_styles = styles.clone();
+        // Code runs take the row height of the card's font, as in the shown
+        // text, so opening the editor doesn't reflow the lines.
+        let row_height = ui.fonts_mut(|f| f.row_height(&theme::card_font(base)));
         let mut layouter = |ui: &Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
             let text = text.as_str();
             // Mid-edit the text is ahead of the styles; the edit is placed as
@@ -2037,7 +2040,12 @@ fn card_body(
             for i in 0..styles.len() {
                 if i + 1 == styles.len() || styles[i + 1] != styles[i] {
                     let run = &text[bytes[from]..bytes[i + 1]];
-                    job.append(run, 0.0, rich_format(editor_font(base, styles[i]), theme::card_text(), styles[i]));
+                    let mut format = rich_format(editor_font(base, styles[i]), theme::card_text(), styles[i]);
+                    if styles[i].code {
+                        format.line_height = Some(row_height);
+                        format.valign = Align::Center;
+                    }
+                    job.append(run, 0.0, format);
                     from = i + 1;
                 }
             }
@@ -2107,11 +2115,14 @@ fn card_body(
         let (pos, galley, resp) = egui::Label::new(job).wrap().selectable(false).layout_in_ui(ui);
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, galley.text()));
         let at = char_at(ui, &galley, pos, resp.rect);
-        ui.painter().galley(pos, galley, theme::card_text());
+        galley_fading(ui, pos, galley, theme::card_text());
         at
     });
     let color = if heading.is_none() { theme::card_text() } else { theme::card_dim() };
     let size = if heading.is_none() { base } else { base - 1.0 };
+    // Every row as tall as a row of the card's own font: Consolas' rows are
+    // shorter, and a command right under a heading sat on it.
+    let row_height = ui.fonts_mut(|f| f.row_height(&theme::card_font(size)));
     // Addresses in link blue and clickable, in any kind; in a Reference, commands,
     // paths and hosts in monospace, the words around them as usual.
     let mut job = egui::text::LayoutJob::default();
@@ -2124,14 +2135,20 @@ fn card_body(
             // Returns the galley's length so far, in chars.
             let mut append = |s: &str, c: Color32| {
                 let from = chars;
-                let font = if span.style.code || technical {
+                let mono = span.style.code || technical;
+                let font = if mono {
                     FontId::monospace(size - 1.0)
                 } else if span.style.bold {
                     theme::card_bold(size)
                 } else {
                     theme::card_font(size)
                 };
-                job.append(s, 0.0, rich_format(font, c, span.style));
+                let mut format = rich_format(font, c, span.style);
+                if mono {
+                    format.line_height = Some(row_height);
+                    format.valign = Align::Center;
+                }
+                job.append(s, 0.0, format);
                 chars += s.chars().count();
                 from..chars
             };
@@ -2154,7 +2171,7 @@ fn card_body(
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, galley.text()));
     let text_at = char_at(ui, &galley, pos, resp.rect);
     let link = text_at.and_then(|at| links.iter().find(|(range, _)| range.contains(&at)).map(|(_, url)| url.as_str()));
-    ui.painter().galley(pos, galley, color);
+    galley_fading(ui, pos, galley, color);
     let display_text = rich_text::strip_markup(&text);
     remember_click(ui, click_id, card, displayed_heading.as_deref(), heading_at, &display_text, text_at);
     let mut link_clicked = false;
@@ -2169,9 +2186,48 @@ fn card_body(
         && let Some(domain) = card::link_domain(&card.body)
     {
         ui.add_space(2.0);
-        ui.add(egui::Label::new(RichText::new(domain).size(12.0).color(theme::card_muted())).selectable(false));
+        let color = theme::card_muted();
+        let galley = ui.painter().layout(domain.to_owned(), FontId::proportional(12.0), color, ui.available_width());
+        let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
+        galley_fading(ui, rect.min, galley, color);
     }
     link_clicked
+}
+
+/// Paints a galley row by row, so text that runs past the card's edge ends on a
+/// whole row and fades toward that edge, instead of being cut through a row by
+/// the clip. Text that fits is painted as is.
+fn galley_fading(ui: &Ui, pos: Pos2, galley: std::sync::Arc<egui::Galley>, color: Color32) {
+    let clip = ui.clip_rect();
+    let painter = ui.painter();
+    let full = galley.rect.translate(pos.to_vec2());
+    let past_bottom = full.bottom() > clip.bottom() + 0.5;
+    let past_top = full.top() < clip.top() - 0.5;
+    if !past_bottom && !past_top {
+        painter.galley(pos, galley, color);
+        return;
+    }
+    for row in &galley.rows {
+        let r = row.rect().translate(pos.to_vec2());
+        let h = r.height().max(1.0);
+        // The last whole row before the edge at 40 %, the one above it at 75 %.
+        let mut alpha: f32 = 1.0;
+        if past_bottom {
+            if r.bottom() > clip.bottom() + 0.5 {
+                continue;
+            }
+            alpha = alpha.min(0.4 + 0.35 * (clip.bottom() - r.bottom()) / h);
+        }
+        if past_top {
+            if r.top() < clip.top() - 0.5 {
+                continue;
+            }
+            alpha = alpha.min(0.4 + 0.35 * (r.top() - clip.top()) / h);
+        }
+        let mut p = painter.with_clip_rect(r.intersect(clip));
+        p.multiply_opacity(alpha.min(1.0));
+        p.galley(pos, galley.clone(), color);
+    }
 }
 
 fn rich_format(font: FontId, color: Color32, style: rich_text::Style) -> egui::TextFormat {
@@ -2671,6 +2727,10 @@ fn card_ui(
     let link_clicked = ui
         .scope_builder(UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Min)), |ui| {
             ui.set_clip_rect(body.intersect(ui.clip_rect()));
+            // A thin bar over the text, only while the pointer is on the card,
+            // like the scrollbars of Windows 11; not egui's solid gutter.
+            ui.spacing_mut().scroll =
+                egui::style::ScrollStyle { bar_width: 6.0, floating_width: 3.0, ..egui::style::ScrollStyle::floating() };
             egui::ScrollArea::vertical()
                 .id_salt(id.with("scroll"))
                 .auto_shrink([false, false])
