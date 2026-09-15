@@ -150,6 +150,7 @@ fn card_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
         tint: r.get::<_, Option<String>>(12)?.as_deref().and_then(Tint::parse),
         placement: Placement::parse(&r.get::<_, String>(13)?),
         review_at: r.get(14)?,
+        collapsed: r.get(15)?,
     })
 }
 
@@ -332,6 +333,8 @@ impl Store {
             ("priority", "INTEGER NOT NULL DEFAULT 0"),
             // Stacking order on the layer: higher is drawn above.
             ("z", "INTEGER NOT NULL DEFAULT 0"),
+            // Folded to one line on the layer (card::Card::collapsed).
+            ("collapsed", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             let exists: bool = conn.query_row(
                 "SELECT count(*) FROM pragma_table_info('cards') WHERE name=?1",
@@ -456,7 +459,7 @@ impl Store {
 
     pub fn card(&self, id: i64) -> rusqlite::Result<Option<Card>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint, placement, review_at
+            "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint, placement, review_at, collapsed
              FROM cards WHERE id=?1",
         )?;
         let mut rows = stmt.query_map([id], card_row)?;
@@ -558,7 +561,7 @@ impl Store {
 
     pub fn review_queue(&self, at: i64, limit: usize) -> rusqlite::Result<Vec<Card>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint, placement, review_at
+            "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint, placement, review_at, collapsed
              FROM cards
              WHERE deleted_at IS NULL AND kind != 'private' AND pinned=0
                AND (review_at IS NULL OR review_at <= ?1)
@@ -816,7 +819,7 @@ impl Store {
 
     pub fn load(&self) -> rusqlite::Result<Vec<Card>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint, placement, review_at
+            "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint, placement, review_at, collapsed
              FROM cards WHERE archived = 0 AND deleted_at IS NULL ORDER BY z, updated_at",
         )?;
         let rows = stmt.query_map([], card_row)?;
@@ -873,7 +876,15 @@ impl Store {
             review_at,
             placement: Placement::Manual,
             tint: None,
+            collapsed: false,
         })
+    }
+
+    /// Folds a card to one line on the layer, or opens it. Layout only: the note
+    /// doesn't count as changed.
+    pub fn set_collapsed(&self, id: i64, collapsed: bool) -> rusqlite::Result<()> {
+        self.conn.execute("UPDATE cards SET collapsed=?2 WHERE id=?1", params![id, collapsed])?;
+        Ok(())
     }
 
     pub fn save(&self, c: &Card) -> rusqlite::Result<()> {
@@ -1220,6 +1231,23 @@ secret");
         std::fs::rename(wal_of(&new_db), wal_of(&old_db)).unwrap();
         migrate_legacy_at(&old_db, &new_db);
         assert!(wal_of(&new_db).exists() && !wal_of(&old_db).exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn collapsed_card_stays_collapsed_after_reopening() {
+        let (store, dir) = temp_store("collapsed");
+        let card = add(&store, "длинная заметка\nв несколько строк");
+        store.set_collapsed(card.id, true).unwrap();
+        let path = store.conn.path().unwrap().to_owned();
+        drop(store);
+        let store = Store::open_at(PathBuf::from(path)).unwrap();
+        let loaded = store.load().unwrap();
+        assert!(loaded[0].collapsed);
+        assert_eq!(loaded[0].size, DEFAULT_SIZE, "opens to its size");
+        // A later save of the card (a drag) leaves it collapsed.
+        store.save(&loaded[0]).unwrap();
+        assert!(store.card(card.id).unwrap().unwrap().collapsed);
         let _ = std::fs::remove_dir_all(dir);
     }
 

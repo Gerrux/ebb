@@ -134,6 +134,8 @@ enum Action {
     Reveal,
     SetKind(Kind),
     SetTint(Option<card::Tint>),
+    /// Fold the card to one line, or open it.
+    ToggleCollapse,
     /// Off the layer for this many days.
     Snooze(i64),
 }
@@ -809,7 +811,7 @@ impl EbbApp {
             self.cards
                 .iter()
                 .rev()
-                .find(|c| Rect::from_min_size(origin + c.pos.to_vec2(), c.size).contains(p))
+                .find(|c| Rect::from_min_size(origin + c.pos.to_vec2(), c.shown_size()).contains(p))
                 .map(|c| c.id)
         });
         let area = self.area(ui);
@@ -837,7 +839,7 @@ impl EbbApp {
         }
 
         // Where cards are (layer coordinates), for the magnet; None with it off.
-        let rects: Vec<(i64, Rect)> = self.cards.iter().map(|c| (c.id, Rect::from_min_size(c.pos, c.size))).collect();
+        let rects: Vec<(i64, Rect)> = self.cards.iter().map(|c| (c.id, Rect::from_min_size(c.pos, c.shown_size()))).collect();
         let magnet = self.snap.then_some(rects.as_slice());
         let style = self.card_style;
         let mut actions: Vec<(usize, Action)> = Vec::new();
@@ -877,7 +879,7 @@ impl EbbApp {
             match self.cards.iter().find(|c| c.id == hid) {
                 Some(c) if t.elapsed() < HIGHLIGHT_FOR => {
                     let fade = 1.0 - t.elapsed().as_secs_f32() / HIGHLIGHT_FOR.as_secs_f32();
-                    let rect = Rect::from_min_size(origin + c.pos.to_vec2(), c.size).expand(3.0);
+                    let rect = Rect::from_min_size(origin + c.pos.to_vec2(), c.shown_size()).expand(3.0);
                     let stroke = Stroke::new(2.0, c.accent().gamma_multiply(fade));
                     ui.painter().rect_stroke(rect, CornerRadius::same(self.card_style.radius + 2), stroke, StrokeKind::Outside);
                     ui.ctx().request_repaint();
@@ -941,7 +943,7 @@ impl EbbApp {
                             ui.ctx().copy_text(text);
                             mark_copied(ui, c.id);
                         } else {
-                            // Clicked again while its form is open: what's typed stays.
+                            // Its form still open (press and release in one pass): what's typed stays.
                             let old = self.prompt_fill.take().filter(|f| f.card == c.id).map(|f| f.values).unwrap_or_default();
                             let values = variables
                                 .into_iter()
@@ -1032,6 +1034,15 @@ impl EbbApp {
                     }
                 }
                 Action::SetKind(kind) => self.set_kind(idx, kind),
+                Action::ToggleCollapse => {
+                    let id = self.cards[idx].id;
+                    self.commit_edit_of(id);
+                    let collapsed = !self.cards[idx].collapsed;
+                    let set = self.store.set_collapsed(id, collapsed);
+                    if self.report(set, if collapsed { "свернуть карточку" } else { "развернуть карточку" }).is_some() {
+                        self.cards[idx].collapsed = collapsed;
+                    }
+                }
                 Action::SetTint(tint) => {
                     self.cards[idx].tint = tint;
                     self.save(idx);
@@ -1477,6 +1488,10 @@ impl EbbApp {
                 idx
             }
         };
+        // Opened from search to be read: a collapsed card opens.
+        if self.cards[idx].collapsed && self.store.set_collapsed(id, false).is_ok() {
+            self.cards[idx].collapsed = false;
+        }
         let card = self.cards.remove(idx);
         self.cards.push(card);
         let _ = self.store.raise(id);
@@ -2542,6 +2557,15 @@ fn kind_menu(anchor: &egui::Response, card: &Card, out: &mut Vec<Action>, below:
                     }
                 }
             });
+            ui.separator();
+            let (glyph, label) = if card.collapsed { ("\u{E70D}", "Развернуть") } else { ("\u{E70E}", "Свернуть в строку") };
+            let mut job = egui::text::LayoutJob::default();
+            let format = |font: FontId, color: Color32| egui::TextFormat { font_id: font, color, valign: Align::Center, ..Default::default() };
+            job.append(glyph, 0.0, format(theme::icons(13.0), theme::muted()));
+            job.append(label, 10.0, format(FontId::proportional(14.0), theme::text()));
+            if ui.add(egui::Button::new(job).min_size(vec2(ui.available_width(), 0.0))).clicked() {
+                out.push(Action::ToggleCollapse);
+            }
         });
 }
 
@@ -2562,6 +2586,12 @@ fn card_ui(
 ) -> Vec<Action> {
     let mut out = Vec::new();
     let id = Id::new(("card", card.id));
+    // A collapsed card is one line at its full width, drawn at that height; its
+    // size is put back at the end, so it opens to what it was.
+    let full_size = card.size;
+    if card.collapsed {
+        card.size = card.shown_size();
+    }
     let rect = Rect::from_min_size(origin + card.pos.to_vec2(), card.size);
 
     // Registration order = hit-test priority: later widgets sit on top.
@@ -2573,7 +2603,15 @@ fn card_ui(
     let header_rect = Rect::from_min_size(rect.min, vec2(rect.width(), HEADER_H + 6.0));
     // A pinned card is locked in place: no moving, no resizing.
     let locked = card.pinned;
-    let drag = ui.interact(header_rect, id.with("drag"), if locked { Sense::hover() } else { Sense::drag() });
+    // A collapsed card is nearly all header: the header takes its click too
+    // (it's on top of the background and would swallow it).
+    let header_sense = match (locked, card.collapsed) {
+        (true, false) => Sense::hover(),
+        (true, true) => Sense::click(),
+        (false, false) => Sense::drag(),
+        (false, true) => Sense::click_and_drag(),
+    };
+    let drag = ui.interact(header_rect, id.with("drag"), header_sense);
     // Resize handles on every edge and corner; corners last so they win where they overlap.
     const EDGE: f32 = 6.0;
     const CORNER: f32 = 16.0;
@@ -2591,7 +2629,7 @@ fn card_ui(
     ];
     let handles: Vec<(Sides, egui::Response)> = handles
         .into_iter()
-        .filter(|_| !locked)
+        .filter(|_| !locked && !card.collapsed)
         .enumerate()
         .map(|(i, (sides, area))| (sides, ui.interact(area, id.with(("resize", i)), Sense::drag())))
         .collect();
@@ -2600,14 +2638,18 @@ fn card_ui(
     let resize_hover = handles.iter().rev().find(|(_, h)| h.hovered()).map(|(s, _)| *s);
     let corner_hovered = resize_hover.is_some_and(|s| s.right && s.bottom);
 
-    if bg.clicked() || bg.double_clicked() || drag.drag_started() || resize.is_some_and(|(_, h)| h.drag_started()) {
+    if bg.clicked() || bg.double_clicked() || drag.clicked() || drag.drag_started() || resize.is_some_and(|(_, h)| h.drag_started()) {
         out.push(Action::Front);
     }
     // One click edits; a Private card takes a double click, so a stray click
     // doesn't lay its text open.
     // Pushed once the body is drawn: a click on a link there opens it instead.
     let edit_gesture = if card.kind == Kind::Private { bg.double_clicked() } else { bg.clicked() };
-    let start_edit = edit_gesture && editing.is_none();
+    // A collapsed card opens on a click instead.
+    if card.collapsed && (bg.clicked() || drag.clicked()) {
+        out.push(Action::ToggleCollapse);
+    }
+    let start_edit = edit_gesture && editing.is_none() && !card.collapsed;
 
     // The rect at the start of the gesture and the pointer's total movement live in
     // memory, so a stuck edge follows the pointer again once it moves past the snap
@@ -2718,7 +2760,11 @@ fn card_ui(
         |ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                if hovered {
+                if hovered && card.collapsed {
+                    if icon_button(ui, "\u{E70D}", "Развернуть", theme::card_dim()).clicked() {
+                        out.push(Action::ToggleCollapse);
+                    }
+                } else if hovered {
                     // Pinned: nothing that takes the card off the layer by accident.
                     if !locked && icon_button(ui, "\u{E74D}", "Удалить", theme::card_muted()).clicked() {
                         out.push(Action::Delete);
@@ -2778,7 +2824,8 @@ fn card_ui(
     }
 
     // Body: scrolls when the text doesn't fit; the floating bar shows only on hover.
-    let link_clicked = ui
+    let link_clicked = !card.collapsed
+        && ui
         .scope_builder(UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Min)), |ui| {
             ui.set_clip_rect(body.intersect(ui.clip_rect()));
             egui::ScrollArea::vertical()
@@ -2797,6 +2844,8 @@ fn card_ui(
     // to change the kind.
     let icon_size = if style.bold_icon { vec2(26.0, 24.0) } else { vec2(22.0, 20.0) };
     let kind_rect = match style.icon {
+        // Collapsed: the icon leads the line, clear of the hover buttons on the right.
+        _ if card.collapsed => Rect::from_center_size(pos2(inner.left() + 8.0, rect.center().y), icon_size),
         card::IconSpot::TopLeft => Rect::from_center_size(pos2(header.left() + 8.0, header.center().y), icon_size),
         _ => Rect::from_center_size(pos2(footer.right() - 8.0, footer.center().y), icon_size),
     };
@@ -2831,7 +2880,7 @@ fn card_ui(
 
     let mut painter = ui.painter().with_clip_rect(footer);
     // While editing, the toolbar has the footer.
-    painter.multiply_opacity(if toolbar_shown { 0.0 } else { details });
+    painter.multiply_opacity(if toolbar_shown || card.collapsed { 0.0 } else { details });
     let age = painter.text(
         pos2(if style.icon == card::IconSpot::TopLeft { footer.right() } else { kind_rect.left() - 6.0 }, footer.center().y),
         Align2::RIGHT_CENTER,
@@ -2854,12 +2903,29 @@ fn card_ui(
         x = chip.right() + 4.0;
     }
 
-    if hovered {
+    // The resize grip, where a card can be resized.
+    if hovered && !locked && !card.collapsed {
         let p = ui.painter();
         let c = rect.max - vec2(6.0, 6.0);
         let stroke = Stroke::new(1.2, theme::wash(if corner_hovered { 120 } else { 50 }));
         p.line_segment([c - vec2(8.0, 0.0), c - vec2(0.0, 8.0)], stroke);
         p.line_segment([c - vec2(4.0, 0.0), c - vec2(0.0, 4.0)], stroke);
+    }
+
+    if card.collapsed {
+        let line = card.collapsed_line();
+        // Clear of the open button and the pin while those show.
+        let right = inner.right() - if hovered { 54.0 } else if card.pinned { 28.0 } else { 0.0 };
+        let left = kind_rect.right() + 6.0;
+        let mut job = egui::text::LayoutJob::single_section(
+            line.clone(),
+            egui::TextFormat { font_id: theme::card_font(style.text_size()), color: theme::card_text(), ..Default::default() },
+        );
+        job.wrap = egui::text::TextWrapping { max_width: (right - left).max(0.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+        let galley = ui.fonts_mut(|f| f.layout_job(job));
+        ui.painter().galley(pos2(left, rect.center().y - galley.size().y / 2.0), galley, theme::card_text());
+        bg.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Свёрнута: {line}")));
+        card.size = full_size;
     }
 
     out
