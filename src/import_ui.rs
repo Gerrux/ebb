@@ -65,7 +65,7 @@ fn notes(n: usize) -> String {
     format!("{n} {word}")
 }
 
-fn background_priority() {
+pub(crate) fn background_priority() {
     use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN};
     unsafe {
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
@@ -235,6 +235,9 @@ impl StickyImport {
                     line(ui, format!("В архив: {} (давно не менялись: {}). Их найдёт поиск.", s.archived, s.old), theme::dim());
                     let kinds: Vec<String> = s.by_kind.iter().map(|(k, n)| format!("{} {n}", k.label())).collect();
                     line(ui, kinds.join(" · "), theme::dim());
+                    if s.colored > 0 {
+                        line(ui, format!("Цвета заметок сохраню: {}.", s.colored), theme::dim());
+                    }
                     line(ui, format!("Пропущу: пустых {}, дубликатов {}.", s.empty, s.duplicates), theme::muted());
                     if !offer.replace.is_empty() || offer.kept > 0 {
                         line(

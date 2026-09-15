@@ -25,7 +25,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, AppendMenuW, GetWindowThreadProcessId, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW,
     FindWindowW, GetMessageW, HICON, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW,
     RegisterClassExW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_HOTKEY, WM_NULL, WM_SETTINGCHANGE,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_HOTKEY, WM_NULL, WM_POWERBROADCAST, WM_SETTINGCHANGE,
+    WM_TIMECHANGE,
     WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
@@ -51,6 +52,8 @@ const WM_QUIT_APP: u32 = WM_APP + 3;
 const WM_RETRY_HOTKEYS: u32 = WM_APP + 4;
 const TRAY_ID: u32 = 1;
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
+/// `WM_POWERBROADCAST`: resumed from sleep or hibernation.
+const PBT_APMRESUMEAUTOMATIC: usize = 0x12;
 
 pub enum Event {
     /// Capture hotkey (or tray/menu equivalent) pressed at this instant.
@@ -71,6 +74,9 @@ pub enum Event {
     SystemColors,
     /// A hotkey taken at startup was registered later; see [`Shared::hotkeys`].
     HotkeysChanged,
+    /// Back from sleep, or the clock or time zone changed: timers set for a
+    /// wall-clock moment (the morning Rediscover) should look at the time again.
+    ClockChanged,
     Exit,
 }
 
@@ -306,6 +312,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             push(Event::SystemColors)
         }
         WM_DWMCOLORIZATIONCOLORCHANGED => push(Event::SystemColors),
+        WM_POWERBROADCAST if wparam.0 == PBT_APMRESUMEAUTOMATIC => push(Event::ClockChanged),
+        WM_TIMECHANGE => push(Event::ClockChanged),
         WM_QUIT_APP => push(Event::Exit),
         WM_RETRY_HOTKEYS => unsafe { retry_missing(hwnd) },
         WM_TRAY => match (lparam.0 & 0xFFFF) as u32 {

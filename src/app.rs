@@ -1,6 +1,6 @@
 //! The ambient layer (root viewport); the capture/search bar lives in `bar`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use egui::{
@@ -14,15 +14,18 @@ use std::sync::atomic::Ordering;
 use crate::bar::{self, BarState, Mode, Outbox, Press};
 use crate::import_ui::StickyImport;
 use crate::library::{self, LibraryState, Request, Tab};
+use crate::resurface;
 use crate::rich_text;
 use crate::shell::{self, Event};
 use crate::card::{self, Card, Kind, MIN_SIZE, Placement, Sides};
-use crate::store::Store;
+use crate::store::{ReviewSnapshot, Store};
 use crate::theme;
 use crate::win::{self, Backdrop};
 
 const HEADER_H: f32 = 30.0;
-const FOOTER_H: f32 = 22.0;
+const FOOTER_H: f32 = 20.0;
+/// The line above the text: the kind's mark, and the actions while hovered.
+const META_H: f32 = 20.0;
 const REVEAL_FOR: Duration = Duration::from_secs(5);
 const HIGHLIGHT_FOR: Duration = Duration::from_millis(2500);
 const TOAST_FOR: Duration = Duration::from_secs(6);
@@ -33,6 +36,8 @@ const CARD_APPEAR: Duration = Duration::from_millis(220);
 const CARD_LEAVE: Duration = Duration::from_millis(160);
 pub(crate) const PANEL_APPEAR: Duration = Duration::from_millis(200);
 const PANEL_FADE_OUT: Duration = Duration::from_millis(250);
+/// "Позже" on a card: days until it comes back.
+const SNOOZE_DAYS: [i64; 4] = [1, 3, 7, 30];
 
 /// Ease-out cubic on a 0..1 progress (clamped).
 pub(crate) fn panel_ease(t: f32) -> f32 {
@@ -73,12 +78,37 @@ const SET_THEME: &str = "app.theme";
 /// (the taskbar does, on mouse down) counts as a click on the summoned layer.
 const TRAY_CLICK_AFTER_LOWER_MS: u64 = 500;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Undo {
     Unarchive(i64),
     Restore(i64),
     /// Back to the kind a card had.
     Kind(i64, Kind),
+    /// Back on the layer as it was before "Позже".
+    Snooze(ReviewSnapshot),
+    /// A card's title and text as they were before a tag change.
+    Text(i64, String, String),
+}
+
+/// The field that adds a tag to a card, under its "+" chip.
+struct TagInput {
+    card: i64,
+    /// Where it hangs from (the "+" chip's bottom left), in screen points.
+    at: Pos2,
+    text: String,
+    focused: bool,
+    opened_pass: u64,
+}
+
+struct PromptFill {
+    card: i64,
+    /// The Prompt's text as it will be copied, placeholders in place.
+    text: String,
+    values: Vec<(String, String)>,
+    /// The first field has had the focus once.
+    focused: bool,
+    /// The pass it opened in: the click that opened it isn't a click elsewhere.
+    opened_pass: u64,
 }
 
 struct Toast {
@@ -118,6 +148,23 @@ enum Action {
     Reveal,
     SetKind(Kind),
     SetTint(Option<card::Tint>),
+    /// Fold the card to one line, or open it.
+    ToggleCollapse,
+    SetIdeaStatus(Option<card::IdeaStatus>),
+    /// Take the tag's `#words` out of the text.
+    RemoveTag(String),
+    /// Open the tag field, hanging from this point.
+    AddTag(Pos2),
+    /// Tick or clear the check box on this line of the text.
+    ToggleCheck(usize),
+    /// Off the layer for this many days.
+    Snooze(i64),
+    /// The first address in a Link card, in the browser.
+    OpenLink,
+    /// A Goal or Reminder is done: to the archive.
+    Done,
+    /// A resurfaced card stays: it's the user's again.
+    Keep,
 }
 
 pub struct EbbApp {
@@ -171,6 +218,11 @@ pub struct EbbApp {
     /// Card just opened from search: outlined for a moment.
     highlighted: Option<(i64, Instant)>,
     toast: Option<Toast>,
+    /// Copying a Prompt with `{{variables}}`: the values asked for before it's copied.
+    prompt_fill: Option<PromptFill>,
+    tag_input: Option<TagInput>,
+    /// Tags by use, for suggestions; read when the tag field opens, dropped when text changes.
+    tag_counts: Option<Vec<(String, i64)>>,
     /// Cards that just arrived on the layer / just left it, for their animations.
     appearing: Vec<(i64, Instant)>,
     leaving: Vec<(Card, Instant)>,
@@ -182,6 +234,11 @@ pub struct EbbApp {
     main_started: Instant,
     first_frame: Option<(f64, f64)>,
     frames: u64,
+    /// When the next morning's Rediscover pick is due (unix seconds).
+    next_rediscover: i64,
+    /// The pick running on its own thread: the cards it brought back, or None
+    /// when there was nothing to do (already made today, or it failed).
+    rediscover_job: Option<mpsc::Receiver<Option<Vec<i64>>>>,
 }
 
 impl EbbApp {
@@ -240,24 +297,9 @@ impl EbbApp {
             win::set_window_alpha(h, 0);
         }
 
-        // Brought back from the archive today: into free slots, not where each
-        // was when it was archived, and appearing like a new card.
+        // Brought back from the archive today, appearing like a new card.
         let appearing: Vec<(i64, Instant)> = fresh.iter().map(|id| (*id, Instant::now())).collect();
-        let away = pos2(-1.0e5, -1.0e5);
-        cards.iter_mut().filter(|c| fresh.contains(&c.id)).for_each(|c| c.pos = away);
-        for id in &fresh {
-            let Some(idx) = cards.iter().position(|c| c.id == *id) else { continue };
-            cards[idx].size = cards[idx].size.max(MIN_SIZE);
-            cards[idx].pos = card::free_slot_for(&cards, cards[idx].size, full_area);
-            if let Err(e) = store.save(&cards[idx]) {
-                eprintln!("save failed: {e}");
-            }
-        }
-        // On a full layer they land on other cards: above them, not under.
-        cards.sort_by_key(|c| fresh.contains(&c.id));
-        for id in &fresh {
-            let _ = store.raise(*id);
-        }
+        place_resurfaced(&store, &mut cards, &fresh, full_area);
 
         let shell = Arc::new(shell::Shared::default());
         shell.layer_visible.store(true, Ordering::Relaxed);
@@ -297,6 +339,9 @@ impl EbbApp {
             was_focused: None,
             highlighted: None,
             toast: None,
+            prompt_fill: None,
+            tag_input: None,
+            tag_counts: None,
             appearing,
             leaving: Vec::new(),
             sticky: StickyImport::default(),
@@ -305,7 +350,62 @@ impl EbbApp {
             main_started,
             first_frame: None,
             frames: 0,
+            next_rediscover: resurface::next_day_start(resurface::unix_now(), crate::search::local_offset_secs()),
+            rediscover_job: None,
         }
+    }
+
+    /// The morning Rediscover pick while Ebb keeps running: a timer to the start
+    /// of the next day, the pick itself on a background thread with its own
+    /// connection, and the cards it changed brought onto the layer when it's done.
+    fn schedule_rediscover(&mut self, ctx: &egui::Context) {
+        if let Some(job) = &self.rediscover_job {
+            match job.try_recv() {
+                Err(mpsc::TryRecvError::Empty) => return,
+                Ok(Some(fresh)) => self.bring_resurfaced(&fresh),
+                Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {}
+            }
+            self.rediscover_job = None;
+        }
+        let (now, offset) = (resurface::unix_now(), crate::search::local_offset_secs());
+        if now < self.next_rediscover {
+            ctx.request_repaint_after(Duration::from_secs((self.next_rediscover - now) as u64));
+            return;
+        }
+        // Not from under someone typing: once the editor closes.
+        if self.editing.is_some() {
+            ctx.request_repaint_after(Duration::from_secs(60));
+            return;
+        }
+        self.next_rediscover = resurface::next_day_start(now, offset);
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        let spawned = std::thread::Builder::new().name("rediscover".into()).spawn(move || {
+            crate::import_ui::background_priority();
+            let result = Store::open().and_then(|store| {
+                if store.resurfaced_today(now, offset) {
+                    return Ok(None);
+                }
+                store.refresh_resurfacing(now, offset, resurface::REDISCOVER_LIMIT).map(Some)
+            });
+            let fresh = result.unwrap_or_else(|e| {
+                eprintln!("resurfacing failed: {e}");
+                None
+            });
+            let _ = tx.send(fresh.map(|picks| picks.into_iter().map(|p| p.id).collect()));
+            ctx.request_repaint();
+        });
+        if spawned.is_ok() {
+            self.rediscover_job = Some(rx);
+        }
+    }
+
+    /// After a Rediscover pick: yesterday's unanswered cards leave, today's come in.
+    fn bring_resurfaced(&mut self, fresh: &[i64]) {
+        self.reload_cards();
+        place_resurfaced(&self.store, &mut self.cards, fresh, self.full_area);
+        self.library.lock().unwrap().invalidate();
+        self.bar.lock().unwrap().invalidate();
     }
 
     fn area(&self, ui: &Ui) -> Vec2 {
@@ -321,6 +421,7 @@ impl EbbApp {
         let inserted = self.store.insert(&parsed, pos);
         match self.report(inserted, "сохранить заметку, текст остался в окне захвата") {
             Some(c) => {
+                self.tag_counts = None;
                 self.appearing.push((c.id, Instant::now()));
                 self.cards.push(c);
             }
@@ -355,12 +456,8 @@ impl EbbApp {
         // Saved as written; an old separate title becomes the first line of the text.
         c.title.clear();
         // Tags come from the visible text: "**#idea**" is the tag "idea".
-        c.tags = rich_text::strip_markup(&buf)
-            .split_whitespace()
-            .filter_map(|w| w.strip_prefix('#'))
-            .map(|t| t.trim_end_matches([',', '.', ';']).to_lowercase())
-            .filter(|t| !t.is_empty())
-            .collect();
+        c.tags = card::tags_of(&rich_text::strip_markup(&buf));
+        self.tag_counts = None;
         c.body = buf;
         self.save(idx);
         if self.cards[idx].kind == Kind::Private && self.cards[idx].body.is_empty() {
@@ -373,6 +470,145 @@ impl EbbApp {
             let c = &mut self.cards[idx];
             c.title = card::private_parts(&c.title, &c.body).0;
             c.body.clear();
+        }
+    }
+
+    /// Closes the editor if it's this card's, saving what was typed.
+    /// Rewrites a card's text for a tag change; its tags follow from the text, as
+    /// after editing. The title and text it had, if the change was saved.
+    fn retag(&mut self, idx: usize, change: impl FnOnce(&str) -> String) -> Option<(String, String)> {
+        self.commit_edit_of(self.cards[idx].id);
+        let c = &mut self.cards[idx];
+        let old = (c.title.clone(), c.body.clone());
+        let text = if c.title.is_empty() { c.body.clone() } else { format!("{}\n{}", c.title, c.body) };
+        c.title.clear();
+        c.body = change(&text);
+        c.tags = card::tags_of(&rich_text::strip_markup(&c.body));
+        if !self.save(idx) {
+            let c = &mut self.cards[idx];
+            (c.title, c.body) = old;
+            c.tags = card::tags_of(&rich_text::strip_markup(&text));
+            return None;
+        }
+        self.tag_counts = None;
+        self.library.lock().unwrap().invalidate();
+        self.bar.lock().unwrap().invalidate();
+        Some(old)
+    }
+
+    /// The field under a card's "+" chip: type a tag and Enter, or pick one of
+    /// the most used; Esc or a click elsewhere closes it.
+    fn tag_input_ui(&mut self, ui: &mut Ui) {
+        let Some(input) = &mut self.tag_input else { return };
+        let Some(idx) = self.cards.iter().position(|c| c.id == input.card) else {
+            self.tag_input = None;
+            return;
+        };
+        if self.tag_counts.is_none() {
+            self.tag_counts = Some(self.store.tag_counts().unwrap_or_default());
+        }
+        let suggestions = card::suggest_tags(self.tag_counts.as_deref().unwrap_or_default(), &input.text, &self.cards[idx].tags, 6);
+        let (mut chosen, mut cancel) = (None, false);
+        let area = egui::Area::new(Id::new("tag-input")).order(egui::Order::Foreground).fixed_pos(input.at + vec2(0.0, 4.0)).show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).inner_margin(8).show(ui, |ui| {
+                ui.set_width(200.0);
+                let field = egui::TextEdit::singleline(&mut input.text).id(Id::new("tag-input-field")).hint_text("новый тег").desired_width(f32::INFINITY);
+                let resp = ui.add(field);
+                if !input.focused {
+                    resp.request_focus();
+                    input.focused = true;
+                }
+                if resp.lost_focus() && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+                    chosen = card::normalize_tag(&input.text);
+                    cancel = chosen.is_none();
+                }
+                if !suggestions.is_empty() {
+                    ui.add_space(4.0);
+                }
+                for tag in &suggestions {
+                    let button = egui::Button::new(RichText::new(format!("#{tag}")).size(13.5)).min_size(vec2(ui.available_width(), 0.0));
+                    if ui.add(button).clicked() {
+                        chosen = Some(tag.clone());
+                    }
+                }
+            });
+        });
+        let cancelled = cancel
+            || ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+            || (ui.ctx().cumulative_pass_nr() > input.opened_pass
+                && ui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p))));
+        if let Some(tag) = chosen {
+            self.tag_input = None;
+            self.retag(idx, |text| card::with_tag(text, &tag));
+        } else if cancelled {
+            self.tag_input = None;
+        }
+    }
+
+    fn commit_edit_of(&mut self, id: i64) {
+        if self.editing.as_ref().is_some_and(|(eid, _)| *eid == id) {
+            self.commit_edit();
+        }
+    }
+
+    /// The values for a Prompt's `{{variables}}`, over its card. Enter moves to the
+    /// next field and copies from the last; Esc or a click elsewhere closes it.
+    fn prompt_fill_ui(&mut self, ui: &mut Ui, origin: Pos2) {
+        let Some(fill) = &mut self.prompt_fill else { return };
+        let Some(card) = self.cards.iter().find(|c| c.id == fill.card) else {
+            self.prompt_fill = None;
+            return;
+        };
+        let width = card.size.x.max(260.0);
+        let at = origin + card.pos.to_vec2() + vec2(0.0, HEADER_H);
+        let count = fill.values.len();
+        let (mut copy, mut cancel) = (false, false);
+        let area = egui::Area::new(Id::new("prompt-fill")).order(egui::Order::Foreground).fixed_pos(at).show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).inner_margin(12).show(ui, |ui| {
+                ui.set_width(width - 24.0);
+                ui.add(egui::Label::new(RichText::new("Подставить в prompt").size(12.0).color(theme::muted())).selectable(false));
+                ui.add_space(4.0);
+                for (i, (name, value)) in fill.values.iter_mut().enumerate() {
+                    ui.add(egui::Label::new(RichText::new(name.as_str()).size(13.0).color(theme::text())).selectable(false));
+                    let field = egui::TextEdit::singleline(value)
+                        .id(Id::new(("prompt-var", i)))
+                        .hint_text(format!("{{{{{name}}}}}"))
+                        .desired_width(f32::INFINITY);
+                    let resp = ui.add(field);
+                    if i == 0 && !fill.focused {
+                        resp.request_focus();
+                        fill.focused = true;
+                    }
+                    // Taken from the input, or the next field, focused in this same
+                    // pass, would see the Enter too and give the focus up again.
+                    if resp.lost_focus() && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter)) {
+                        if i + 1 == count {
+                            copy = true;
+                        } else {
+                            ui.memory_mut(|m| m.request_focus(Id::new(("prompt-var", i + 1))));
+                        }
+                    }
+                    ui.add_space(2.0);
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    copy |= ui.button(RichText::new("Копировать").size(14.0)).clicked();
+                    cancel |= ui.button(RichText::new("Отмена").size(14.0)).clicked();
+                });
+            });
+        });
+        let cancelled = cancel
+            || ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+            || (ui.ctx().cumulative_pass_nr() > fill.opened_pass
+                && ui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p))));
+        if copy {
+            let (id, text) = (fill.card, card::fill_prompt(&fill.text, &fill.values));
+            ui.ctx().copy_text(text);
+            mark_copied(ui, id);
+            let _ = self.store.touch(id);
+            self.prompt_fill = None;
+        } else if cancelled {
+            self.prompt_fill = None;
         }
     }
 
@@ -675,7 +911,7 @@ impl EbbApp {
             self.cards
                 .iter()
                 .rev()
-                .find(|c| Rect::from_min_size(origin + c.pos.to_vec2(), c.size).contains(p))
+                .find(|c| Rect::from_min_size(origin + c.pos.to_vec2(), c.shown_size()).contains(p))
                 .map(|c| c.id)
         });
         let area = self.area(ui);
@@ -703,7 +939,7 @@ impl EbbApp {
         }
 
         // Where cards are (layer coordinates), for the magnet; None with it off.
-        let rects: Vec<(i64, Rect)> = self.cards.iter().map(|c| (c.id, Rect::from_min_size(c.pos, c.size))).collect();
+        let rects: Vec<(i64, Rect)> = self.cards.iter().map(|c| (c.id, Rect::from_min_size(c.pos, c.shown_size()))).collect();
         let magnet = self.snap.then_some(rects.as_slice());
         let style = self.card_style;
         let mut actions: Vec<(usize, Action)> = Vec::new();
@@ -743,7 +979,7 @@ impl EbbApp {
             match self.cards.iter().find(|c| c.id == hid) {
                 Some(c) if t.elapsed() < HIGHLIGHT_FOR => {
                     let fade = 1.0 - t.elapsed().as_secs_f32() / HIGHLIGHT_FOR.as_secs_f32();
-                    let rect = Rect::from_min_size(origin + c.pos.to_vec2(), c.size).expand(3.0);
+                    let rect = Rect::from_min_size(origin + c.pos.to_vec2(), c.shown_size()).expand(3.0);
                     let stroke = Stroke::new(2.0, c.accent().gamma_multiply(fade));
                     ui.painter().rect_stroke(rect, CornerRadius::same(self.card_style.radius + 2), stroke, StrokeKind::Outside);
                     ui.ctx().request_repaint();
@@ -773,6 +1009,7 @@ impl EbbApp {
         let mut to_front = None;
         let mut remove = None;
         for (idx, action) in actions {
+            let done = matches!(action, Action::Done);
             match action {
                 Action::Front => {
                     to_front = Some(idx);
@@ -798,10 +1035,30 @@ impl EbbApp {
                     if c.kind == Kind::Private {
                         if let Ok(Some(secret)) = self.store.secret(c.id) {
                             let _ = win::copy_private(&secret);
+                            mark_copied(ui, c.id);
+                        }
+                    } else if c.kind == Kind::Prompt {
+                        let text = card::prompt_text(&c.title, &c.body);
+                        let variables = card::prompt_variables(&text);
+                        if variables.is_empty() {
+                            ui.ctx().copy_text(text);
+                            mark_copied(ui, c.id);
+                        } else {
+                            // Its form still open (press and release in one pass): what's typed stays.
+                            let old = self.prompt_fill.take().filter(|f| f.card == c.id).map(|f| f.values).unwrap_or_default();
+                            let values = variables
+                                .into_iter()
+                                .map(|name| {
+                                    let value = old.iter().find(|(n, _)| *n == name).map(|(_, v)| v.clone()).unwrap_or_default();
+                                    (name, value)
+                                })
+                                .collect();
+                            self.prompt_fill = Some(PromptFill { card: c.id, text, values, focused: false, opened_pass: ui.ctx().cumulative_pass_nr() });
                         }
                     } else {
                         let text = if c.title.is_empty() { c.body.clone() } else { format!("{}\n{}", c.title, c.body) };
                         ui.ctx().copy_text(rich_text::strip_markup(&text));
+                        mark_copied(ui, c.id);
                     }
                 }
                 Action::Duplicate => {
@@ -827,7 +1084,9 @@ impl EbbApp {
                         self.bar.lock().unwrap().invalidate();
                     }
                 }
-                Action::Archive => {
+                Action::Archive | Action::Done => {
+                    // What's typed is saved before the card goes.
+                    self.commit_edit_of(self.cards[idx].id);
                     let placement = self.cards[idx].placement;
                     self.cards[idx].archived = true;
                     self.cards[idx].placement = Placement::Archive;
@@ -836,10 +1095,12 @@ impl EbbApp {
                         (self.cards[idx].archived, self.cards[idx].placement) = (false, placement);
                         continue;
                     }
-                    self.toast = Some(Toast::new("Карточка в архиве", Some(Undo::Unarchive(self.cards[idx].id))));
+                    let text = if done { "Сделано, карточка в архиве" } else { "Карточка в архиве" };
+                    self.toast = Some(Toast::new(text, Some(Undo::Unarchive(self.cards[idx].id))));
                     remove = Some(idx);
                 }
                 Action::Delete => {
+                    self.commit_edit_of(self.cards[idx].id);
                     let deleted = self.store.delete(self.cards[idx].id);
                     if self.report(deleted, "убрать в корзину").is_none() {
                         continue;
@@ -874,10 +1135,61 @@ impl EbbApp {
                         self.revealed_text = Some((id, secret));
                     }
                 }
+                Action::OpenLink => {
+                    let c = &self.cards[idx];
+                    let _ = self.store.touch(c.id);
+                    if let Some(url) = card::first_url(&c.body) {
+                        win::open_url(url);
+                    }
+                }
+                Action::Keep => {
+                    self.cards[idx].placement = Placement::Manual;
+                    let _ = self.store.touch(self.cards[idx].id);
+                    self.save(idx);
+                    self.toast = Some(Toast::new("Останется на слое", None));
+                }
+                Action::ToggleCheck(line) => {
+                    let _ = self.retag(idx, |text| card::toggle_check(text, line));
+                }
                 Action::SetKind(kind) => self.set_kind(idx, kind),
+                Action::RemoveTag(tag) => {
+                    let id = self.cards[idx].id;
+                    if let Some((title, body)) = self.retag(idx, |text| card::without_tag(text, &tag)) {
+                        self.toast = Some(Toast::new(format!("Тег #{tag} убран"), Some(Undo::Text(id, title, body))));
+                    }
+                }
+                Action::AddTag(at) => {
+                    let card = self.cards[idx].id;
+                    self.tag_input = Some(TagInput { card, at, text: String::new(), focused: false, opened_pass: ui.ctx().cumulative_pass_nr() });
+                }
+                Action::SetIdeaStatus(status) => {
+                    let set = self.store.set_idea_status(self.cards[idx].id, status);
+                    if self.report(set, "поменять статус идеи").is_some() {
+                        self.cards[idx].idea_status = status;
+                    }
+                }
+                Action::ToggleCollapse => {
+                    let id = self.cards[idx].id;
+                    self.commit_edit_of(id);
+                    let collapsed = !self.cards[idx].collapsed;
+                    let set = self.store.set_collapsed(id, collapsed);
+                    if self.report(set, if collapsed { "свернуть карточку" } else { "развернуть карточку" }).is_some() {
+                        self.cards[idx].collapsed = collapsed;
+                    }
+                }
                 Action::SetTint(tint) => {
                     self.cards[idx].tint = tint;
                     self.save(idx);
+                }
+                Action::Snooze(days) => {
+                    let id = self.cards[idx].id;
+                    self.commit_edit_of(id);
+                    let until = resurface::snooze_until(resurface::unix_now(), crate::search::local_offset_secs(), days);
+                    let snoozed = self.store.snooze(id, until);
+                    let Some(snapshot) = self.report(snoozed, "отложить карточку") else { continue };
+                    let text = format!("Вернётся {}", resurface::snooze_label(days));
+                    self.toast = Some(Toast::new(text, Some(Undo::Snooze(snapshot))));
+                    remove = Some(idx);
                 }
             }
         }
@@ -895,6 +1207,8 @@ impl EbbApp {
                 ui.ctx().request_repaint_after(Duration::from_millis(250));
             }
         }
+        self.prompt_fill_ui(ui, origin);
+        self.tag_input_ui(ui);
         if let Some(idx) = remove {
             let card = self.cards.remove(idx);
             self.leaving.push((card, Instant::now()));
@@ -941,7 +1255,7 @@ impl EbbApp {
             glass_panel(ui, rect, false);
             ui.painter().galley(pos2(rect.left() + 20.0, rect.center().y - text.size().y / 2.0), text, theme::text());
 
-            if let Some(action) = toast.undo {
+            if let Some(action) = toast.undo.clone() {
                 let button = Rect::from_min_size(pos2(rect.right() - undo_w - 8.0, rect.top() + 8.0), vec2(undo_w, 28.0));
                 let resp = ui.interact(button, Id::new("toast-undo"), Sense::click());
                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Отменить"));
@@ -959,6 +1273,17 @@ impl EbbApp {
                 Undo::Unarchive(id) => self.store.set_archived(id, false),
                 Undo::Restore(id) => self.store.restore(id),
                 Undo::Kind(id, kind) => self.store.set_kind(id, kind),
+                Undo::Snooze(snapshot) => self.store.undo_review(&snapshot),
+                Undo::Text(id, title, body) => match self.cards.iter().position(|c| c.id == id) {
+                    Some(idx) => {
+                        let c = &mut self.cards[idx];
+                        c.tags = card::tags_of(&rich_text::strip_markup(&format!("{title}\n{body}")));
+                        (c.title, c.body) = (title, body);
+                        self.tag_counts = None;
+                        self.store.save(&self.cards[idx])
+                    }
+                    None => Ok(()),
+                },
             };
             self.report(undone, "отменить");
             self.reload_cards();
@@ -1308,6 +1633,10 @@ impl EbbApp {
                 idx
             }
         };
+        // Opened from search to be read: a collapsed card opens.
+        if self.cards[idx].collapsed && self.store.set_collapsed(id, false).is_ok() {
+            self.cards[idx].collapsed = false;
+        }
         let card = self.cards.remove(idx);
         self.cards.push(card);
         let _ = self.store.raise(id);
@@ -1318,6 +1647,7 @@ impl EbbApp {
 
     fn reload_cards(&mut self) {
         self.commit_edit();
+        self.tag_counts = None;
         if let Ok(cards) = self.store.load() {
             let now = Instant::now();
             // Cards that weren't on the layer before appear; ones that left fade out.
@@ -1369,6 +1699,9 @@ impl eframe::App for EbbApp {
                     (lib.settings.capture_hotkey, lib.settings.search_hotkey) = (keys.capture, keys.search);
                     ctx.request_repaint_of(library::viewport_id());
                 }
+                // Slept through the morning, or the clock moved: look again now
+                // (a pick already made today is left as it is).
+                Event::ClockChanged => self.next_rediscover = 0,
                 Event::TogglePinBottom => self.set_pin_bottom(!win::PIN_BOTTOM.load(Ordering::Relaxed)),
                 Event::Exit => ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close),
                 Event::ImportSticky => self.apply_library_request(ctx, Request::ImportSticky),
@@ -1382,6 +1715,8 @@ impl eframe::App for EbbApp {
                 }
             }
         }
+
+        self.schedule_rediscover(ctx);
 
         if self.layer_faded_out.swap(false, Ordering::Relaxed) && !self.layer_visible {
             ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(false));
@@ -1777,9 +2112,11 @@ fn panel(ui: &Ui, rect: Rect, fill: Color32, radius: CornerRadius, shadow: u8) {
 }
 
 /// The card's color, drawn the way the user picked in settings. `strength` 50
-/// (the default) is the look each marker was tuned at.
-pub(crate) fn paint_marker(ui: &Ui, rect: Rect, accent: Color32, style: card::CardStyle, hovered: bool) {
+/// (the default) is the look each marker was tuned at. Lines and glows take the
+/// hue's mark color, fills its surface (see [`card::Tint`]).
+pub(crate) fn paint_marker(ui: &Ui, rect: Rect, hue: card::Tint, style: card::CardStyle, hovered: bool) {
     use card::Marker;
+    let accent = theme::on_card(hue.color());
     let s = f32::from(style.strength) / 50.0;
     let radius = CornerRadius::same(style.radius);
     let painter = ui.painter();
@@ -1799,15 +2136,19 @@ pub(crate) fn paint_marker(ui: &Ui, rect: Rect, accent: Color32, style: card::Ca
         Marker::Border => {
             painter.rect_stroke(rect, radius, Stroke::new(1.5, accent.gamma_multiply((0.55 * s).min(1.0))), StrokeKind::Inside);
         }
-        Marker::Fill => {
-            // Opaque, like paper: a muted shade of the color over the card's own
-            // background (dark shades in the dark theme, pastels in the light one).
-            let base = theme::card_fill(false);
-            let t = if theme::is_light() { 0.38 } else { 0.3 } * s.min(2.0);
-            let l = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t.min(0.9)).round() as u8;
-            let fill = card_background(Color32::from_rgb(l(base.r(), accent.r()), l(base.g(), accent.g()), l(base.b(), accent.b())), style, false);
-            painter.rect_filled(rect, radius, fill);
-            if hovered {
+        Marker::Fill | Marker::Paper => {
+            let surface = theme::surface(hue, style.strength);
+            painter.rect_filled(rect, radius, card_background(surface, style, false));
+            if style.marker == Marker::Paper && hovered {
+                // The bar of a Sticky Notes window: the paper a shade deeper,
+                // over the meta line.
+                let t = if theme::card_is_light() { 0.32 } else { 0.22 };
+                let l = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+                let bar = Color32::from_rgb(l(surface.r(), accent.r()), l(surface.g(), accent.g()), l(surface.b(), accent.b()));
+                painter
+                    .with_clip_rect(Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + HEADER_H)).intersect(ui.clip_rect()))
+                    .rect_filled(rect, radius, card_background(bar, style, false));
+            } else if hovered {
                 painter.rect_filled(rect, radius, theme::wash(10));
             }
         }
@@ -1897,6 +2238,28 @@ fn age_label(created_at: i64) -> String {
 }
 
 /// Text of a card, or its editor. True when a click opened a link in the text.
+/// What a click in a card's text did, besides placing the cursor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyHit {
+    /// A link opened.
+    Link,
+    /// A line of a Reference was copied.
+    Copied,
+    /// The check box on this line was clicked.
+    ToggleCheck(usize),
+}
+
+/// Room at the right of a Reference's text for the copy buttons of its lines.
+const COPY_GUTTER: f32 = 26.0;
+
+/// The date of a reminder, short: "29 сен".
+fn short_date(unix: i64) -> String {
+    const MONTHS: [&str; 12] = ["янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
+    let (_, m, d) = crate::search::civil_from_days((unix + crate::search::local_offset_secs()).div_euclid(86_400));
+    format!("{d} {}", MONTHS[(m - 1).clamp(0, 11) as usize])
+}
+
+/// Text of a card, or its editor. `details`: how far the hover details are shown.
 fn card_body(
     ui: &mut Ui,
     card: &Card,
@@ -1904,7 +2267,8 @@ fn card_body(
     revealed: bool,
     revealed_text: Option<&str>,
     style: card::CardStyle,
-) -> bool {
+    details: f32,
+) -> Option<BodyHit> {
     let base = style.text_size();
     let editor_id = Id::new(("card", card.id)).with("editor");
     // Where the last click in the text landed, in chars of the editor's text.
@@ -1955,6 +2319,9 @@ fn card_body(
         let (selection, typing) = format_state(ui, editor_id);
         let typing = typing.filter(|_| selection.is_empty());
         let layout_styles = styles.clone();
+        // Code runs take the row height of the card's font, as in the shown
+        // text, so opening the editor doesn't reflow the lines.
+        let row_height = ui.fonts_mut(|f| f.row_height(&theme::card_font(base)));
         let mut layouter = |ui: &Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
             let text = text.as_str();
             // Mid-edit the text is ahead of the styles; the edit is placed as
@@ -1966,7 +2333,12 @@ fn card_body(
             for i in 0..styles.len() {
                 if i + 1 == styles.len() || styles[i + 1] != styles[i] {
                     let run = &text[bytes[from]..bytes[i + 1]];
-                    job.append(run, 0.0, rich_format(editor_font(base, styles[i]), theme::card_text(), styles[i]));
+                    let mut format = rich_format(editor_font(base, styles[i]), theme::card_text(), styles[i]);
+                    if styles[i].code {
+                        format.line_height = Some(row_height);
+                        format.valign = Align::Center;
+                    }
+                    job.append(run, 0.0, format);
                     from = i + 1;
                 }
             }
@@ -1998,7 +2370,7 @@ fn card_body(
         if !resp.has_focus() {
             resp.request_focus();
         }
-        return false;
+        return None;
     }
     if let Some(reason) = card.resurface_reason(crate::resurface::unix_now()) {
         ui.label(RichText::new(reason).size(11.5).color(theme::card_dim()));
@@ -2019,7 +2391,7 @@ fn card_body(
         let size = if label.is_none() { base } else { base - 1.0 };
         let rest_at = redacted(ui, &rest, theme::card_font(size), theme::card_dim().gamma_multiply(0.45));
         remember_click(ui, click_id, card, label.as_deref(), heading_at, &rest, rest_at);
-        return false;
+        return None;
     }
     // A Prompt's first line is its name.
     let (heading, text) = match card.kind {
@@ -2036,32 +2408,99 @@ fn card_body(
         let (pos, galley, resp) = egui::Label::new(job).wrap().selectable(false).layout_in_ui(ui);
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, galley.text()));
         let at = char_at(ui, &galley, pos, resp.rect);
-        ui.painter().galley(pos, galley, theme::card_text());
+        galley_fading(ui, pos, galley, theme::card_text());
         at
     });
     let color = if heading.is_none() { theme::card_text() } else { theme::card_dim() };
     let size = if heading.is_none() { base } else { base - 1.0 };
-    // Addresses in link blue and clickable, in any kind; in a Reference, commands,
-    // paths and hosts in monospace, the words around them as usual.
+    // Every row as tall as a row of the card's own font: Consolas' rows are
+    // shorter, and a command right under a heading sat on it.
+    let row_height = ui.fonts_mut(|f| f.row_height(&theme::card_font(size)));
+    let accent = theme::on_card(card.accent());
+    let plain = rich_text::strip_markup(&text);
+    let plain_lines: Vec<&str> = plain.lines().collect();
+    // A line that starts with a list marker shows a bullet or a check box in
+    // its place; the text keeps the marker, as Sticky Notes' lists do.
+    let marks_of: Vec<Option<(card::ListMark, usize)>> = plain_lines.iter().map(|l| card::list_mark(l)).collect();
+    // In a Reference, commands, paths and hosts are set in monospace and copied
+    // a line at a time: a gutter at the right holds their copy buttons.
+    let technical: Vec<bool> = plain_lines.iter().map(|l| card.kind == Kind::Reference && card::looks_technical(l)).collect();
+    if technical.contains(&true) {
+        ui.set_max_width(ui.available_width() - COPY_GUTTER);
+    }
+    // Addresses in link blue and clickable, in any kind; a Prompt's {{variables}} as chips.
     let mut job = egui::text::LayoutJob::default();
     let mut links: Vec<(std::ops::Range<usize>, String)> = Vec::new(); // char ranges in the galley
+    let mut marks: Vec<(usize, card::ListMark, usize)> = Vec::new(); // (galley char, mark, line)
+    let mut copy_lines: Vec<(usize, String)> = Vec::new(); // (galley char, the line)
     let mut chars = 0;
+    let mut line_no = 0;
+    let mut line_start = true;
+    let mut skip = 0; // marker chars still to leave out of the galley
+    let mut lead = 0.0; // space in place of the marker, before the line's first piece
+    let mut done = false;
     for span in rich_text::spans(&text) {
         for piece in span.text.split_inclusive('\n') {
             let (line, newline) = piece.strip_suffix('\n').map_or((piece, ""), |line| (line, "\n"));
-            let technical = card.kind == Kind::Reference && card::looks_technical(line);
-            // Returns the galley's length so far, in chars.
-            let mut append = |s: &str, c: Color32| {
+            if line_start {
+                line_start = false;
+                (skip, lead, done) = (0, 0.0, false);
+                if let Some((mark, n)) = marks_of.get(line_no).copied().flatten() {
+                    (skip, lead, done) = (n, mark.indent(), mark == card::ListMark::Done);
+                    marks.push((chars, mark, line_no));
+                }
+                if technical.get(line_no).copied().unwrap_or(false) {
+                    copy_lines.push((chars, plain_lines[line_no].trim().to_owned()));
+                }
+            }
+            let mut line = line;
+            if skip > 0 {
+                let take = skip.min(line.chars().count());
+                let byte = line.char_indices().nth(take).map_or(line.len(), |(i, _)| i);
+                line = &line[byte..];
+                skip -= take;
+            }
+            let mono = span.style.code || technical.get(line_no).copied().unwrap_or(false);
+            // Appends a piece; returns the galley's length so far, in chars.
+            let mut append = |s: &str, c: Color32, is_link: bool| {
                 let from = chars;
-                let font = if span.style.code || technical {
-                    FontId::monospace(size - 1.0)
-                } else if span.style.bold {
-                    theme::card_bold(size)
-                } else {
-                    theme::card_font(size)
+                let mut emit = |s: &str, variable: bool| {
+                    let font = if variable {
+                        FontId::monospace(size - 1.5)
+                    } else if mono {
+                        FontId::monospace(size - 1.0)
+                    } else if span.style.bold {
+                        theme::card_bold(size)
+                    } else {
+                        theme::card_font(size)
+                    };
+                    let mut format = rich_format(font, if done { theme::card_muted() } else { c }, span.style);
+                    // A variable sits on the line's baseline like the words around it.
+                    if mono {
+                        format.line_height = Some(row_height);
+                        format.valign = Align::Center;
+                    }
+                    if variable {
+                        format.color = accent;
+                        format.background = accent.gamma_multiply(0.16);
+                    }
+                    if done {
+                        format.strikethrough = Stroke::new(1.0, theme::card_muted());
+                    }
+                    job.append(s, std::mem::take(&mut lead), format);
+                    chars += s.chars().count();
                 };
-                job.append(s, 0.0, rich_format(font, c, span.style));
-                chars += s.chars().count();
+                if is_link || card.kind != Kind::Prompt {
+                    emit(s, false);
+                } else {
+                    let mut last = 0;
+                    for (range, _) in card::prompt_placeholders(s) {
+                        emit(&s[last..range.start], false);
+                        emit(&s[range.clone()], true);
+                        last = range.end;
+                    }
+                    emit(&s[last..], false);
+                }
                 from..chars
             };
             let mut rest = line;
@@ -2070,38 +2509,165 @@ fn card_body(
                 // "(see https://x.org)." — the closing punctuation isn't part of the address.
                 let url = rest[start..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '"', '\'']);
                 let end = start + url.len();
-                append(&rest[..start], color);
-                let range = append(url, theme::link());
+                append(&rest[..start], color, false);
+                let range = append(url, theme::link(), true);
                 links.push((range, url.to_owned()));
                 rest = &rest[end..];
             }
-            append(rest, color);
-            append(newline, color);
+            append(rest, color, false);
+            if !newline.is_empty() {
+                append(newline, color, false);
+                line_no += 1;
+                line_start = true;
+            }
         }
     }
     let (pos, galley, resp) = egui::Label::new(job).wrap().selectable(false).layout_in_ui(ui);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, galley.text()));
     let text_at = char_at(ui, &galley, pos, resp.rect);
     let link = text_at.and_then(|at| links.iter().find(|(range, _)| range.contains(&at)).map(|(_, url)| url.as_str()));
-    ui.painter().galley(pos, galley, color);
-    let display_text = rich_text::strip_markup(&text);
-    remember_click(ui, click_id, card, displayed_heading.as_deref(), heading_at, &display_text, text_at);
-    let mut link_clicked = false;
+    galley_fading(ui, pos, galley.clone(), color);
+    let full = galley.rect.translate(pos.to_vec2());
+    let clip = ui.clip_rect();
+    let mut hit = None;
+
+    // Bullets and check boxes, in the space left in front of their lines.
+    for (at, mark, line) in &marks {
+        let cursor = galley.pos_from_cursor(egui::text::CCursor::new(*at)).translate(pos.to_vec2());
+        let alpha = fade_alpha(clip, full, cursor);
+        if alpha <= 0.0 {
+            continue;
+        }
+        let mut p = ui.painter().with_clip_rect(clip);
+        p.multiply_opacity(alpha);
+        let center = pos2(cursor.left() - mark.indent() + 7.0, cursor.center().y);
+        match mark {
+            card::ListMark::Bullet => {
+                p.circle_filled(center, 2.5, color);
+            }
+            card::ListMark::Todo | card::ListMark::Done => {
+                let done = *mark == card::ListMark::Done;
+                let r = Rect::from_center_size(center, vec2(14.0, 14.0));
+                let check = ui.interact(r.expand(3.0), click_id.with(("check", *line)), Sense::click());
+                check.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, done, plain_lines.get(*line).copied().unwrap_or("")));
+                if done {
+                    p.rect_filled(r, CornerRadius::same(4), accent);
+                    let on = theme::card_fill(false);
+                    p.text(r.center(), Align2::CENTER_CENTER, "\u{E73E}", theme::icons(9.0), Color32::from_rgb(on.r(), on.g(), on.b()));
+                } else {
+                    let stroke = if check.hovered() { theme::card_text() } else { theme::card_muted() };
+                    p.rect_stroke(r, CornerRadius::same(4), Stroke::new(1.5, stroke), StrokeKind::Inside);
+                }
+                if check.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                    hit = Some(BodyHit::ToggleCheck(*line));
+                }
+            }
+        }
+    }
+
+    // The copy buttons of a Reference's lines, in the gutter; a line just
+    // copied shows a check mark for a moment.
+    for (i, (at, line)) in copy_lines.iter().enumerate() {
+        let cursor = galley.pos_from_cursor(egui::text::CCursor::new(*at)).translate(pos.to_vec2());
+        let alpha = fade_alpha(clip, full, cursor);
+        if alpha <= 0.0 {
+            continue;
+        }
+        let button = Rect::from_center_size(pos2(clip.right() - COPY_GUTTER / 2.0, cursor.center().y), vec2(22.0, 20.0));
+        let copy = ui.interact(button, click_id.with(("copy-line", i)), Sense::click());
+        let copy_id = copy.id;
+        copy.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Копировать строку: {line}")));
+        let copied = ui.data(|d| d.get_temp::<Instant>(copy.id)).filter(|t| t.elapsed() < COPIED_FOR);
+        if let Some(t) = copied {
+            ui.ctx().request_repaint_after(COPIED_FOR.saturating_sub(t.elapsed()));
+        }
+        let shown = if copy.hovered() || copied.is_some() { 1.0 } else { details };
+        if shown > 0.0 {
+            let mut p = ui.painter().with_clip_rect(clip);
+            p.multiply_opacity(alpha * shown);
+            if copy.hovered() {
+                let row = Rect::from_min_max(pos2(pos.x - 4.0, cursor.top()), pos2(clip.right(), cursor.bottom()));
+                p.rect_filled(row, CornerRadius::same(4), theme::wash(14));
+                p.rect_filled(button, CornerRadius::same(6), theme::wash(22));
+            }
+            let (glyph, c) = if copied.is_some() { ("\u{E73E}", theme::SUCCESS) } else { ("\u{E8C8}", theme::card_dim()) };
+            p.text(button.center(), Align2::CENTER_CENTER, glyph, theme::icons(11.0), c);
+        }
+        if copy.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Копировать строку").clicked() {
+            ui.ctx().copy_text(line.clone());
+            ui.data_mut(|d| d.insert_temp(copy_id, Instant::now()));
+            hit = Some(BodyHit::Copied);
+        }
+    }
+
+    // The cursor goes where the click landed; the galley's text is what's shown,
+    // without the list markers (shown_to_source skips what isn't in it).
+    remember_click(ui, click_id, card, displayed_heading.as_deref(), heading_at, galley.text(), text_at);
     if let Some(url) = link {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
         if ui.input(|i| i.pointer.primary_clicked()) {
             win::open_url(url);
-            link_clicked = true;
+            hit = Some(BodyHit::Link);
         }
     }
     if card.kind == Kind::Link
         && let Some(domain) = card::link_domain(&card.body)
     {
         ui.add_space(2.0);
-        ui.add(egui::Label::new(RichText::new(domain).size(12.0).color(theme::card_muted())).selectable(false));
+        let color = theme::card_muted();
+        let galley = ui.painter().layout(domain.to_owned(), FontId::proportional(12.0), color, ui.available_width());
+        let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
+        galley_fading(ui, rect.min, galley, color);
     }
-    link_clicked
+    hit
 }
+
+/// How visible a row at `r` is inside `clip` when the text `full` runs past
+/// it: 0 for a row cut by the edge, then 40 % and 75 % for the two rows before
+/// it, 1 for the rest and for text that fits.
+fn fade_alpha(clip: Rect, full: Rect, r: Rect) -> f32 {
+    let past_bottom = full.bottom() > clip.bottom() + 0.5;
+    let past_top = full.top() < clip.top() - 0.5;
+    let h = r.height().max(1.0);
+    let mut alpha: f32 = 1.0;
+    if past_bottom {
+        if r.bottom() > clip.bottom() + 0.5 {
+            return 0.0;
+        }
+        alpha = alpha.min(0.4 + 0.35 * (clip.bottom() - r.bottom()) / h);
+    }
+    if past_top {
+        if r.top() < clip.top() - 0.5 {
+            return 0.0;
+        }
+        alpha = alpha.min(0.4 + 0.35 * (r.top() - clip.top()) / h);
+    }
+    alpha.min(1.0)
+}
+
+/// Paints a galley row by row, so text that runs past the card's edge ends on a
+/// whole row and fades toward that edge, instead of being cut through a row by
+/// the clip. Text that fits is painted as is.
+fn galley_fading(ui: &Ui, pos: Pos2, galley: std::sync::Arc<egui::Galley>, color: Color32) {
+    let clip = ui.clip_rect();
+    let painter = ui.painter();
+    let full = galley.rect.translate(pos.to_vec2());
+    if full.bottom() <= clip.bottom() + 0.5 && full.top() >= clip.top() - 0.5 {
+        painter.galley(pos, galley, color);
+        return;
+    }
+    for row in &galley.rows {
+        let r = row.rect().translate(pos.to_vec2());
+        let alpha = fade_alpha(clip, full, r);
+        if alpha <= 0.0 {
+            continue;
+        }
+        let mut p = painter.with_clip_rect(r.intersect(clip));
+        p.multiply_opacity(alpha);
+        p.galley(pos, galley.clone(), color);
+    }
+}
+
 
 fn rich_format(font: FontId, color: Color32, style: rich_text::Style) -> egui::TextFormat {
     egui::TextFormat {
@@ -2274,6 +2840,112 @@ fn redacted(ui: &mut Ui, text: &str, font: FontId, color: Color32) -> Option<usi
     at
 }
 
+/// Cards brought back from the archive by Rediscover go into free slots, not
+/// where each was when it was archived, and above the cards already there.
+fn place_resurfaced(store: &Store, cards: &mut [Card], fresh: &[i64], area: Vec2) {
+    if fresh.is_empty() {
+        return;
+    }
+    let away = pos2(-1.0e5, -1.0e5);
+    cards.iter_mut().filter(|c| fresh.contains(&c.id)).for_each(|c| c.pos = away);
+    for id in fresh {
+        let Some(idx) = cards.iter().position(|c| c.id == *id) else { continue };
+        cards[idx].size = cards[idx].size.max(MIN_SIZE);
+        cards[idx].pos = card::free_slot_for(cards, cards[idx].size, area);
+        if let Err(e) = store.save(&cards[idx]) {
+            eprintln!("save failed: {e}");
+        }
+    }
+    // On a full layer they land on other cards: above them, not under.
+    cards.sort_by_key(|c| fresh.contains(&c.id));
+    for id in fresh {
+        let _ = store.raise(*id);
+    }
+}
+
+/// An idea's statuses, and none.
+fn idea_status_menu(anchor: &egui::Response, popup: Id, current: Option<card::IdeaStatus>, out: &mut Vec<Action>) {
+    egui::Popup::menu(anchor).id(popup).align(egui::RectAlign::TOP_START).gap(4.0).width(170.0).show(|ui| {
+        ui.spacing_mut().button_padding = vec2(8.0, 5.0);
+        let options = card::IdeaStatus::ALL.into_iter().map(Some).chain(std::iter::once(None));
+        for status in options {
+            let label = status.map_or("Без статуса", card::IdeaStatus::label);
+            let button = egui::Button::new(RichText::new(label).size(14.0))
+                .selected(status == current)
+                .min_size(vec2(ui.available_width(), 0.0));
+            if ui.add(button).clicked() {
+                out.push(Action::SetIdeaStatus(status));
+            }
+        }
+    });
+}
+
+/// "Позже": which morning the card comes back on.
+/// The action a kind is for: first in the hover pill, in the kind's color.
+fn primary_action(card: &Card) -> Option<(&'static str, &'static str, Action)> {
+    if card.placement == Placement::Rediscover {
+        return Some(("\u{E8FB}", "Оставить на слое", Action::Keep));
+    }
+    match card.kind {
+        Kind::Prompt => Some(("\u{E77F}", "Копировать prompt", Action::Copy)),
+        Kind::Reference => Some(("\u{E77F}", "Копировать текст", Action::Copy)),
+        Kind::Private => Some(("\u{E77F}", "Скопировать, не показывая", Action::Copy)),
+        Kind::Link if card::first_url(&card.body).is_some() => Some(("\u{E8A7}", "Открыть ссылку", Action::OpenLink)),
+        Kind::Goal | Kind::Reminder if !card.pinned => Some(("\u{E930}", "Сделано: в архив", Action::Done)),
+        _ => None,
+    }
+}
+
+/// The rest of the actions: a copy of the card, and what takes it off the layer.
+fn more_menu(anchor: &egui::Response, popup: Id, locked: bool, out: &mut Vec<Action>) {
+    egui::Popup::menu(anchor).id(popup).align(egui::RectAlign::BOTTOM_END).gap(4.0).width(190.0).show(|ui| {
+        ui.spacing_mut().button_padding = vec2(8.0, 5.0);
+        let item = |ui: &mut Ui, glyph: &str, label: &str, color: Color32| -> bool {
+            let mut job = egui::text::LayoutJob::default();
+            let format = |font: FontId, color: Color32| egui::TextFormat { font_id: font, color, valign: Align::Center, ..Default::default() };
+            job.append(glyph, 0.0, format(theme::icons(13.0), color));
+            job.append(label, 10.0, format(FontId::proportional(14.0), theme::text()));
+            ui.add(egui::Button::new(job).min_size(vec2(ui.available_width(), 0.0))).clicked()
+        };
+        if item(ui, "\u{E70E}", "Свернуть в строку", theme::dim()) {
+            out.push(Action::ToggleCollapse);
+        }
+        if item(ui, "\u{E8C8}", "Дублировать", theme::dim()) {
+            out.push(Action::Duplicate);
+        }
+        if locked {
+            return;
+        }
+        if item(ui, "\u{E7B8}", "В архив", theme::dim()) {
+            out.push(Action::Archive);
+        }
+        if item(ui, "\u{E74D}", "Удалить", theme::muted()) {
+            out.push(Action::Delete);
+        }
+    });
+}
+
+fn snooze_menu(anchor: &egui::Response, popup: Id, out: &mut Vec<Action>) {
+    egui::Popup::menu(anchor).id(popup).align(egui::RectAlign::BOTTOM_END).gap(4.0).width(170.0).show(|ui| {
+        ui.spacing_mut().button_padding = vec2(8.0, 5.0);
+        ui.add(egui::Label::new(RichText::new("Убрать и вернуть").size(12.0).color(theme::muted())).selectable(false));
+        for days in SNOOZE_DAYS {
+            let label = resurface::snooze_label(days);
+            let mut chars = label.chars();
+            let label: String = chars.next().into_iter().flat_map(char::to_uppercase).chain(chars).collect();
+            let button = egui::Button::new(RichText::new(label).size(14.0)).min_size(vec2(ui.available_width(), 0.0));
+            if ui.add(button).clicked() {
+                out.push(Action::Snooze(days));
+            }
+        }
+    });
+}
+
+/// Shows the check mark on a card's copy button.
+fn mark_copied(ui: &Ui, card: i64) {
+    ui.data_mut(|d| d.insert_temp(Id::new(("card", card)).with("copied"), Instant::now()));
+}
+
 /// Menu under a card's kind: every kind (with its digit key), then the card's color.
 /// `below`: the anchor is at the top of the card, so the menu opens downwards.
 fn kind_menu(anchor: &egui::Response, card: &Card, out: &mut Vec<Action>, below: bool) {
@@ -2323,6 +2995,15 @@ fn kind_menu(anchor: &egui::Response, card: &Card, out: &mut Vec<Action>, below:
                     }
                 }
             });
+            ui.separator();
+            let (glyph, label) = if card.collapsed { ("\u{E70D}", "Развернуть") } else { ("\u{E70E}", "Свернуть в строку") };
+            let mut job = egui::text::LayoutJob::default();
+            let format = |font: FontId, color: Color32| egui::TextFormat { font_id: font, color, valign: Align::Center, ..Default::default() };
+            job.append(glyph, 0.0, format(theme::icons(13.0), theme::muted()));
+            job.append(label, 10.0, format(FontId::proportional(14.0), theme::text()));
+            if ui.add(egui::Button::new(job).min_size(vec2(ui.available_width(), 0.0))).clicked() {
+                out.push(Action::ToggleCollapse);
+            }
         });
 }
 
@@ -2343,6 +3024,12 @@ fn card_ui(
 ) -> Vec<Action> {
     let mut out = Vec::new();
     let id = Id::new(("card", card.id));
+    // A collapsed card is one line at its full width, drawn at that height; its
+    // size is put back at the end, so it opens to what it was.
+    let full_size = card.size;
+    if card.collapsed {
+        card.size = card.shown_size();
+    }
     let rect = Rect::from_min_size(origin + card.pos.to_vec2(), card.size);
 
     // Registration order = hit-test priority: later widgets sit on top.
@@ -2354,7 +3041,15 @@ fn card_ui(
     let header_rect = Rect::from_min_size(rect.min, vec2(rect.width(), HEADER_H + 6.0));
     // A pinned card is locked in place: no moving, no resizing.
     let locked = card.pinned;
-    let drag = ui.interact(header_rect, id.with("drag"), if locked { Sense::hover() } else { Sense::drag() });
+    // A collapsed card is nearly all header: the header takes its click too
+    // (it's on top of the background and would swallow it).
+    let header_sense = match (locked, card.collapsed) {
+        (true, false) => Sense::hover(),
+        (true, true) => Sense::click(),
+        (false, false) => Sense::drag(),
+        (false, true) => Sense::click_and_drag(),
+    };
+    let drag = ui.interact(header_rect, id.with("drag"), header_sense);
     // Resize handles on every edge and corner; corners last so they win where they overlap.
     const EDGE: f32 = 6.0;
     const CORNER: f32 = 16.0;
@@ -2372,7 +3067,7 @@ fn card_ui(
     ];
     let handles: Vec<(Sides, egui::Response)> = handles
         .into_iter()
-        .filter(|_| !locked)
+        .filter(|_| !locked && !card.collapsed)
         .enumerate()
         .map(|(i, (sides, area))| (sides, ui.interact(area, id.with(("resize", i)), Sense::drag())))
         .collect();
@@ -2381,14 +3076,18 @@ fn card_ui(
     let resize_hover = handles.iter().rev().find(|(_, h)| h.hovered()).map(|(s, _)| *s);
     let corner_hovered = resize_hover.is_some_and(|s| s.right && s.bottom);
 
-    if bg.clicked() || bg.double_clicked() || drag.drag_started() || resize.is_some_and(|(_, h)| h.drag_started()) {
+    if bg.clicked() || bg.double_clicked() || drag.clicked() || drag.drag_started() || resize.is_some_and(|(_, h)| h.drag_started()) {
         out.push(Action::Front);
     }
     // One click edits; a Private card takes a double click, so a stray click
     // doesn't lay its text open.
     // Pushed once the body is drawn: a click on a link there opens it instead.
     let edit_gesture = if card.kind == Kind::Private { bg.double_clicked() } else { bg.clicked() };
-    let start_edit = edit_gesture && editing.is_none();
+    // A collapsed card opens on a click instead.
+    if card.collapsed && (bg.clicked() || drag.clicked()) {
+        out.push(Action::ToggleCollapse);
+    }
+    let start_edit = edit_gesture && editing.is_none() && !card.collapsed;
 
     // The rect at the start of the gesture and the pointer's total movement live in
     // memory, so a stuck edge follows the pointer again once it moves past the snap
@@ -2478,71 +3177,153 @@ fn card_ui(
         }
     }
 
-    let inner = rect.shrink2(vec2(14.0, 8.0));
-    let header = Rect::from_min_size(inner.min, vec2(inner.width(), HEADER_H - 4.0));
+    let inner = rect.shrink2(vec2(14.0, 10.0));
+    let meta = Rect::from_min_size(inner.min, vec2(inner.width(), META_H));
     let footer = Rect::from_min_max(pos2(inner.left(), inner.bottom() - FOOTER_H), inner.max);
-    let body = Rect::from_min_max(pos2(inner.left(), header.bottom() + 2.0), pos2(inner.right(), footer.top() - 2.0));
+    let body = Rect::from_min_max(pos2(inner.left(), meta.bottom() + 4.0), pos2(inner.right(), footer.top() - 2.0));
     let accent = theme::on_card(card.accent());
 
-    paint_marker(ui, rect, accent, style, hovered);
+    paint_marker(ui, rect, card.hue(), style, hovered);
 
     // Tags and age only while the card is hovered, edited or selected; at rest a
-    // card is its text, its color marker (a setting) and the kind's icon.
+    // card is its text, its color marker (a setting) and the kind's mark.
     let details = ui.ctx().animate_bool_with_time(id.with("details"), hovered || active || editing.is_some(), 0.15);
 
-    // Header: hover actions.
-    ui.scope_builder(
-        UiBuilder::new().max_rect(header).layout(Layout::left_to_right(Align::Center)),
-        |ui| {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                if hovered {
-                    // Pinned: nothing that takes the card off the layer by accident.
-                    if !locked && icon_button(ui, "\u{E74D}", "Удалить", theme::card_muted()).clicked() {
-                        out.push(Action::Delete);
-                    }
-                    if !locked && icon_button(ui, "\u{E7B8}", "В архив", theme::card_dim()).clicked() {
-                        out.push(Action::Archive);
-                    }
-                    if icon_button(ui, "\u{E8C8}", "Дублировать", theme::card_dim()).clicked() {
-                        out.push(Action::Duplicate);
-                    }
-                    // The check mark says the text is on the clipboard.
-                    let copied_id = id.with("copied");
-                    let copied = ui.data(|d| d.get_temp::<Instant>(copied_id)).filter(|t| t.elapsed() < COPIED_FOR);
-                    if let Some(t) = copied {
-                        ui.ctx().request_repaint_after(COPIED_FOR.saturating_sub(t.elapsed()));
-                    }
-                    let (glyph, tip, color) = match copied {
-                        Some(_) => ("\u{E73E}", "Текст скопирован", theme::SUCCESS),
-                        None => ("\u{E77F}", "Копировать текст", theme::card_dim()),
-                    };
-                    if icon_button(ui, glyph, tip, color).clicked() {
-                        ui.data_mut(|d| d.insert_temp(copied_id, Instant::now()));
-                        out.push(Action::Copy);
-                    }
-                    if card.kind == Kind::Private
-                        && icon_button(ui, "\u{E890}", "Показать на 5 секунд", theme::card_dim()).clicked()
-                    {
-                        out.push(Action::Reveal);
-                    }
+    // The hover actions stay while one of their menus is open, or the menu would
+    // lose the button it hangs from as the pointer moves onto it.
+    let snooze_popup = id.with("snooze");
+    let more_popup = id.with("more");
+    let hovered = hovered
+        || egui::Popup::is_id_open(ui.ctx(), snooze_popup)
+        || egui::Popup::is_id_open(ui.ctx(), more_popup);
+
+    // Meta line, right: while hovered, a pill of actions, the kind's own first and
+    // in its color; what takes the card off the layer sits under "Ещё". At rest,
+    // the pin of a pinned card.
+    let mut pill_left = meta.right();
+    if hovered {
+        let primary = primary_action(card);
+        let primary_is_copy = matches!(primary, Some((_, _, Action::Copy)));
+        // A collapsed card has one action: open.
+        let n = if card.collapsed {
+            1
+        } else {
+            2 // pin, more
+                + usize::from(primary.is_some())
+                + usize::from(!primary_is_copy)
+                + usize::from(card.kind == Kind::Private)
+                + usize::from(!locked)
+        };
+        let width = n as f32 * 24.0 + (n as f32 - 1.0) * 2.0 + 8.0;
+        let pill = Rect::from_min_max(pos2(meta.right() + 4.0 - width, meta.center().y - 13.0), pos2(meta.right() + 4.0, meta.center().y + 13.0));
+        pill_left = pill.left();
+        let p = ui.painter();
+        let shadow = Color32::from_black_alpha(if theme::is_light() { 24 } else { 70 });
+        p.add(egui::epaint::Shadow { offset: [0, 2], blur: 10, spread: 0, color: shadow }.as_shape(pill, CornerRadius::same(7)));
+        p.rect(pill, CornerRadius::same(7), theme::glass_fill_hover(), Stroke::new(1.0, theme::glass_stroke()), StrokeKind::Inside);
+        // The pill is the theme's glass whatever the card's background is painted
+        // with, so its icons take the theme's colors, not the card's.
+        let pill_accent = card.accent();
+        ui.scope_builder(UiBuilder::new().max_rect(pill.shrink2(vec2(4.0, 2.0))).layout(Layout::right_to_left(Align::Center)), |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if card.collapsed {
+                if icon_button(ui, "\u{E70D}", "Развернуть", theme::dim()).clicked() {
+                    out.push(Action::ToggleCollapse);
                 }
-                if card.pinned || hovered {
-                    let (glyph, color) = if card.pinned { ("\u{E841}", accent) } else { ("\u{E718}", theme::card_dim()) };
-                    if icon_button(ui, glyph, if card.pinned { "Открепить" } else { "Закрепить на месте" }, color).clicked() {
-                        out.push(Action::TogglePin);
-                    }
+                return;
+            }
+            let more = icon_button(ui, "\u{E712}", "Ещё", theme::dim());
+            more_menu(&more, more_popup, locked, &mut out);
+            if !locked {
+                let later = icon_button(ui, "\u{E708}", "Позже", theme::dim());
+                snooze_menu(&later, snooze_popup, &mut out);
+            }
+            if card.kind == Kind::Private && icon_button(ui, "\u{E890}", "Показать на 5 секунд", theme::dim()).clicked() {
+                out.push(Action::Reveal);
+            }
+            // The check mark says the text is on the clipboard.
+            let copied_id = id.with("copied");
+            let copied = ui.data(|d| d.get_temp::<Instant>(copied_id)).filter(|t| t.elapsed() < COPIED_FOR);
+            if let Some(t) = copied {
+                ui.ctx().request_repaint_after(COPIED_FOR.saturating_sub(t.elapsed()));
+            }
+            let copy_face = |glyph: &'static str, tip: &'static str, color: Color32| match copied {
+                Some(_) => ("\u{E73E}", "Текст скопирован", theme::SUCCESS),
+                None => (glyph, tip, color),
+            };
+            if !primary_is_copy {
+                let (glyph, tip, color) = copy_face("\u{E77F}", "Копировать текст", theme::dim());
+                if icon_button(ui, glyph, tip, color).clicked() {
+                    out.push(Action::Copy);
                 }
-            });
-        },
-    );
+            }
+            let (glyph, tip) = if card.pinned { ("\u{E77A}", "Открепить") } else { ("\u{E718}", "Закрепить на месте") };
+            if icon_button(ui, glyph, tip, if card.pinned { pill_accent } else { theme::dim() }).clicked() {
+                out.push(Action::TogglePin);
+            }
+            if let Some((glyph, tip, action)) = primary {
+                let is_copy = matches!(action, Action::Copy);
+                let (glyph, tip, color) = if is_copy { copy_face(glyph, tip, pill_accent) } else { (glyph, tip, pill_accent) };
+                // Its own face: a wash of the kind's color under the glyph.
+                let next = ui.available_rect_before_wrap();
+                let face = Rect::from_min_max(pos2(next.right() - 24.0, next.center().y - 11.0), pos2(next.right(), next.center().y + 11.0));
+                ui.painter().rect_filled(face, CornerRadius::same(6), pill_accent.gamma_multiply(0.16));
+                if icon_button(ui, glyph, tip, color).clicked() {
+                    out.push(action);
+                }
+            }
+        });
+    } else if card.pinned {
+        ui.painter().text(pos2(meta.right(), meta.center().y), Align2::RIGHT_CENTER, "\u{E840}", theme::icons(11.0), accent);
+    }
+
+    // Meta line, left: the kind, a dot and its name (or its glyph, a setting),
+    // which opens the menu to change the kind. A plain note has nothing to say
+    // there and shows it only on hover.
+    let glyph_mode = style.icon == card::IconSpot::BottomRight;
+    let plain_note = card.kind == Kind::Note && card.tint.is_none();
+    let mark_shown = if card.collapsed { 1.0 } else if plain_note || style.icon == card::IconSpot::Hover { details } else { 1.0 };
+    let mark_font = if glyph_mode { theme::icons(if style.bold_icon { 14.0 } else { 12.0 }) } else { theme::semibold(11.5) };
+    let mark_text = match (glyph_mode, card.kind, card.review_at) {
+        (true, ..) => card.kind.icon().to_owned(),
+        // A reminder says when it's due.
+        (false, Kind::Reminder, Some(at)) => format!("{} \u{B7} {}", card.kind.label(), short_date(at)),
+        _ => card.kind.label().to_owned(),
+    };
+    let mark_galley = ui.painter().layout_no_wrap(mark_text, mark_font, accent);
+    let dot_w = if glyph_mode { 0.0 } else { 13.0 };
+    let mark_w = (dot_w + mark_galley.size().x + 12.0).min((pill_left - meta.left()).max(20.0));
+    let mark_rect = Rect::from_min_size(pos2(meta.left() - 6.0, meta.center().y - 10.0), vec2(mark_w, 20.0));
+    let sense = if mark_shown > 0.5 { Sense::click() } else { Sense::hover() };
+    let kind = ui.interact(mark_rect, id.with("kind"), sense);
+    kind.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Тип: {}", card.kind.label())));
+    let menu_open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&kind));
+    let mut painter = ui.painter().with_clip_rect(mark_rect.intersect(ui.clip_rect()));
+    painter.multiply_opacity(mark_shown);
+    if kind.hovered() && mark_shown > 0.5 || menu_open {
+        painter.rect_filled(mark_rect, CornerRadius::same(6), theme::wash(22));
+    }
+    let mut x = mark_rect.left() + 6.0;
+    if !glyph_mode {
+        painter.circle_filled(pos2(x + 3.5, mark_rect.center().y), 3.5, accent);
+        x += dot_w;
+    }
+    painter.galley(pos2(x, mark_rect.center().y - mark_galley.size().y / 2.0), mark_galley, accent);
+    if kind.clicked() {
+        out.push(Action::Front);
+    }
+    let kind = if mark_shown > 0.5 {
+        kind.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(format!("{} — сменить тип", card.kind.label()))
+    } else {
+        kind
+    };
+    kind_menu(&kind, card, &mut out, true);
 
     // Footer while editing: the formatting toolbar in place of tags and age. Drawn
     // before the body, so a click applies in the same frame the editor reads it.
     let toolbar_shown = editing.is_some();
     if let Some(buf) = editing.as_deref_mut() {
-        let right = if style.icon == card::IconSpot::TopLeft { footer.right() } else { footer.right() - 30.0 };
-        let bar = Rect::from_min_max(footer.min, pos2(right, footer.bottom()));
+        let bar = footer;
         ui.scope_builder(UiBuilder::new().max_rect(bar).layout(Layout::left_to_right(Align::Center)), |ui| {
             ui.set_clip_rect(bar.intersect(ui.clip_rect()));
             format_toolbar(ui, id.with("editor"), buf);
@@ -2550,88 +3331,136 @@ fn card_ui(
     }
 
     // Body: scrolls when the text doesn't fit; the floating bar shows only on hover.
-    let link_clicked = ui
-        .scope_builder(UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Min)), |ui| {
+    let hit = if card.collapsed {
+        None
+    } else {
+        ui.scope_builder(UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Min)), |ui| {
             ui.set_clip_rect(body.intersect(ui.clip_rect()));
+            // A thin bar over the text, only while the pointer is on the card,
+            // like the scrollbars of Windows 11; not egui's solid gutter.
+            ui.spacing_mut().scroll =
+                egui::style::ScrollStyle { bar_width: 6.0, floating_width: 3.0, ..egui::style::ScrollStyle::floating() };
             egui::ScrollArea::vertical()
                 .id_salt(id.with("scroll"))
                 .auto_shrink([false, false])
                 .max_height(body.height())
-                .show(ui, |ui| card_body(ui, card, editing, revealed, revealed_text, style))
+                .show(ui, |ui| card_body(ui, card, editing, revealed, revealed_text, style, details))
                 .inner
         })
-        .inner;
-    if start_edit && !link_clicked {
+        .inner
+    };
+    // A click on a link, a check box or a copy button in the text is that, not
+    // the start of editing.
+    if start_edit && hit.is_none() {
         out.push(Action::StartEdit);
     }
+    if let Some(BodyHit::ToggleCheck(line)) = hit {
+        out.push(Action::ToggleCheck(line));
+    }
 
-    // Footer: tags + age, and the kind's icon in the corner, which opens the menu
-    // to change the kind.
-    let icon_size = if style.bold_icon { vec2(26.0, 24.0) } else { vec2(22.0, 20.0) };
-    let kind_rect = match style.icon {
-        card::IconSpot::TopLeft => Rect::from_center_size(pos2(header.left() + 8.0, header.center().y), icon_size),
-        _ => Rect::from_center_size(pos2(footer.right() - 8.0, footer.center().y), icon_size),
-    };
-    let icon_shown = if style.icon == card::IconSpot::Hover { details } else { 1.0 };
-    let sense = if icon_shown > 0.5 { Sense::click() } else { Sense::hover() };
-    let kind = ui.interact(kind_rect, id.with("kind"), sense);
-    kind.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Тип: {}", card.kind.label())));
-    let menu_open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&kind));
-    let mut painter = ui.painter().clone();
-    painter.multiply_opacity(icon_shown);
-    if kind.hovered() && icon_shown > 0.5 || menu_open {
-        painter.rect_filled(kind_rect, CornerRadius::same(6), theme::wash(22));
-    }
-    if style.bold_icon {
-        // Segoe Fluent Icons has no bold weight: the glyph drawn a few times, a
-        // fraction of a point apart, thickens its strokes.
-        for d in [vec2(-0.4, 0.0), vec2(0.4, 0.0), vec2(0.0, -0.4), vec2(0.0, 0.4), Vec2::ZERO] {
-            painter.text(kind_rect.center() + d, Align2::CENTER_CENTER, card.kind.icon(), theme::icons(16.0), accent);
-        }
-    } else {
-        painter.text(kind_rect.center(), Align2::CENTER_CENTER, card.kind.icon(), theme::icons(12.5), accent);
-    }
-    if kind.clicked() {
-        out.push(Action::Front);
-    }
-    let kind = if icon_shown > 0.5 {
-        kind.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(format!("{} — сменить тип", card.kind.label()))
-    } else {
-        kind
-    };
-    kind_menu(&kind, card, &mut out, style.icon == card::IconSpot::TopLeft);
-
+    // Footer: tags and age.
     let mut painter = ui.painter().with_clip_rect(footer);
     // While editing, the toolbar has the footer.
-    painter.multiply_opacity(if toolbar_shown { 0.0 } else { details });
+    painter.multiply_opacity(if toolbar_shown || card.collapsed { 0.0 } else { details });
     let age = painter.text(
-        pos2(if style.icon == card::IconSpot::TopLeft { footer.right() } else { kind_rect.left() - 6.0 }, footer.center().y),
+        pos2(footer.right(), footer.center().y),
         Align2::RIGHT_CENTER,
         age_label(card.created_at),
         FontId::proportional(11.5),
         theme::card_muted(),
     );
     let mut x = footer.left();
+    // An idea's status leads the footer: always there once set (it's what the
+    // idea is), offered with the other details while it isn't.
+    if card.kind == Kind::Idea && !card.collapsed && !toolbar_shown {
+        let popup = id.with("idea-status");
+        let menu_open = egui::Popup::is_id_open(ui.ctx(), popup);
+        let shown = if card.idea_status.is_some() || menu_open { 1.0 } else { details };
+        if shown > 0.0 {
+            let (text, color) = match card.idea_status {
+                Some(s) => (s.label(), s.color()),
+                None => ("Статус", theme::card_muted()),
+            };
+            let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(11.5), color);
+            let chip = Rect::from_min_size(pos2(x, footer.center().y - galley.size().y / 2.0 - 2.0), galley.size() + vec2(12.0, 4.0));
+            let resp = ui.interact(chip, popup.with("chip"), if shown > 0.5 { Sense::click() } else { Sense::hover() });
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Статус идеи: {text}")));
+            let mut p = ui.painter().with_clip_rect(footer);
+            p.multiply_opacity(shown);
+            let fill = if resp.hovered() || menu_open { theme::wash(30) } else { theme::chip_fill() };
+            p.rect_filled(chip, CornerRadius::same(6), fill);
+            if card.idea_status.is_some() {
+                p.rect_stroke(chip, CornerRadius::same(6), Stroke::new(1.0, color.gamma_multiply(0.6)), StrokeKind::Inside);
+            }
+            p.galley(chip.min + vec2(6.0, 2.0), galley, color);
+            let resp = if shown > 0.5 { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
+            idea_status_menu(&resp, popup, card.idea_status, &mut out);
+            x = chip.right() + 4.0;
+        }
+    }
+    // Tags. While the details show, a click on a chip takes the tag out of the
+    // text and "+" adds one; a Private card's text is its secret, not edited here.
+    let editable_tags = card.kind != Kind::Private && !toolbar_shown && !card.collapsed && details > 0.5;
+    const PLUS_W: f32 = 22.0;
+    let room = age.left() - 8.0 - if editable_tags { PLUS_W + 4.0 } else { 0.0 };
     for tag in &card.tags {
         let galley = painter.layout_no_wrap(format!("#{tag}"), FontId::proportional(11.5), theme::card_dim());
+        let cross = if editable_tags { 12.0 } else { 0.0 };
         let chip = Rect::from_min_size(
             pos2(x, footer.center().y - galley.size().y / 2.0 - 2.0),
-            galley.size() + vec2(12.0, 4.0),
+            galley.size() + vec2(12.0 + cross, 4.0),
         );
-        if chip.right() > age.left() - 8.0 {
+        if chip.right() > room {
             break;
         }
-        painter.rect_filled(chip, CornerRadius::same(6), theme::chip_fill());
+        let resp = editable_tags.then(|| ui.interact(chip, id.with(("tag", tag.as_str())), Sense::click()));
+        let chip_hovered = resp.as_ref().is_some_and(egui::Response::hovered);
+        painter.rect_filled(chip, CornerRadius::same(6), if chip_hovered { theme::wash(30) } else { theme::chip_fill() });
         painter.galley(chip.min + vec2(6.0, 2.0), galley, theme::card_dim());
+        if let Some(resp) = resp {
+            let color = if chip_hovered { theme::card_text() } else { theme::card_muted() };
+            painter.text(pos2(chip.right() - 9.0, chip.center().y), Align2::CENTER_CENTER, "\u{E711}", theme::icons(7.5), color);
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Убрать тег #{tag}")));
+            if resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Убрать тег").clicked() {
+                out.push(Action::RemoveTag(tag.clone()));
+            }
+        }
         x = chip.right() + 4.0;
     }
+    if editable_tags {
+        let plus = Rect::from_min_size(pos2(x, footer.center().y - 9.0), vec2(PLUS_W, 18.0));
+        let resp = ui.interact(plus, id.with("add-tag"), Sense::click());
+        painter.rect_filled(plus, CornerRadius::same(6), if resp.hovered() { theme::wash(30) } else { theme::chip_fill() });
+        painter.text(plus.center(), Align2::CENTER_CENTER, "\u{E710}", theme::icons(9.5), theme::card_dim());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Добавить тег"));
+        if resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Добавить тег").clicked() {
+            out.push(Action::AddTag(plus.left_bottom()));
+        }
+    }
 
-    if hovered {
+    // The resize grip, where a card can be resized.
+    if hovered && !locked && !card.collapsed {
         let p = ui.painter();
         let c = rect.max - vec2(6.0, 6.0);
         let stroke = Stroke::new(1.2, theme::wash(if corner_hovered { 120 } else { 50 }));
         p.line_segment([c - vec2(8.0, 0.0), c - vec2(0.0, 8.0)], stroke);
         p.line_segment([c - vec2(4.0, 0.0), c - vec2(0.0, 4.0)], stroke);
+    }
+
+    if card.collapsed {
+        let line = card.collapsed_line();
+        // Clear of the open button and the pin while those show.
+        let right = if hovered { pill_left - 8.0 } else if card.pinned { meta.right() - 22.0 } else { inner.right() };
+        let left = mark_rect.right() + 2.0;
+        let mut job = egui::text::LayoutJob::single_section(
+            line.clone(),
+            egui::TextFormat { font_id: theme::card_font(style.text_size()), color: theme::card_text(), ..Default::default() },
+        );
+        job.wrap = egui::text::TextWrapping { max_width: (right - left).max(0.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+        let galley = ui.fonts_mut(|f| f.layout_job(job));
+        ui.painter().galley(pos2(left, rect.center().y - galley.size().y / 2.0), galley, theme::card_text());
+        bg.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Свёрнута: {line}")));
+        card.size = full_size;
     }
 
     out

@@ -103,22 +103,24 @@ impl Kind {
         }
     }
 
-    /// Readable on the current theme (see theme::adapt).
-    pub fn accent(self) -> Color32 {
-        crate::theme::adapt(self.raw_accent())
+    /// The kind's color: one of the tints, so a kind and a color picked by hand
+    /// are painted the same way.
+    pub fn tint(self) -> Tint {
+        match self {
+            Kind::Note => Tint::Gray,
+            Kind::Idea => Tint::Yellow,
+            Kind::Prompt => Tint::Purple,
+            Kind::Link => Tint::Blue,
+            Kind::Goal => Tint::Green,
+            Kind::Reminder => Tint::Orange,
+            Kind::Reference => Tint::Teal,
+            Kind::Private => Tint::Pink,
+        }
     }
 
-    fn raw_accent(self) -> Color32 {
-        match self {
-            Kind::Note => Color32::from_rgb(160, 174, 192),
-            Kind::Idea => Color32::from_rgb(250, 204, 21),
-            Kind::Prompt => Color32::from_rgb(167, 139, 250),
-            Kind::Link => Color32::from_rgb(96, 165, 250),
-            Kind::Goal => Color32::from_rgb(52, 211, 153),
-            Kind::Reminder => Color32::from_rgb(251, 146, 60),
-            Kind::Reference => Color32::from_rgb(45, 212, 191),
-            Kind::Private => Color32::from_rgb(244, 114, 182),
-        }
+    /// The kind's mark color, readable on the current theme (see theme::adapt).
+    pub fn accent(self) -> Color32 {
+        self.tint().color()
     }
 
     /// The digit that switches a selected card to this kind (1–8, in `ALL` order).
@@ -128,7 +130,58 @@ impl Kind {
     }
 }
 
-/// A color picked for a card by hand; replaces its kind's accent.
+/// Where an idea stands (product.txt §4). Kept in `cards.meta`, so it survives
+/// a change of kind and comes back when the card is an idea again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdeaStatus {
+    Potential,
+    Maybe,
+    Explore,
+    Important,
+}
+
+impl IdeaStatus {
+    pub const ALL: [IdeaStatus; 4] = [IdeaStatus::Potential, IdeaStatus::Maybe, IdeaStatus::Explore, IdeaStatus::Important];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IdeaStatus::Potential => "potential",
+            IdeaStatus::Maybe => "maybe",
+            IdeaStatus::Explore => "explore",
+            IdeaStatus::Important => "important",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<IdeaStatus> {
+        IdeaStatus::ALL.into_iter().find(|v| v.as_str() == s)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            IdeaStatus::Potential => "Потенциал",
+            IdeaStatus::Maybe => "Может быть",
+            IdeaStatus::Explore => "Изучить",
+            IdeaStatus::Important => "Важно",
+        }
+    }
+
+    /// Readable on a card (see theme::on_card).
+    pub fn color(self) -> Color32 {
+        let tint = match self {
+            IdeaStatus::Potential => Tint::Blue,
+            IdeaStatus::Maybe => Tint::Gray,
+            IdeaStatus::Explore => Tint::Teal,
+            IdeaStatus::Important => Tint::Orange,
+        };
+        crate::theme::on_card(tint.color())
+    }
+}
+
+/// A card's color: its kind's, or one picked by hand. Two palettes per color:
+/// the *mark* (dot, glyph, strip, border, glow, the primary button), and the
+/// *surface* the whole card is filled with, which is not the mark washed over
+/// the glass (that came out muddy) but a color of its own: the paper of Sticky
+/// Notes and Keep in the light theme, a night shade like Keep's in the dark one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tint {
     Yellow,
@@ -175,8 +228,45 @@ impl Tint {
         }
     }
 
+    /// The mark color, readable on the current theme.
     pub fn color(self) -> Color32 {
         crate::theme::adapt(self.raw_color())
+    }
+
+    /// The surface color: paper on a light card, a night shade on a dark one.
+    pub fn surface(self, light: bool) -> Color32 {
+        let [r, g, b] = if light { self.paper() } else { self.night() };
+        Color32::from_rgb(r, g, b)
+    }
+
+    /// Sticky Notes' paper colors (yellow, green, pink, purple, blue, gray) and
+    /// Keep's peach and teal.
+    fn paper(self) -> [u8; 3] {
+        match self {
+            Tint::Yellow => [255, 242, 171],
+            Tint::Orange => [255, 217, 184],
+            Tint::Pink => [255, 204, 229],
+            Tint::Purple => [231, 207, 255],
+            Tint::Blue => [205, 233, 255],
+            Tint::Teal => [197, 236, 236],
+            Tint::Green => [203, 241, 196],
+            Tint::Gray => [237, 238, 241],
+        }
+    }
+
+    /// Dark shades that still read as the color, and stay mostly grey so the
+    /// layer doesn't turn into a paint box at night. Gray is the glass itself.
+    fn night(self) -> [u8; 3] {
+        match self {
+            Tint::Yellow => [64, 59, 40],
+            Tint::Orange => [68, 52, 40],
+            Tint::Pink => [66, 44, 56],
+            Tint::Purple => [54, 48, 74],
+            Tint::Blue => [36, 50, 70],
+            Tint::Teal => [34, 58, 60],
+            Tint::Green => [38, 60, 46],
+            Tint::Gray => [43, 47, 54],
+        }
     }
 
     fn raw_color(self) -> Color32 {
@@ -202,18 +292,25 @@ pub enum Marker {
     StripLeft,
     Tint,
     Border,
-    /// The whole card in a muted shade of the color (Google Keep, Sticky Notes).
+    /// The whole card in the color's surface: paper by day, a night shade in
+    /// the dark (Google Keep).
     Fill,
     /// A colored outline over a faint tint (Obsidian Canvas).
     Outline,
+    /// Paper, and while the card is hovered a darker band along the top, the
+    /// way a Sticky Notes window shows its bar.
+    Paper,
 }
 
-/// Where the kind's icon (which opens the kind menu) sits.
+/// How the kind is marked in a card's meta line (the mark opens the kind menu).
+/// The keys keep their old names, from when the mark was an icon in a corner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IconSpot {
+    /// The kind's glyph alone.
     BottomRight,
+    /// A dot in the kind's color and the kind's name.
     TopLeft,
-    /// Bottom right, only while the card is hovered or selected.
+    /// The dot and name, only while the card is hovered or selected.
     Hover,
 }
 
@@ -252,8 +349,17 @@ impl Default for CardStyle {
 }
 
 impl Marker {
-    pub const ALL: [Marker; 8] =
-        [Marker::None, Marker::Glow, Marker::StripTop, Marker::StripLeft, Marker::Tint, Marker::Border, Marker::Fill, Marker::Outline];
+    pub const ALL: [Marker; 9] = [
+        Marker::None,
+        Marker::Glow,
+        Marker::StripTop,
+        Marker::StripLeft,
+        Marker::Tint,
+        Marker::Border,
+        Marker::Fill,
+        Marker::Paper,
+        Marker::Outline,
+    ];
 
     pub fn key(self) -> &'static str {
         match self {
@@ -265,6 +371,7 @@ impl Marker {
             Marker::Border => "border",
             Marker::Fill => "fill",
             Marker::Outline => "outline",
+            Marker::Paper => "paper",
         }
     }
 
@@ -278,6 +385,7 @@ impl Marker {
             Marker::Border => "Цветная рамка",
             Marker::Fill => "Заливка",
             Marker::Outline => "Рамка и тон",
+            Marker::Paper => "Бумага с шапкой",
         }
     }
 }
@@ -295,8 +403,8 @@ impl IconSpot {
 
     pub fn label(self) -> &'static str {
         match self {
-            IconSpot::BottomRight => "Снизу справа",
-            IconSpot::TopLeft => "Сверху слева",
+            IconSpot::BottomRight => "Значок",
+            IconSpot::TopLeft => "Точка и название",
             IconSpot::Hover => "Только при наведении",
         }
     }
@@ -378,16 +486,16 @@ pub const PRESETS: [Preset; 8] = [
     Preset {
         name: "Ebb",
         hint: "Стекло и свечение цвета",
-        style: style(Marker::Glow, IconSpot::BottomRight, 50, false, 5, 12, 50, 85, F::System, 29, B::Theme),
+        style: style(Marker::Glow, IconSpot::TopLeft, 50, false, 5, 12, 50, 85, F::System, 29, B::Theme),
     },
     Preset {
         name: "Sticky Notes",
-        hint: "Цветная шапка заметки",
-        style: style(Marker::StripTop, IconSpot::Hover, 100, false, 8, 8, 35, 100, F::System, 29, B::Theme),
+        hint: "Цветная бумага, шапка при наведении",
+        style: style(Marker::Paper, IconSpot::Hover, 50, false, 8, 8, 35, 100, F::System, 29, B::Theme),
     },
     Preset {
         name: "Google Keep",
-        hint: "Заливка, плоско, рамка",
+        hint: "Пастель днём, ночные тона в темноте",
         style: style(Marker::Fill, IconSpot::Hover, 50, false, 5, 8, 0, 100, F::System, 28, B::Theme),
     },
     Preset {
@@ -403,7 +511,7 @@ pub const PRESETS: [Preset; 8] = [
     Preset {
         name: "Бумажный стикер",
         hint: "Заливка, тень, от руки",
-        style: style(Marker::Fill, IconSpot::Hover, 70, false, 5, 2, 70, 100, F::SegoePrint, 29, B::Theme),
+        style: style(Marker::Fill, IconSpot::Hover, 60, false, 5, 2, 70, 100, F::SegoePrint, 29, B::Theme),
     },
     Preset {
         name: "Минимализм",
@@ -413,7 +521,7 @@ pub const PRESETS: [Preset; 8] = [
     Preset {
         name: "Windows",
         hint: "Фон как у панели задач",
-        style: style(Marker::None, IconSpot::BottomRight, 50, false, 5, 8, 35, 96, F::System, 28, B::Taskbar),
+        style: style(Marker::None, IconSpot::TopLeft, 50, false, 5, 8, 35, 96, F::System, 28, B::Taskbar),
     },
 ];
 
@@ -433,11 +541,39 @@ pub struct Card {
     pub placement: Placement,
     /// Picked by hand; `None` takes the kind's color.
     pub tint: Option<Tint>,
+    /// Folded to one line on the layer; `size` stays what it opens to.
+    pub collapsed: bool,
+    /// Set while it was an idea; shown only while it is one.
+    pub idea_status: Option<IdeaStatus>,
 }
 
+/// Height of a collapsed card.
+pub const COLLAPSED_H: f32 = 40.0;
+
 impl Card {
+    /// The card's color: picked by hand, else its kind's.
+    pub fn hue(&self) -> Tint {
+        self.tint.unwrap_or(self.kind.tint())
+    }
+
+    /// The mark color of [`Card::hue`].
+    /// The size the card takes on the layer: one line while collapsed.
+    pub fn shown_size(&self) -> Vec2 {
+        if self.collapsed { vec2(self.size.x, COLLAPSED_H) } else { self.size }
+    }
+
+    /// The line a collapsed card shows: the first line of its text as it reads;
+    /// for a Private card, its label (the layer never holds the value).
+    pub fn collapsed_line(&self) -> String {
+        if self.kind == Kind::Private {
+            return if self.title.is_empty() { PRIVATE_PLACEHOLDER.to_owned() } else { self.title.clone() };
+        }
+        let text = if self.title.is_empty() { self.body.clone() } else { format!("{}\n{}", self.title, self.body) };
+        crate::rich_text::strip_markup(&text).lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().to_owned()
+    }
+
     pub fn accent(&self) -> Color32 {
-        self.tint.map_or(self.kind.accent(), Tint::color)
+        self.hue().color()
     }
 
     /// The caption of a card brought back from the archive.
@@ -509,12 +645,245 @@ pub fn link_domain(text: &str) -> Option<&str> {
     (!host.is_empty()).then_some(host)
 }
 
+/// The first http(s) address in the text, without the punctuation after it.
+pub fn first_url(text: &str) -> Option<&str> {
+    let at = [text.find("https://"), text.find("http://")].into_iter().flatten().min()?;
+    let rest = &text[at..];
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    Some(rest[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '"', '\'']))
+}
+
 /// A Prompt's name: its first line, when more text follows and the line is short.
 pub fn prompt_name(body: &str) -> Option<(&str, &str)> {
     let body = body.trim_start();
     let (first, rest) = body.split_once('\n')?;
     let (first, rest) = (first.trim(), rest.trim());
     (!first.is_empty() && !rest.is_empty() && first.chars().count() <= 80).then_some((first, rest))
+}
+
+/// `{{name}}` placeholders in a Prompt: the byte range of each and its name.
+/// A name is what's between the braces, trimmed: one line, no braces, ≤ 40 chars.
+pub(crate) fn prompt_placeholders(text: &str) -> Vec<(std::ops::Range<usize>, &str)> {
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(open) = text[from..].find("{{").map(|i| from + i) {
+        let Some(close) = text[open + 2..].find("}}").map(|i| open + 2 + i) else { break };
+        let inner = &text[open + 2..close];
+        let name = inner.trim();
+        let valid = !name.is_empty() && name.chars().count() <= 40 && !inner.contains(['{', '}', '\n']);
+        if valid {
+            found.push((open..close + 2, name));
+            from = close + 2;
+        } else {
+            // "{{{x}}}" or a stray "{{": look again one brace on.
+            from = open + 1;
+        }
+    }
+    found
+}
+
+/// A Prompt's variables, each once, in the order they first appear.
+pub fn prompt_variables(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for (_, name) in prompt_placeholders(text) {
+        if !names.iter().any(|n| n == name) {
+            names.push(name.to_owned());
+        }
+    }
+    names
+}
+
+/// The Prompt with each `{{name}}` replaced by its value; names without one stay as written.
+pub fn fill_prompt(text: &str, values: &[(String, String)]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for (range, name) in prompt_placeholders(text) {
+        if let Some((_, value)) = values.iter().find(|(n, _)| n == name) {
+            out.push_str(&text[last..range.start]);
+            out.push_str(value);
+            last = range.end;
+        }
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
+/// A card's tags: the `#words` of its text (without markup), lowercased, once
+/// each, trailing `,.;` dropped.
+pub fn tags_of(plain: &str) -> Vec<String> {
+    let mut tags: Vec<String> = Vec::new();
+    for tag in plain.split_whitespace().filter_map(tag_word) {
+        if !tags.contains(&tag) {
+            tags.push(tag);
+        }
+    }
+    tags
+}
+
+/// The tag a word stands for, if it's a `#tag`.
+fn tag_word(word: &str) -> Option<String> {
+    let tag = word.strip_prefix('#')?.trim_end_matches([',', '.', ';']).to_lowercase();
+    (!tag.is_empty()).then_some(tag)
+}
+
+/// A tag typed into the tag field: without `#`, lowercased, words joined by `-`
+/// (a tag lives in the text as one word). None when nothing usable is left.
+pub fn normalize_tag(input: &str) -> Option<String> {
+    let words: Vec<&str> = input.split(|c: char| c.is_whitespace() || c == '#').filter(|w| !w.is_empty()).collect();
+    let tag = words.join("-").trim_end_matches([',', '.', ';']).to_lowercase();
+    (!tag.is_empty() && tag.chars().count() <= 40).then_some(tag)
+}
+
+/// The text with `#tag` added: on the last line if that line is only tags,
+/// else on a line of its own. Unchanged if the tag is there already.
+pub fn with_tag(text: &str, tag: &str) -> String {
+    let plain = crate::rich_text::strip_markup(text);
+    if tags_of(&plain).iter().any(|t| t == tag) {
+        return text.to_owned();
+    }
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() {
+        return format!("#{tag}");
+    }
+    let last_line_is_tags = plain.trim_end().lines().last().is_some_and(|l| l.split_whitespace().all(|w| tag_word(w).is_some()));
+    if last_line_is_tags { format!("{trimmed} #{tag}") } else { format!("{trimmed}\n#{tag}") }
+}
+
+/// The text without its `#tag` words (styles of the rest kept). A space goes
+/// with each; a line left empty goes too.
+pub fn without_tag(text: &str, tag: &str) -> String {
+    let (plain, styles) = crate::rich_text::parse(text);
+    let chars: Vec<char> = plain.chars().collect();
+    let mut keep = vec![true; chars.len()];
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_whitespace() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        let word: String = chars[start..i].iter().collect();
+        if tag_word(&word).is_some_and(|t| t == tag) {
+            let (mut from, mut to) = (start, i);
+            if from > 0 && chars[from - 1] == ' ' {
+                from -= 1;
+            } else if to < chars.len() && chars[to] == ' ' {
+                to += 1;
+            }
+            keep[from..to].iter_mut().for_each(|k| *k = false);
+        }
+    }
+    // A line that had a tag taken out and holds nothing else now goes, with its line break.
+    let mut line_start = 0;
+    for end in (0..=chars.len()).filter(|&j| j == chars.len() || chars[j] == '\n') {
+        let line = line_start..end;
+        let touched = keep[line.clone()].iter().any(|k| !k);
+        let empty = line.clone().all(|j| !keep[j] || chars[j].is_whitespace());
+        if touched && empty {
+            line.clone().for_each(|j| keep[j] = false);
+            if end < chars.len() {
+                keep[end] = false;
+            } else if line_start > 0 {
+                keep[line_start - 1] = false;
+            }
+        }
+        line_start = end + 1;
+    }
+    let (plain, styles): (String, Vec<crate::rich_text::Style>) =
+        chars.iter().zip(styles).zip(&keep).filter(|(_, k)| **k).map(|((c, s), _)| (*c, s)).unzip();
+    crate::rich_text::serialize(&plain, &styles)
+}
+
+/// Tags to offer while typing `typed`: the most used first, starting with what's
+/// typed, none the card has already.
+pub fn suggest_tags(counts: &[(String, i64)], typed: &str, have: &[String], limit: usize) -> Vec<String> {
+    let prefix = typed.trim().trim_start_matches('#').to_lowercase();
+    counts
+        .iter()
+        .filter(|(t, _)| t.starts_with(&prefix) && !have.contains(t) && *t != prefix)
+        .take(limit)
+        .map(|(t, _)| t.clone())
+        .collect()
+}
+
+/// What copying a Prompt takes: its text without the name line.
+pub fn prompt_text(title: &str, body: &str) -> String {
+    let full = if title.is_empty() { body.to_owned() } else { format!("{title}\n{body}") };
+    let full = crate::rich_text::strip_markup(&full);
+    match prompt_name(&full) {
+        Some((_, rest)) => rest.to_owned(),
+        None => full.trim().to_owned(),
+    }
+}
+
+/// A list marker at the start of a line: a bullet, or a check box, the way
+/// Sticky Notes' lists and Markdown's task lists are written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListMark {
+    Bullet,
+    Todo,
+    Done,
+}
+
+impl ListMark {
+    /// Space in front of the line, where the mark is drawn in place of the marker.
+    pub fn indent(self) -> f32 {
+        match self {
+            ListMark::Bullet => 16.0,
+            ListMark::Todo | ListMark::Done => 22.0,
+        }
+    }
+}
+
+/// The marker a line starts with, and how many chars it takes (the space after
+/// it included). A lone "-" isn't a bullet; "- [ ]" with nothing after it is a
+/// check box.
+pub fn list_mark(line: &str) -> Option<(ListMark, usize)> {
+    let l = line.trim_start();
+    let pad = line.chars().count() - l.chars().count();
+    for (marker, mark) in [
+        ("- [ ]", ListMark::Todo),
+        ("* [ ]", ListMark::Todo),
+        ("- [x]", ListMark::Done),
+        ("- [X]", ListMark::Done),
+        ("* [x]", ListMark::Done),
+        ("* [X]", ListMark::Done),
+    ] {
+        if let Some(rest) = l.strip_prefix(marker)
+            && (rest.is_empty() || rest.starts_with(' '))
+        {
+            return Some((mark, pad + marker.len() + usize::from(rest.starts_with(' '))));
+        }
+    }
+    for marker in ["- ", "* ", "\u{2022} "] {
+        if l.starts_with(marker) && l.len() > marker.len() {
+            return Some((ListMark::Bullet, pad + marker.chars().count()));
+        }
+    }
+    None
+}
+
+/// The text with the check box on line `line` (counted in the text as written;
+/// markup adds no lines) ticked or cleared.
+pub fn toggle_check(text: &str, line: usize) -> String {
+    text.split_inclusive('\n')
+        .enumerate()
+        .map(|(i, l)| {
+            if i != line {
+                return l.to_owned();
+            }
+            if let Some(at) = l.find("[ ]") {
+                format!("{}[x]{}", &l[..at], &l[at + 3..])
+            } else if let Some(at) = l.find("[x]").or_else(|| l.find("[X]")) {
+                format!("{}[ ]{}", &l[..at], &l[at + 3..])
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect()
 }
 
 /// What a hidden Private card may show: its title, or else the first line when
@@ -746,7 +1115,7 @@ pub fn free_slot_for(cards: &[Card], size: Vec2, area: Vec2) -> Pos2 {
             if !cards
                 .iter()
                 .filter(|c| !c.archived)
-                .any(|c| egui::Rect::from_min_size(c.pos, c.size).intersects(slot))
+                .any(|c| egui::Rect::from_min_size(c.pos, c.shown_size()).intersects(slot))
             {
                 return p;
             }
@@ -775,7 +1144,7 @@ pub fn beside(cards: &[Card], of: &Card, area: Vec2) -> Pos2 {
                 && !cards
                     .iter()
                     .filter(|c| !c.archived)
-                    .any(|c| egui::Rect::from_min_size(c.pos, c.size).intersects(slot))
+                    .any(|c| egui::Rect::from_min_size(c.pos, c.shown_size()).intersects(slot))
         })
         .unwrap_or_else(|| free_slot_for(cards, of.size, area))
 }
@@ -1008,7 +1377,25 @@ mod tests {
             review_at: None,
             placement: Placement::Manual,
             tint: None,
+            collapsed: false,
+            idea_status: None,
         }
+    }
+
+    #[test]
+    fn collapsed_card_shows_its_first_line_and_takes_one_row() {
+        let mut card = card_at(1, 0.0, 0.0);
+        card.body = "\n  **Купить** молоко  \nи хлеб".to_owned();
+        card.collapsed = true;
+        assert_eq!(card.collapsed_line(), "Купить молоко");
+        assert_eq!(card.shown_size(), vec2(DEFAULT_SIZE.x, COLLAPSED_H));
+        // The slot under a collapsed card is free past its one row.
+        let below = free_slot_for(std::slice::from_ref(&card), vec2(DEFAULT_SIZE.x, 40.0), vec2(DEFAULT_SIZE.x + 64.0, 400.0));
+        assert!(below.y < DEFAULT_SIZE.y, "{below:?}");
+        card.kind = Kind::Private;
+        card.title = "Wi-Fi офис".to_owned();
+        card.body.clear();
+        assert_eq!(card.collapsed_line(), "Wi-Fi офис");
     }
 
     #[test]
@@ -1032,15 +1419,92 @@ mod tests {
 
     #[test]
     fn link_domains() {
+        assert_eq!(first_url("см. (https://egui.rs/x). и всё"), Some("https://egui.rs/x"));
+        assert_eq!(first_url("без ссылки"), None);
         assert_eq!(link_domain("демо https://www.egui.rs/#demo"), Some("egui.rs"));
         assert_eq!(link_domain("(http://user@host.dev:8080/x)"), Some("host.dev:8080"));
         assert_eq!(link_domain("без ссылки"), None);
     }
 
     #[test]
+    fn tags_come_from_the_text_once_each() {
+        assert_eq!(tags_of("#Идея про #pricing, и снова #идея. # и #"), ["идея", "pricing"]);
+        assert_eq!(normalize_tag("  #Новый Тег, "), Some("новый-тег".to_owned()));
+        assert_eq!(normalize_tag(" # "), None);
+    }
+
+    #[test]
+    fn adding_a_tag_writes_it_into_the_text() {
+        assert_eq!(with_tag("", "дом"), "#дом");
+        assert_eq!(with_tag("Купить молоко\n", "дом"), "Купить молоко\n#дом");
+        assert_eq!(with_tag("Купить молоко\n#еда", "дом"), "Купить молоко\n#еда #дом");
+        assert_eq!(with_tag("Купить #Дом молоко", "дом"), "Купить #Дом молоко");
+        // After a styled end the tag is plain text.
+        assert_eq!(crate::rich_text::strip_markup(&with_tag("**важно**", "дом")), "важно\n#дом");
+    }
+
+    #[test]
+    fn removing_a_tag_takes_its_words_out_and_keeps_styles() {
+        assert_eq!(without_tag("Купить #дом молоко #Дом,", "дом"), "Купить молоко");
+        assert_eq!(without_tag("Купить молоко\n#дом\nпотом", "дом"), "Купить молоко\nпотом");
+        assert_eq!(without_tag("Купить молоко\n#еда #дом", "дом"), "Купить молоко\n#еда");
+        assert_eq!(without_tag("#дом", "дом"), "");
+        let styled = crate::rich_text::serialize("жирный #дом текст", &[crate::rich_text::Style { bold: true, ..Default::default() }; 17]);
+        let out = without_tag(&styled, "дом");
+        let (plain, styles) = crate::rich_text::parse(&out);
+        assert_eq!(plain, "жирный текст");
+        assert!(styles.iter().all(|s| s.bold));
+        // Words that only look alike stay.
+        assert_eq!(without_tag("#домик и #дом2", "дом"), "#домик и #дом2");
+    }
+
+    #[test]
+    fn suggestions_follow_what_is_typed_by_use() {
+        let counts = [("работа".to_owned(), 9), ("рецепт".to_owned(), 4), ("дом".to_owned(), 7)];
+        assert_eq!(suggest_tags(&counts, "", &[], 5), ["работа", "рецепт", "дом"]);
+        assert_eq!(suggest_tags(&counts, "#Ре", &[], 5), ["рецепт"]);
+        assert_eq!(suggest_tags(&counts, "р", &["работа".to_owned()], 5), ["рецепт"]);
+    }
+
+    #[test]
     fn prompt_names() {
         assert_eq!(prompt_name("Ревью кода\nПосмотри на {{diff}}"), Some(("Ревью кода", "Посмотри на {{diff}}")));
         assert_eq!(prompt_name("одна строка"), None);
+    }
+
+    #[test]
+    fn prompt_variables_are_found_once_and_filled() {
+        let text = "Напиши о {{topic}} в тоне {{ tone }}. Ещё раз: {{topic}}. {{}} и {{\nнет}} — не переменные.";
+        assert_eq!(prompt_variables(text), ["topic", "tone"]);
+        let values = [("topic".to_owned(), "SQLite".to_owned()), ("tone".to_owned(), "сухом".to_owned())];
+        assert_eq!(fill_prompt(text, &values), "Напиши о SQLite в тоне сухом. Ещё раз: SQLite. {{}} и {{\nнет}} — не переменные.");
+        // A variable without a value stays as written; extra braces around one are kept.
+        assert_eq!(fill_prompt("{{a}} {{b}}", &values[..0]), "{{a}} {{b}}");
+        assert_eq!(prompt_variables("{{{x}}}"), ["x"]);
+        assert_eq!(fill_prompt("{{{x}}}", &[("x".to_owned(), "1".to_owned())]), "{1}");
+        assert!(prompt_variables("{{ не закрыта").is_empty());
+    }
+
+    #[test]
+    fn list_markers_are_found_and_check_boxes_toggle() {
+        assert_eq!(list_mark("- [ ] купить молоко"), Some((ListMark::Todo, 6)));
+        assert_eq!(list_mark("  * [X] сделано"), Some((ListMark::Done, 8)));
+        assert_eq!(list_mark("- [ ]"), Some((ListMark::Todo, 5)));
+        assert_eq!(list_mark("- пункт"), Some((ListMark::Bullet, 2)));
+        assert_eq!(list_mark("\u{2022} пункт"), Some((ListMark::Bullet, 2)));
+        assert_eq!(list_mark("-"), None);
+        assert_eq!(list_mark("- [y] нет"), Some((ListMark::Bullet, 2)));
+        assert_eq!(list_mark("просто текст"), None);
+        let text = "план\n- [ ] **молоко**\n- [x] хлеб";
+        assert_eq!(toggle_check(text, 1), "план\n- [x] **молоко**\n- [x] хлеб");
+        assert_eq!(toggle_check(text, 2), "план\n- [ ] **молоко**\n- [ ] хлеб");
+        assert_eq!(toggle_check(text, 0), text);
+    }
+
+    #[test]
+    fn copying_a_prompt_leaves_out_its_name() {
+        assert_eq!(prompt_text("", "Ревью кода\nПосмотри на **{{diff}}**"), "Посмотри на {{diff}}");
+        assert_eq!(prompt_text("", "Переведи {{text}}"), "Переведи {{text}}");
     }
 
     #[test]
@@ -1058,6 +1522,14 @@ mod tests {
         for t in Tint::ALL {
             assert_eq!(Tint::parse(t.as_str()), Some(t));
         }
+        // Every kind has a tint of its own, so its color and a picked one are painted alike.
+        let mut tints: Vec<Tint> = Kind::ALL.iter().map(|k| k.tint()).collect();
+        tints.dedup();
+        assert_eq!(tints.len(), Kind::ALL.len());
+        // The paper is Sticky Notes' yellow, the night shade is dark.
+        assert_eq!(Tint::Yellow.surface(true), Color32::from_rgb(255, 242, 171));
+        assert!(Tint::Yellow.surface(false).r() < 100);
+        assert_eq!(Marker::ALL.iter().filter(|m| m.key() == "paper").count(), 1);
     }
 
     #[test]
