@@ -24,7 +24,7 @@ use crate::win;
 pub const CAPTURE_SIZE: Vec2 = vec2(640.0, 132.0);
 pub const SEARCH_SIZE: Vec2 = vec2(680.0, 476.0);
 const ROW_H: f32 = 54.0;
-/// Appear animation: window fade (see app.rs) and content rise.
+/// Appear animation: window fade (see app/mod.rs) and content rise.
 pub const APPEAR_SECS: f32 = 0.16;
 pub const DISAPPEAR_SECS: f32 = 0.11;
 const RESULTS: usize = 40;

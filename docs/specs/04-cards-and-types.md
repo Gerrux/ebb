@@ -73,8 +73,8 @@ CREATE TABLE tags(name TEXT PRIMARY KEY, uses INTEGER NOT NULL);  -- не пон
 ## Реализация
 
 - `card.rs`: `Kind::Secure`, парсер переменных `{{…}}`, распознавание Reference-строк.
-- `app.rs` сейчас ~1150 строк: вынести карточку в `card_ui.rs` (рендер, действия, редактор тегов,
-  меню «⋯») до начала работы.
+- Карточка: `app/card_ui.rs` (панель, меню, подвал), `app/card_text.rs` (текст и редактор),
+  действия — `app/cards.rs`.
 - Меню «⋯»: egui `Popup` внутри слоя (не Win32-меню).
 - Link fetch: `std::net` + `rustls`? — новая зависимость ради одной кнопки избыточна; использовать
   WinHTTP (`WinHttpOpen`/`WinHttpSendRequest`) в фоновом потоке, таймаут 5 с, только HTTPS.

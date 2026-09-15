@@ -110,6 +110,7 @@ settings(key, value)          -- layer.monitor, layer.backdrop, layer.tint, laye
 imported(source_id, card_id, batch)
 ```
 
-Модули: `app` (слой), `bar` (захват/поиск), `library` (архив/корзина/настройки), `shell` (трей,
+Модули: `app` (слой: `mod` — события, `layer` — окно и шторка, `cards` — действия карточек,
+`card_ui`/`card_text` — отрисовка карточки, `toast`, `paint`), `bar` (захват/поиск), `library` (архив/корзина/настройки), `shell` (трей,
 хоткеи, единственный экземпляр), `store` (SQLite), `search` (разбор запроса), `sticky` (импорт),
 `import_ui`, `autostart`, `win` (Win32), `card`, `theme`, `bench`, `renderer`.

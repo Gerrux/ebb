@@ -92,7 +92,7 @@ score = w_forgot * forgotten(days_since_viewed)      // растёт до ~60 д
 менял набор.
 
 Реализация: модуль `resurface.rs` — чистые функции `candidates(now, cards) -> Vec<Pick>` с
-тестами на фиксированном времени; планировщик в `app.rs` пересчитывает при запуске (в фоне,
+тестами на фиксированном времени; планировщик в `app/mod.rs` пересчитывает при запуске (в фоне,
 через 3 с), на рассвете (`request_repaint_after` до ближайшей границы) и при выходе из сна
 (`WM_POWERBROADCAST` / `PBT_APMRESUMEAUTOMATIC` в окне shell).
 
