@@ -26,6 +26,8 @@ pub struct Candidate {
     pub pinned: bool,
     pub archived: bool,
     pub deleted: bool,
+    /// The import batch the note came in with, if imported.
+    pub batch: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -66,19 +68,40 @@ fn eligible(now: i64, c: &Candidate) -> bool {
 }
 
 pub fn candidates(now: i64, input: &[Candidate], limit: usize) -> Vec<Pick> {
-    let mut ranked: Vec<Pick> = input
+    let mut ranked: Vec<(Pick, &Candidate)> = input
         .iter()
         .filter(|c| eligible(now, c))
         .map(|c| {
             let forgotten = ((now - c.last_viewed_at).max(0) / DAY).min(60);
             let reminder = i64::from(due(now, c.review_at));
             let score = forgotten * 10 + type_weight(c.kind) + c.priority * 30 + reminder * 500 - c.ignored_count * 20;
-            Pick { id: c.id, reason: reason(now, c.created_at, c.review_at), score }
+            (Pick { id: c.id, reason: reason(now, c.created_at, c.review_at), score }, c)
         })
         .collect();
-    ranked.sort_by_key(|p| (-p.score, p.id));
-    ranked.truncate(limit);
-    ranked
+    ranked.sort_by_key(|(p, _)| (-p.score, p.id));
+
+    // Variety, best score first: the day's few cards are seen side by side, so
+    // no kind twice and one note per import batch. Due reminders always go in;
+    // when variety runs out, the rules give way one at a time (kind first)
+    // rather than leave a slot empty.
+    let mut chosen: Vec<usize> = Vec::new();
+    for pass in 0..3 {
+        for (i, (_, c)) in ranked.iter().enumerate() {
+            if chosen.len() == limit {
+                break;
+            }
+            if chosen.contains(&i) {
+                continue;
+            }
+            let kind_ok = pass >= 1 || !chosen.iter().any(|&j| ranked[j].1.kind == c.kind);
+            let batch_ok = pass >= 2 || c.batch.is_none_or(|b| !chosen.iter().any(|&j| ranked[j].1.batch == Some(b)));
+            if due(now, c.review_at) || (kind_ok && batch_ok) {
+                chosen.push(i);
+            }
+        }
+    }
+    chosen.sort_unstable();
+    chosen.into_iter().map(|i| ranked[i].0.clone()).collect()
 }
 
 /// Why a note is back: "Напоминание на сегодня", "Напоминание: прошло 2 дня",
@@ -200,7 +223,26 @@ mod tests {
             pinned: false,
             archived: true,
             deleted: false,
+            batch: None,
         }
+    }
+
+    #[test]
+    fn picks_vary_kinds_and_import_batches_but_fill_the_day() {
+        let now = 100 * DAY;
+        let old = |id, kind, days, batch| Candidate { last_viewed_at: now - days * DAY, batch, ..candidate(id, kind) };
+        // By score alone: ideas 1 and 2, then the imported notes 3 and 4.
+        let input = [
+            old(1, Kind::Idea, 60, None),
+            old(2, Kind::Idea, 59, None),
+            old(3, Kind::Note, 58, Some(7)),
+            old(4, Kind::Note, 57, Some(7)),
+            old(5, Kind::Link, 20, None),
+        ];
+        let ids = |picks: Vec<Pick>| picks.into_iter().map(|p| p.id).collect::<Vec<_>>();
+        assert_eq!(ids(candidates(now, &input, 3)), vec![1, 3, 5], "one idea, one of batch 7, then a link");
+        // Only one batch left to pick from: the rules give way instead of an empty slot.
+        assert_eq!(ids(candidates(now, &input[2..4], 3)), vec![3, 4]);
     }
 
     #[test]

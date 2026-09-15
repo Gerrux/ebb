@@ -413,7 +413,8 @@ impl Store {
              CREATE INDEX IF NOT EXISTS cards_updated ON cards(updated_at);
              CREATE INDEX IF NOT EXISTS cards_deleted ON cards(deleted_at) WHERE deleted_at IS NOT NULL;
              CREATE INDEX IF NOT EXISTS cards_review ON cards(review_at) WHERE review_at IS NOT NULL;
-             CREATE INDEX IF NOT EXISTS review_items_card ON review_items(card_id, at);",
+             CREATE INDEX IF NOT EXISTS review_items_card ON review_items(card_id, at);
+             CREATE INDEX IF NOT EXISTS imported_card ON imported(card_id);",
         )?;
         // Import review (spec 08): done with in the review, or not yet.
         let has_reviewed: bool =
@@ -601,8 +602,9 @@ impl Store {
                     ignored_count,
                     -- An idea marked important counts as high priority.
                     priority + coalesce(kind = 'idea' AND json_extract(meta, '$.idea_status') = 'important', 0),
-                    pinned, archived, deleted_at
-             FROM cards WHERE archived=1 AND deleted_at IS NULL",
+                    pinned, archived, deleted_at, i.batch
+             FROM cards LEFT JOIN imported i ON i.card_id = cards.id
+             WHERE archived=1 AND deleted_at IS NULL",
         )?;
         let candidates = stmt
             .query_map([], |r| {
@@ -618,6 +620,7 @@ impl Store {
                     pinned: r.get(8)?,
                     archived: r.get(9)?,
                     deleted: r.get::<_, Option<i64>>(10)?.is_some(),
+                    batch: r.get(11)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1425,6 +1428,56 @@ secret");
         let picks = store.refresh_resurfacing(third, 0, 3).unwrap();
         assert_eq!(picks.iter().map(|p| p.id).collect::<Vec<_>>(), vec![card.id]);
         assert!(store.resurfaced_today(third + 3_600, 0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Spec 01 acceptance: a month of mornings, someone who opens a card now and then.
+    #[test]
+    fn thirty_days_of_resurfacing_keep_the_layer_calm() {
+        let (mut store, dir) = temp_store("thirty-days");
+        let start = 400 * DAY;
+        let kinds = ["идея: ", "", "prompt: ", "https://example.com/", "цель: "];
+        let mut archived = Vec::new();
+        for i in 0..40 {
+            let card = add(&store, &format!("{}archived note {i}", kinds[i % kinds.len()]));
+            store.set_archived(card.id, true).unwrap();
+            archived.push(card.id);
+        }
+        let sources: Vec<String> = (0..10).map(|i| format!("s{i}")).collect();
+        import_notes(&mut store, &sources.iter().map(|s| (s.as_str(), "imported sticky", false)).collect::<Vec<_>>());
+        let pinned = add(&store, "идея: pinned forever");
+        store.conn.execute("UPDATE cards SET pinned=1, placement='pinned' WHERE id=?1", [pinned.id]).unwrap();
+        for i in 0..3 {
+            add(&store, &format!("on the layer {i}"));
+        }
+        store.conn.execute("UPDATE cards SET created_at=?1, last_viewed_at=?1", [start - 90 * DAY]).unwrap();
+
+        let mut last_shown: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+        for day in 0..30 {
+            let morning = start + day * DAY;
+            let picks = store.refresh_resurfacing(morning, 0, crate::resurface::REDISCOVER_LIMIT).unwrap();
+            assert!(picks.len() <= crate::resurface::REDISCOVER_LIMIT);
+            for pick in &picks {
+                if let Some(prev) = last_shown.insert(pick.id, day) {
+                    assert!(day - prev >= crate::resurface::COOLDOWN_DAYS, "card {} back after {} days", pick.id, day - prev);
+                }
+            }
+            let imported_today = picks
+                .iter()
+                .filter(|p| store.conn.query_row("SELECT count(*) FROM imported WHERE card_id=?1", [p.id], |r| r.get::<_, i64>(0)).unwrap() > 0)
+                .count();
+            assert!(imported_today <= 1, "day {day}: {imported_today} notes from one import batch");
+            // Every fifth day the first card that came back gets opened: it stays.
+            if day % 5 == 0
+                && let Some(pick) = picks.first()
+            {
+                store.conn.execute("UPDATE cards SET last_viewed_at=?2 WHERE id=?1", params![pick.id, morning + 600]).unwrap();
+            }
+            let layer = store.load().unwrap();
+            assert!(layer.len() <= 15, "day {day}: {} cards on the layer", layer.len());
+            assert!(layer.iter().any(|c| c.id == pinned.id), "the pinned card never leaves");
+        }
+        assert!(last_shown.len() >= 20, "a month brings back a good part of the archive, got {}", last_shown.len());
         let _ = std::fs::remove_dir_all(dir);
     }
 
