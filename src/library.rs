@@ -68,6 +68,8 @@ pub struct LayerSettings {
     pub settings_on_launch: bool,
     /// Cards stick to each other's edges while dragged.
     pub snap: bool,
+    /// A shown Private value keeps the layer out of screenshots and recordings.
+    pub hide_from_capture: bool,
     /// How cards show their kind on the layer.
     pub card_style: crate::card::CardStyle,
     pub theme_mode: theme::ThemeMode,
@@ -86,6 +88,7 @@ impl Default for LayerSettings {
             curtain_top: true,
             settings_on_launch: true,
             snap: true,
+            hide_from_capture: true,
             card_style: crate::card::CardStyle::default(),
             theme_mode: theme::ThemeMode::System,
         }
@@ -106,6 +109,7 @@ pub enum Request {
     SetCurtainTop(bool),
     SetSettingsOnLaunch(bool),
     SetSnap(bool),
+    SetHideFromCapture(bool),
     SetCardStyle(crate::card::CardStyle),
     SetTheme(theme::ThemeMode),
     ImportSticky,
@@ -1098,6 +1102,14 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
             st.outbox.push(Request::SetSnap(snap));
         }
         note(ui, "Удерживайте Alt при перетаскивании, чтобы поставить карточку свободно.");
+
+        section(ui, "Private");
+        let mut hide = st.settings.hide_from_capture;
+        if ui.checkbox(&mut hide, "Скрывать от записи экрана").changed() {
+            st.settings.hide_from_capture = hide;
+            st.outbox.push(Request::SetHideFromCapture(hide));
+        }
+        note(ui, "Пока секрет показан, слой не попадает в скриншоты, запись и демонстрацию экрана.");
 
         section(ui, "Запуск");
         let mut on_launch = st.settings.settings_on_launch;

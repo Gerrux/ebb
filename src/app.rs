@@ -66,6 +66,7 @@ const SET_CURTAIN: &str = "layer.curtain";
 const SET_SETTINGS_ON_LAUNCH: &str = "app.settings_on_launch";
 const SET_ONBOARDED: &str = "app.onboarded";
 const SET_SNAP: &str = "cards.snap";
+const SET_HIDE_FROM_CAPTURE: &str = "private.hide_from_capture";
 const SET_CARD_STYLE: &str = "cards.style";
 const SET_THEME: &str = "app.theme";
 /// A tray click this soon after another app took the focus from a summoned layer
@@ -149,6 +150,8 @@ pub struct EbbApp {
     full_area: Vec2,
     settings_on_launch: bool,
     snap: bool,
+    /// A shown Private value keeps the layer out of screenshots and recordings.
+    hide_from_capture: bool,
     card_style: card::CardStyle,
     theme_mode: theme::ThemeMode,
     /// Started by the user (not at logon): bring the layer up, maybe open settings.
@@ -207,6 +210,7 @@ impl EbbApp {
         let dismiss_hides = store.setting(SET_DISMISS).is_some_and(|v| v == "hide");
         let settings_on_launch = store.setting(SET_SETTINGS_ON_LAUNCH).is_none_or(|v| v != "0");
         let snap = store.setting(SET_SNAP).is_none_or(|v| v != "0");
+        let hide_from_capture = store.setting(SET_HIDE_FROM_CAPTURE).is_none_or(|v| v != "0");
         let manual_start = !autostarted && crate::bench::path().is_none();
         // Launched from a shortcut: shown over the windows, not under them.
         win::RAISED.store(manual_start, Ordering::Relaxed);
@@ -280,6 +284,7 @@ impl EbbApp {
             full_area,
             settings_on_launch,
             snap,
+            hide_from_capture,
             card_style,
             theme_mode,
             manual_start,
@@ -876,11 +881,12 @@ impl EbbApp {
                 }
             }
         }
-        // While a value is shown, screenshots and recordings get no layer at all.
-        if self.revealed.is_some() != self.capture_excluded
+        // While a value is shown, screenshots and recordings get no layer at all
+        // (unless turned off in settings, e.g. to show a value in a screen share).
+        let wanted = self.revealed.is_some() && self.hide_from_capture;
+        if wanted != self.capture_excluded
             && let Some(h) = self.hwnd
         {
-            let wanted = self.revealed.is_some();
             if win::exclude_from_capture(h, wanted) {
                 self.capture_excluded = wanted;
             } else {
@@ -1010,6 +1016,7 @@ impl EbbApp {
             curtain_top: self.curtain_top,
             settings_on_launch: self.settings_on_launch,
             snap: self.snap,
+            hide_from_capture: self.hide_from_capture,
             card_style: self.card_style,
             theme_mode: self.theme_mode,
         }
@@ -1168,6 +1175,11 @@ impl EbbApp {
             Request::SetSnap(on) => {
                 self.snap = on;
                 self.set_flag(SET_SNAP, on);
+            }
+            Request::SetHideFromCapture(on) => {
+                self.hide_from_capture = on;
+                self.set_flag(SET_HIDE_FROM_CAPTURE, on);
+                ctx.request_repaint();
             }
             Request::SetCardStyle(style) => self.set_card_style(ctx, style),
             Request::SetTheme(mode) => {
