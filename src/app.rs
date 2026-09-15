@@ -23,7 +23,9 @@ use crate::theme;
 use crate::win::{self, Backdrop};
 
 const HEADER_H: f32 = 30.0;
-const FOOTER_H: f32 = 22.0;
+const FOOTER_H: f32 = 20.0;
+/// The line above the text: the kind's mark, and the actions while hovered.
+const META_H: f32 = 20.0;
 const REVEAL_FOR: Duration = Duration::from_secs(5);
 const HIGHLIGHT_FOR: Duration = Duration::from_millis(2500);
 const TOAST_FOR: Duration = Duration::from_secs(6);
@@ -125,6 +127,12 @@ enum Action {
     SetTint(Option<card::Tint>),
     /// Off the layer for this many days.
     Snooze(i64),
+    /// The first address in a Link card, in the browser.
+    OpenLink,
+    /// A Goal or Reminder is done: to the archive.
+    Done,
+    /// A resurfaced card stays: it's the user's again.
+    Keep,
 }
 
 pub struct EbbApp {
@@ -825,6 +833,7 @@ impl EbbApp {
         let mut to_front = None;
         let mut remove = None;
         for (idx, action) in actions {
+            let done = matches!(action, Action::Done);
             match action {
                 Action::Front => {
                     to_front = Some(idx);
@@ -879,7 +888,7 @@ impl EbbApp {
                         self.bar.lock().unwrap().invalidate();
                     }
                 }
-                Action::Archive => {
+                Action::Archive | Action::Done => {
                     let placement = self.cards[idx].placement;
                     self.cards[idx].archived = true;
                     self.cards[idx].placement = Placement::Archive;
@@ -888,7 +897,8 @@ impl EbbApp {
                         (self.cards[idx].archived, self.cards[idx].placement) = (false, placement);
                         continue;
                     }
-                    self.toast = Some(Toast::new("Карточка в архиве", Some(Undo::Unarchive(self.cards[idx].id))));
+                    let text = if done { "Сделано, карточка в архиве" } else { "Карточка в архиве" };
+                    self.toast = Some(Toast::new(text, Some(Undo::Unarchive(self.cards[idx].id))));
                     remove = Some(idx);
                 }
                 Action::Delete => {
@@ -925,6 +935,19 @@ impl EbbApp {
                         self.revealed = Some((id, Instant::now()));
                         self.revealed_text = Some((id, secret));
                     }
+                }
+                Action::OpenLink => {
+                    let c = &self.cards[idx];
+                    let _ = self.store.touch(c.id);
+                    if let Some(url) = card::first_url(&c.body) {
+                        win::open_url(url);
+                    }
+                }
+                Action::Keep => {
+                    self.cards[idx].placement = Placement::Manual;
+                    let _ = self.store.touch(self.cards[idx].id);
+                    self.save(idx);
+                    self.toast = Some(Toast::new("Останется на слое", None));
                 }
                 Action::SetKind(kind) => self.set_kind(idx, kind),
                 Action::SetTint(tint) => {
@@ -2425,6 +2448,46 @@ fn place_resurfaced(store: &Store, cards: &mut [Card], fresh: &[i64], area: Vec2
 }
 
 /// "Позже": which morning the card comes back on.
+/// The action a kind is for: first in the hover pill, in the kind's color.
+fn primary_action(card: &Card) -> Option<(&'static str, &'static str, Action)> {
+    if card.placement == Placement::Rediscover {
+        return Some(("\u{E8FB}", "Оставить на слое", Action::Keep));
+    }
+    match card.kind {
+        Kind::Prompt | Kind::Reference => Some(("\u{E77F}", "Копировать текст", Action::Copy)),
+        Kind::Private => Some(("\u{E77F}", "Скопировать, не показывая", Action::Copy)),
+        Kind::Link if card::first_url(&card.body).is_some() => Some(("\u{E8A7}", "Открыть ссылку", Action::OpenLink)),
+        Kind::Goal | Kind::Reminder if !card.pinned => Some(("\u{E930}", "Сделано: в архив", Action::Done)),
+        _ => None,
+    }
+}
+
+/// The rest of the actions: a copy of the card, and what takes it off the layer.
+fn more_menu(anchor: &egui::Response, popup: Id, locked: bool, out: &mut Vec<Action>) {
+    egui::Popup::menu(anchor).id(popup).align(egui::RectAlign::BOTTOM_END).gap(4.0).width(190.0).show(|ui| {
+        ui.spacing_mut().button_padding = vec2(8.0, 5.0);
+        let item = |ui: &mut Ui, glyph: &str, label: &str, color: Color32| -> bool {
+            let mut job = egui::text::LayoutJob::default();
+            let format = |font: FontId, color: Color32| egui::TextFormat { font_id: font, color, valign: Align::Center, ..Default::default() };
+            job.append(glyph, 0.0, format(theme::icons(13.0), color));
+            job.append(label, 10.0, format(FontId::proportional(14.0), theme::text()));
+            ui.add(egui::Button::new(job).min_size(vec2(ui.available_width(), 0.0))).clicked()
+        };
+        if item(ui, "\u{E8C8}", "Дублировать", theme::dim()) {
+            out.push(Action::Duplicate);
+        }
+        if locked {
+            return;
+        }
+        if item(ui, "\u{E7B8}", "В архив", theme::dim()) {
+            out.push(Action::Archive);
+        }
+        if item(ui, "\u{E74D}", "Удалить", theme::muted()) {
+            out.push(Action::Delete);
+        }
+    });
+}
+
 fn snooze_menu(anchor: &egui::Response, popup: Id, out: &mut Vec<Action>) {
     egui::Popup::menu(anchor).id(popup).align(egui::RectAlign::BOTTOM_END).gap(4.0).width(170.0).show(|ui| {
         ui.spacing_mut().button_padding = vec2(8.0, 5.0);
@@ -2645,78 +2708,141 @@ fn card_ui(
         }
     }
 
-    let inner = rect.shrink2(vec2(14.0, 8.0));
-    let header = Rect::from_min_size(inner.min, vec2(inner.width(), HEADER_H - 4.0));
+    let inner = rect.shrink2(vec2(14.0, 10.0));
+    let meta = Rect::from_min_size(inner.min, vec2(inner.width(), META_H));
     let footer = Rect::from_min_max(pos2(inner.left(), inner.bottom() - FOOTER_H), inner.max);
-    let body = Rect::from_min_max(pos2(inner.left(), header.bottom() + 2.0), pos2(inner.right(), footer.top() - 2.0));
+    let body = Rect::from_min_max(pos2(inner.left(), meta.bottom() + 4.0), pos2(inner.right(), footer.top() - 2.0));
     let accent = theme::on_card(card.accent());
 
     paint_marker(ui, rect, accent, style, hovered);
 
     // Tags and age only while the card is hovered, edited or selected; at rest a
-    // card is its text, its color marker (a setting) and the kind's icon.
+    // card is its text, its color marker (a setting) and the kind's mark.
     let details = ui.ctx().animate_bool_with_time(id.with("details"), hovered || active || editing.is_some(), 0.15);
 
-    // Header: hover actions. They stay while the "Позже" menu is open, or the
-    // menu would lose the button it hangs from as the pointer moves onto it.
+    // The hover actions stay while one of their menus is open, or the menu would
+    // lose the button it hangs from as the pointer moves onto it.
     let snooze_popup = id.with("snooze");
-    let hovered = hovered || egui::Popup::is_id_open(ui.ctx(), snooze_popup);
-    ui.scope_builder(
-        UiBuilder::new().max_rect(header).layout(Layout::left_to_right(Align::Center)),
-        |ui| {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                if hovered {
-                    // Pinned: nothing that takes the card off the layer by accident.
-                    if !locked && icon_button(ui, "\u{E74D}", "Удалить", theme::card_muted()).clicked() {
-                        out.push(Action::Delete);
-                    }
-                    if !locked && icon_button(ui, "\u{E7B8}", "В архив", theme::card_dim()).clicked() {
-                        out.push(Action::Archive);
-                    }
-                    if !locked {
-                        let later = icon_button(ui, "\u{E708}", "Позже", theme::card_dim());
-                        snooze_menu(&later, snooze_popup, &mut out);
-                    }
-                    if icon_button(ui, "\u{E8C8}", "Дублировать", theme::card_dim()).clicked() {
-                        out.push(Action::Duplicate);
-                    }
-                    // The check mark says the text is on the clipboard.
-                    let copied_id = id.with("copied");
-                    let copied = ui.data(|d| d.get_temp::<Instant>(copied_id)).filter(|t| t.elapsed() < COPIED_FOR);
-                    if let Some(t) = copied {
-                        ui.ctx().request_repaint_after(COPIED_FOR.saturating_sub(t.elapsed()));
-                    }
-                    let (glyph, tip, color) = match copied {
-                        Some(_) => ("\u{E73E}", "Текст скопирован", theme::SUCCESS),
-                        None => ("\u{E77F}", "Копировать текст", theme::card_dim()),
-                    };
-                    if icon_button(ui, glyph, tip, color).clicked() {
+    let more_popup = id.with("more");
+    let hovered = hovered
+        || egui::Popup::is_id_open(ui.ctx(), snooze_popup)
+        || egui::Popup::is_id_open(ui.ctx(), more_popup);
+
+    // Meta line, right: while hovered, a pill of actions, the kind's own first and
+    // in its color; what takes the card off the layer sits under "Ещё". At rest,
+    // the pin of a pinned card.
+    let mut pill_left = meta.right();
+    if hovered {
+        let primary = primary_action(card);
+        let primary_is_copy = matches!(primary, Some((_, _, Action::Copy)));
+        let n = 2 // pin, more
+            + usize::from(primary.is_some())
+            + usize::from(!primary_is_copy)
+            + usize::from(card.kind == Kind::Private)
+            + usize::from(!locked);
+        let width = n as f32 * 24.0 + (n as f32 - 1.0) * 2.0 + 8.0;
+        let pill = Rect::from_min_max(pos2(meta.right() + 4.0 - width, meta.center().y - 13.0), pos2(meta.right() + 4.0, meta.center().y + 13.0));
+        pill_left = pill.left();
+        let p = ui.painter();
+        let shadow = Color32::from_black_alpha(if theme::is_light() { 24 } else { 70 });
+        p.add(egui::epaint::Shadow { offset: [0, 2], blur: 10, spread: 0, color: shadow }.as_shape(pill, CornerRadius::same(7)));
+        p.rect(pill, CornerRadius::same(7), theme::glass_fill_hover(), Stroke::new(1.0, theme::glass_stroke()), StrokeKind::Inside);
+        // The pill is the theme's glass whatever the card's background is painted
+        // with, so its icons take the theme's colors, not the card's.
+        let pill_accent = card.accent();
+        ui.scope_builder(UiBuilder::new().max_rect(pill.shrink2(vec2(4.0, 2.0))).layout(Layout::right_to_left(Align::Center)), |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let more = icon_button(ui, "\u{E712}", "Ещё", theme::dim());
+            more_menu(&more, more_popup, locked, &mut out);
+            if !locked {
+                let later = icon_button(ui, "\u{E708}", "Позже", theme::dim());
+                snooze_menu(&later, snooze_popup, &mut out);
+            }
+            if card.kind == Kind::Private && icon_button(ui, "\u{E890}", "Показать на 5 секунд", theme::dim()).clicked() {
+                out.push(Action::Reveal);
+            }
+            // The check mark says the text is on the clipboard.
+            let copied_id = id.with("copied");
+            let copied = ui.data(|d| d.get_temp::<Instant>(copied_id)).filter(|t| t.elapsed() < COPIED_FOR);
+            if let Some(t) = copied {
+                ui.ctx().request_repaint_after(COPIED_FOR.saturating_sub(t.elapsed()));
+            }
+            let copy_face = |glyph: &'static str, tip: &'static str, color: Color32| match copied {
+                Some(_) => ("\u{E73E}", "Текст скопирован", theme::SUCCESS),
+                None => (glyph, tip, color),
+            };
+            if !primary_is_copy {
+                let (glyph, tip, color) = copy_face("\u{E77F}", "Копировать текст", theme::dim());
+                if icon_button(ui, glyph, tip, color).clicked() {
+                    ui.data_mut(|d| d.insert_temp(copied_id, Instant::now()));
+                    out.push(Action::Copy);
+                }
+            }
+            let (glyph, tip) = if card.pinned { ("\u{E77A}", "Открепить") } else { ("\u{E718}", "Закрепить на месте") };
+            if icon_button(ui, glyph, tip, if card.pinned { pill_accent } else { theme::dim() }).clicked() {
+                out.push(Action::TogglePin);
+            }
+            if let Some((glyph, tip, action)) = primary {
+                let is_copy = matches!(action, Action::Copy);
+                let (glyph, tip, color) = if is_copy { copy_face(glyph, tip, pill_accent) } else { (glyph, tip, pill_accent) };
+                // Its own face: a wash of the kind's color under the glyph.
+                let next = ui.available_rect_before_wrap();
+                let face = Rect::from_min_max(pos2(next.right() - 24.0, next.center().y - 11.0), pos2(next.right(), next.center().y + 11.0));
+                ui.painter().rect_filled(face, CornerRadius::same(6), pill_accent.gamma_multiply(0.16));
+                if icon_button(ui, glyph, tip, color).clicked() {
+                    if is_copy {
                         ui.data_mut(|d| d.insert_temp(copied_id, Instant::now()));
-                        out.push(Action::Copy);
                     }
-                    if card.kind == Kind::Private
-                        && icon_button(ui, "\u{E890}", "Показать на 5 секунд", theme::card_dim()).clicked()
-                    {
-                        out.push(Action::Reveal);
-                    }
+                    out.push(action);
                 }
-                if card.pinned || hovered {
-                    let (glyph, color) = if card.pinned { ("\u{E841}", accent) } else { ("\u{E718}", theme::card_dim()) };
-                    if icon_button(ui, glyph, if card.pinned { "Открепить" } else { "Закрепить на месте" }, color).clicked() {
-                        out.push(Action::TogglePin);
-                    }
-                }
-            });
-        },
-    );
+            }
+        });
+    } else if card.pinned {
+        ui.painter().text(pos2(meta.right(), meta.center().y), Align2::RIGHT_CENTER, "\u{E840}", theme::icons(11.0), accent);
+    }
+
+    // Meta line, left: the kind, a dot and its name (or its glyph, a setting),
+    // which opens the menu to change the kind. A plain note has nothing to say
+    // there and shows it only on hover.
+    let glyph_mode = style.icon == card::IconSpot::BottomRight;
+    let plain_note = card.kind == Kind::Note && card.tint.is_none();
+    let mark_shown = if plain_note || style.icon == card::IconSpot::Hover { details } else { 1.0 };
+    let mark_font = if glyph_mode { theme::icons(if style.bold_icon { 14.0 } else { 12.0 }) } else { theme::semibold(11.5) };
+    let mark_text = if glyph_mode { card.kind.icon() } else { card.kind.label() };
+    let mark_galley = ui.painter().layout_no_wrap(mark_text.to_owned(), mark_font, accent);
+    let dot_w = if glyph_mode { 0.0 } else { 13.0 };
+    let mark_w = (dot_w + mark_galley.size().x + 12.0).min((pill_left - meta.left()).max(20.0));
+    let mark_rect = Rect::from_min_size(pos2(meta.left() - 6.0, meta.center().y - 10.0), vec2(mark_w, 20.0));
+    let sense = if mark_shown > 0.5 { Sense::click() } else { Sense::hover() };
+    let kind = ui.interact(mark_rect, id.with("kind"), sense);
+    kind.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Тип: {}", card.kind.label())));
+    let menu_open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&kind));
+    let mut painter = ui.painter().with_clip_rect(mark_rect.intersect(ui.clip_rect()));
+    painter.multiply_opacity(mark_shown);
+    if kind.hovered() && mark_shown > 0.5 || menu_open {
+        painter.rect_filled(mark_rect, CornerRadius::same(6), theme::wash(22));
+    }
+    let mut x = mark_rect.left() + 6.0;
+    if !glyph_mode {
+        painter.circle_filled(pos2(x + 3.5, mark_rect.center().y), 3.5, accent);
+        x += dot_w;
+    }
+    painter.galley(pos2(x, mark_rect.center().y - mark_galley.size().y / 2.0), mark_galley, accent);
+    if kind.clicked() {
+        out.push(Action::Front);
+    }
+    let kind = if mark_shown > 0.5 {
+        kind.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(format!("{} — сменить тип", card.kind.label()))
+    } else {
+        kind
+    };
+    kind_menu(&kind, card, &mut out, true);
 
     // Footer while editing: the formatting toolbar in place of tags and age. Drawn
     // before the body, so a click applies in the same frame the editor reads it.
     let toolbar_shown = editing.is_some();
     if let Some(buf) = editing.as_deref_mut() {
-        let right = if style.icon == card::IconSpot::TopLeft { footer.right() } else { footer.right() - 30.0 };
-        let bar = Rect::from_min_max(footer.min, pos2(right, footer.bottom()));
+        let bar = footer;
         ui.scope_builder(UiBuilder::new().max_rect(bar).layout(Layout::left_to_right(Align::Center)), |ui| {
             ui.set_clip_rect(bar.intersect(ui.clip_rect()));
             format_toolbar(ui, id.with("editor"), buf);
@@ -2743,47 +2869,12 @@ fn card_ui(
         out.push(Action::StartEdit);
     }
 
-    // Footer: tags + age, and the kind's icon in the corner, which opens the menu
-    // to change the kind.
-    let icon_size = if style.bold_icon { vec2(26.0, 24.0) } else { vec2(22.0, 20.0) };
-    let kind_rect = match style.icon {
-        card::IconSpot::TopLeft => Rect::from_center_size(pos2(header.left() + 8.0, header.center().y), icon_size),
-        _ => Rect::from_center_size(pos2(footer.right() - 8.0, footer.center().y), icon_size),
-    };
-    let icon_shown = if style.icon == card::IconSpot::Hover { details } else { 1.0 };
-    let sense = if icon_shown > 0.5 { Sense::click() } else { Sense::hover() };
-    let kind = ui.interact(kind_rect, id.with("kind"), sense);
-    kind.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Тип: {}", card.kind.label())));
-    let menu_open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&kind));
-    let mut painter = ui.painter().clone();
-    painter.multiply_opacity(icon_shown);
-    if kind.hovered() && icon_shown > 0.5 || menu_open {
-        painter.rect_filled(kind_rect, CornerRadius::same(6), theme::wash(22));
-    }
-    if style.bold_icon {
-        // Segoe Fluent Icons has no bold weight: the glyph drawn a few times, a
-        // fraction of a point apart, thickens its strokes.
-        for d in [vec2(-0.4, 0.0), vec2(0.4, 0.0), vec2(0.0, -0.4), vec2(0.0, 0.4), Vec2::ZERO] {
-            painter.text(kind_rect.center() + d, Align2::CENTER_CENTER, card.kind.icon(), theme::icons(16.0), accent);
-        }
-    } else {
-        painter.text(kind_rect.center(), Align2::CENTER_CENTER, card.kind.icon(), theme::icons(12.5), accent);
-    }
-    if kind.clicked() {
-        out.push(Action::Front);
-    }
-    let kind = if icon_shown > 0.5 {
-        kind.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(format!("{} — сменить тип", card.kind.label()))
-    } else {
-        kind
-    };
-    kind_menu(&kind, card, &mut out, style.icon == card::IconSpot::TopLeft);
-
+    // Footer: tags and age.
     let mut painter = ui.painter().with_clip_rect(footer);
     // While editing, the toolbar has the footer.
     painter.multiply_opacity(if toolbar_shown { 0.0 } else { details });
     let age = painter.text(
-        pos2(if style.icon == card::IconSpot::TopLeft { footer.right() } else { kind_rect.left() - 6.0 }, footer.center().y),
+        pos2(footer.right(), footer.center().y),
         Align2::RIGHT_CENTER,
         age_label(card.created_at),
         FontId::proportional(11.5),

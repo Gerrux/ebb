@@ -939,17 +939,23 @@ fn preset_tile(ui: &mut Ui, preset: &crate::card::Preset, on: bool) -> egui::Res
         let accent = kind.accent();
         crate::app::paint_marker(ui, card, accent, style, false);
         for line in 0..3 {
-            let y = card.top() + 12.0 + line as f32 * 8.0;
+            let y = card.top() + 18.0 + line as f32 * 8.0;
             let w = [30.0, 22.0, 26.0][line];
             ui.painter().rect_filled(Rect::from_min_size(pos2(card.left() + 6.0, y), vec2(w, 3.0)), CornerRadius::same(1), theme::wash(60));
         }
-        let size = if style.bold_icon { 11.0 } else { 9.0 };
-        let at = match style.icon {
-            crate::card::IconSpot::TopLeft => pos2(card.left() + 8.0, card.top() + 4.0),
-            _ => pos2(card.right() - 8.0, card.bottom() - 8.0),
-        };
-        if style.icon != crate::card::IconSpot::Hover {
-            ui.painter().text(at, Align2::CENTER_CENTER, kind.icon(), theme::icons(size), kind.accent());
+        // The kind's mark in the meta line: a dot and a name, or the glyph.
+        let at = pos2(card.left() + 6.0, card.top() + 9.0);
+        match style.icon {
+            crate::card::IconSpot::Hover => {}
+            crate::card::IconSpot::BottomRight => {
+                let size = if style.bold_icon { 10.0 } else { 8.0 };
+                ui.painter().text(at, Align2::LEFT_CENTER, kind.icon(), theme::icons(size), kind.accent());
+            }
+            crate::card::IconSpot::TopLeft => {
+                ui.painter().circle_filled(at + vec2(2.5, 0.0), 2.5, kind.accent());
+                let name = Rect::from_min_size(at + vec2(8.0, -1.5), vec2(14.0, 3.0));
+                ui.painter().rect_filled(name, CornerRadius::same(1), kind.accent().gamma_multiply(0.7));
+            }
         }
     }
     ui.painter().text(pos2(rect.left() + 10.0, rect.bottom() - 34.0), Align2::LEFT_TOP, preset.name, theme::semibold(13.0), theme::text());
@@ -1074,13 +1080,13 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
                     "Размер текста",
                     egui::Slider::new(&mut style.text, 22..=40).custom_formatter(|v, _| format!("{:.1} pt", v / 2.0)),
                 );
-                ui.label(RichText::new("Иконка типа").size(13.0).color(theme::dim()));
+                ui.label(RichText::new("Метка типа").size(13.0).color(theme::dim()));
                 ui.horizontal_wrapped(|ui| {
                     for i in IconSpot::ALL {
                         ui.radio_value(&mut style.icon, i, i.label());
                     }
                 });
-                ui.checkbox(&mut style.bold_icon, "Жирная иконка");
+                ui.checkbox(&mut style.bold_icon, "Крупный значок");
                 ui.label(RichText::new("Фон карточек").size(13.0).color(theme::dim()));
                 background_picker(ui, &mut style.background);
             });
@@ -1093,7 +1099,7 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
             st.settings.theme_mode = mode;
             st.outbox.push(Request::SetTheme(mode));
         }
-        note(ui, "Слой меняется сразу. F4 на слое перебирает варианты цвета. Клик по иконке типа меняет тип и цвет карточки.");
+        note(ui, "Слой меняется сразу. F4 на слое перебирает варианты цвета. Клик по метке типа на карточке меняет тип и цвет.");
 
         section(ui, "Карточки");
         let mut snap = st.settings.snap;

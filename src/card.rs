@@ -208,12 +208,15 @@ pub enum Marker {
     Outline,
 }
 
-/// Where the kind's icon (which opens the kind menu) sits.
+/// How the kind is marked in a card's meta line (the mark opens the kind menu).
+/// The keys keep their old names, from when the mark was an icon in a corner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IconSpot {
+    /// The kind's glyph alone.
     BottomRight,
+    /// A dot in the kind's color and the kind's name.
     TopLeft,
-    /// Bottom right, only while the card is hovered or selected.
+    /// The dot and name, only while the card is hovered or selected.
     Hover,
 }
 
@@ -295,8 +298,8 @@ impl IconSpot {
 
     pub fn label(self) -> &'static str {
         match self {
-            IconSpot::BottomRight => "Снизу справа",
-            IconSpot::TopLeft => "Сверху слева",
+            IconSpot::BottomRight => "Значок",
+            IconSpot::TopLeft => "Точка и название",
             IconSpot::Hover => "Только при наведении",
         }
     }
@@ -378,7 +381,7 @@ pub const PRESETS: [Preset; 8] = [
     Preset {
         name: "Ebb",
         hint: "Стекло и свечение цвета",
-        style: style(Marker::Glow, IconSpot::BottomRight, 50, false, 5, 12, 50, 85, F::System, 29, B::Theme),
+        style: style(Marker::Glow, IconSpot::TopLeft, 50, false, 5, 12, 50, 85, F::System, 29, B::Theme),
     },
     Preset {
         name: "Sticky Notes",
@@ -413,7 +416,7 @@ pub const PRESETS: [Preset; 8] = [
     Preset {
         name: "Windows",
         hint: "Фон как у панели задач",
-        style: style(Marker::None, IconSpot::BottomRight, 50, false, 5, 8, 35, 96, F::System, 28, B::Taskbar),
+        style: style(Marker::None, IconSpot::TopLeft, 50, false, 5, 8, 35, 96, F::System, 28, B::Taskbar),
     },
 ];
 
@@ -507,6 +510,14 @@ pub fn link_domain(text: &str) -> Option<&str> {
     let host = rest[..end].rsplit('@').next().unwrap_or("");
     let host = host.strip_prefix("www.").unwrap_or(host).trim_end_matches(['.', ':']);
     (!host.is_empty()).then_some(host)
+}
+
+/// The first http(s) address in the text, without the punctuation after it.
+pub fn first_url(text: &str) -> Option<&str> {
+    let at = [text.find("https://"), text.find("http://")].into_iter().flatten().min()?;
+    let rest = &text[at..];
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    Some(rest[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '"', '\'']))
 }
 
 /// A Prompt's name: its first line, when more text follows and the line is short.
@@ -1032,6 +1043,8 @@ mod tests {
 
     #[test]
     fn link_domains() {
+        assert_eq!(first_url("см. (https://egui.rs/x). и всё"), Some("https://egui.rs/x"));
+        assert_eq!(first_url("без ссылки"), None);
         assert_eq!(link_domain("демо https://www.egui.rs/#demo"), Some("egui.rs"));
         assert_eq!(link_domain("(http://user@host.dev:8080/x)"), Some("host.dev:8080"));
         assert_eq!(link_domain("без ссылки"), None);
