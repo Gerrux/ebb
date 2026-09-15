@@ -1,0 +1,238 @@
+# Synthetic Sticky Notes for sticky::classify (spec 08). No real data.
+# Each note starts with a line "=== <kind>" (note | idea | link | prompt | reference | private);
+# its text runs until the next such line. Lines starting with "#" before the first note are comments.
+=== note
+Купить молоко, хлеб, яйца
+=== note
+Позвонить маме в воскресенье
+=== note
+Встреча с командой в 15:00
+обсудить релиз и отпуск
+=== note
+Список книг:
+Мастер и Маргарита
+Сто лет одиночества
+Шантарам
+=== note
+Не забыть сменить пароль на почте
+=== note
+Размер обуви Саши — 34
+=== note
+Дедлайн по отчёту — пятница
+=== note
+Рецепт блинов: 2 яйца, 500 мл молока, 200 г муки, щепотка соли
+=== note
+Отпуск: 12–26 июля, билеты взять до мая
+=== note
+Сдать анализы натощак, кабинет 214
+=== note
+Meeting notes
+- budget approved
+- hire two more designers
+- next sync on Tuesday
+=== note
+Grocery: apples, oats, coffee
+=== note
+Подарок на др Лене — книга или сертификат
+=== note
+Код домофона у родителей 4512 не работает, звонить
+=== note
+Прочитал статью про привычки. Главное — маленькие шаги каждый день, а не рывки раз в месяц. Мотивация приходит после действия, а не до.
+=== note
+Как прошёл созвон? Нормально, клиент доволен, но просит сдвинуть сроки на неделю.
+=== note
+Перенести встречу с бухгалтером
+=== note
+Цитата: «Лучшее время посадить дерево было 20 лет назад. Следующее лучшее — сейчас»
+=== note
+Страховка машины истекает 3 ноября
+=== note
+Спросить у Димы, как он настроил роутер
+=== note
+Weekly goals: finish onboarding doc, clean inbox, run 3 times
+=== note
+Кофе закончился
+=== note
+Обсудили с Олей план переезда. Сначала упаковать книги, потом кухню. Грузчиков заказать на субботу, машину на 9 утра.
+=== note
+Серия 4, остановился на 23 минуте
+=== note
+Проект Альфа: статус зелёный, риски — поставщик и сроки согласования
+=== note
+Любимый чай Ани — улун с молоком
+=== note
+Лекарства: утром и вечером после еды, 10 дней
+=== note
+Посмотреть доклад Андрея, он хвалил
+=== note
+Сломался кран в ванной, вызвать мастера
+=== note
+Итоги года: переехал, сменил работу, начал бегать
+=== note
+Номер заказа 48213, доставка в четверг
+=== note
+Настроение сегодня так себе, надо выспаться
+=== note
+Tuesday: dentist 10am, then office
+=== note
+Не отвечать на письма до 11 утра
+=== note
+Мысль из книги: система важнее целей
+=== idea
+идея: подписка на годовой план со скидкой
+=== idea
+Идея — сделать бота, который напоминает поливать цветы
+=== idea
+А что если продавать шаблоны отдельно от приложения?
+=== idea
+Попробовать annual pricing plan
+=== idea
+Можно сделать тёмную тему для отчётов
+=== idea
+Что если убрать регистрацию из онбординга?
+=== idea
+Идея для блога: как я перестал терять заметки
+=== idea
+Попробовать писать утренние страницы неделю
+=== idea
+What if the widget showed only three cards a day?
+=== idea
+Idea: weekly recap email for teams
+=== idea
+Подкаст про локальные сервисы — идея на лето
+=== idea
+Можно сделать карту кофеен с розетками
+=== idea
+А если объединить поиск и захват в одно окно?
+=== idea
+Попробовать продавать через маркетплейс
+=== idea
+Идея: курс по Rust для дизайнеров
+=== link
+https://example.com/articles/habits-small-steps
+=== link
+Статья про ценообразование https://blog.example.org/pricing-annual-plans
+=== link
+https://www.youtube.com/watch?v=abc123XYZ
+=== link
+https://github.com/example/awesome-rust
+https://docs.example.dev/guide/getting-started
+=== link
+docs: https://docs.example.com/api/v2/reference
+=== link
+https://figma.com/file/AbCdEf123/Landing
+=== link
+Курс https://learn.example.net/courses/sql-basics
+=== link
+https://news.example.com/2024/03/local-first-software
+=== link
+www.example.shop/catalog/lamps
+=== link
+Рецепт https://cook.example.ru/bliny-na-moloke
+=== link
+https://maps.example.com/place/coffee-roasters
+=== link
+Плейлист https://music.example.com/playlist/37i9dQZF1DX
+=== prompt
+Ты — опытный редактор. Сократи текст ниже в два раза, сохранив смысл и тон.
+=== prompt
+You are a senior Rust reviewer. Point out bugs first, then style issues.
+=== prompt
+Act as a product manager and write three user stories for {{feature}}.
+=== prompt
+Представь, что ты преподаватель английского. Проверь мои предложения и объясни ошибки.
+=== prompt
+Переведи на английский: {{text}}
+Сохрани деловой стиль.
+=== prompt
+### Роль
+Маркетолог B2B
+### Задача
+Написать письмо клиенту о повышении цен
+### Формат
+Три абзаца, без канцелярита
+=== prompt
+Role: data analyst
+Task: summarize the table below and list three anomalies
+Output: bullet points
+=== prompt
+Мне нужно подготовить описание вакансии. Твоя задача — задать мне вопросы о команде, стеке и задачах, а потом написать текст вакансии. Ответь сначала списком вопросов, не больше семи. Формат ответа: нумерованный список. Пиши простым языком, без клише вроде «дружная команда» и «печеньки в офисе». Если чего-то не хватает, спроси.
+=== prompt
+Write a cover letter for {{company}} using my resume below. Keep it under 200 words.
+=== prompt
+Please review the following pull request description and suggest a clearer title. Your task is to keep it under 60 characters and to mention the affected module. Respond with three options and a one-line reason for each. Answer in English even if the description is in Russian. Do not invent details that are not in the text.
+=== prompt
+Объясни как пятилетнему: {{тема}}
+=== prompt
+Выступи в роли юриста и перечисли риски в договоре ниже.
+=== reference
+ssh deploy@10.0.4.12 -p 2222
+cd /srv/app && docker compose up -d
+=== reference
+git fetch origin
+git rebase origin/main
+git push --force-with-lease
+=== reference
+vpn.staging.internal
+db.staging.internal:5432
+=== reference
+DATABASE_URL=postgres://app@localhost:5432/app
+REDIS_URL=redis://localhost:6379
+=== reference
+C:\tools\ffmpeg\bin
+C:\Users\me\AppData\Local\Programs
+=== reference
+kubectl get pods -n prod
+kubectl logs -f deploy/api -n prod
+=== reference
+Прокси: proxy.corp.example.com:3128
+DNS: 10.1.0.2
+=== reference
+cargo build --release
+cargo test --release
+=== reference
+$ npm run build
+$ npm run preview
+=== reference
+Принтер в офисе: 192.168.1.40
+=== reference
+/etc/nginx/sites-available/default
+/var/log/nginx/error.log
+=== reference
+winget install Git.Git
+winget install Microsoft.PowerToys
+=== reference
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+=== reference
+Сервер сборки build01.corp.example.com, логи в /var/log/ci
+=== private
+wifi дома
+пароль: Tr0ub4dor-8812
+=== private
+Логин: ivan.petrov
+Пароль: kX9!mQ2#vL
+=== private
+api key sk-live-4f9a8b7c6d5e4f3a2b1c
+=== private
+PIN карты 4829
+=== private
+Госуслуги пароль SunFlower2021
+=== private
+token: ghp_abc123def456ghi789jkl
+=== private
+secret = 9f8e7d6c5b4a3f2e1d0c
+=== private
+Wi-Fi гостевой
+password guest-2024-autumn
+=== private
+Сейф на даче, код пин: 7719
+=== private
+Роутер admin / pass: r0uter!admin
+=== private
+Почта рабочая
+логин petrova@example.com
+пароль Winter#2025
+=== private
+AWS_SECRET_ACCESS_KEY=abcdEFGH1234ijklMNOP5678qrst

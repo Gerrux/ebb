@@ -223,23 +223,119 @@ pub fn plain_text(markup: &str) -> String {
     lines.join("\n").trim().to_owned()
 }
 
-fn classify(plain: &str) -> Kind {
-    if looks_secret(plain) {
+/// A note's kind from its text alone, locally (spec 08). Checked in order:
+/// credentials, an explicit prefix, prompt, link, reference, idea; else a note.
+/// Tuned on `tests/fixtures/sticky-classify.txt`.
+pub fn classify(plain: &str) -> Kind {
+    if looks_secret(plain) || env_secret(plain) || pin_code(plain) {
         return Kind::Private;
     }
-    // Only the beginning decides: a URL or "ssh" deep inside a long note says little.
-    let head: String = plain.chars().take(300).collect();
-    let lower = head.to_lowercase();
-    const PROMPT_STARTS: &[&str] = &["ты —", "ты -", "ты это", "you are", "act as", "представь, что", "представь что"];
-    if PROMPT_STARTS.iter().any(|p| lower.starts_with(p)) {
+    // An explicit "идея:", "prompt:"… wins (parse_capture checks prefixes first).
+    let first_line = plain.lines().next().unwrap_or("");
+    match parse_capture(first_line).kind {
+        kind @ (Kind::Idea | Kind::Prompt | Kind::Goal | Kind::Reference | Kind::Private) if has_prefix(first_line) => return kind,
+        _ => {}
+    }
+    if looks_prompt(plain) {
         return Kind::Prompt;
     }
-    match parse_capture(&head).kind {
-        // "через 2 недели" in a note from two years ago is not a live reminder.
-        Kind::Reminder => Kind::Note,
-        Kind::Link if plain.chars().count() > 300 => Kind::Note,
-        kind => kind,
+    if looks_link(plain) {
+        return Kind::Link;
     }
+    if looks_reference(plain) {
+        return Kind::Reference;
+    }
+    if looks_idea(plain) {
+        return Kind::Idea;
+    }
+    Kind::Note
+}
+
+fn has_prefix(line: &str) -> bool {
+    let lower = line.trim_start().to_lowercase();
+    ["идея:", "idea:", "промпт:", "prompt:", "цель:", "goal:", "ref:", "private:", "секрет:"].iter().any(|p| lower.starts_with(p))
+}
+
+/// `AWS_SECRET_ACCESS_KEY=…`, `DB_PASSWORD=…`: an env line naming a credential.
+fn env_secret(plain: &str) -> bool {
+    plain.lines().any(|line| {
+        let Some((key, value)) = line.trim().split_once('=') else { return false };
+        let key = key.trim().to_ascii_uppercase();
+        key.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+            && ["SECRET", "PASSWORD", "PASSWD", "TOKEN", "API_KEY", "PRIVATE_KEY"].iter().any(|w| key.contains(w))
+            && value.trim().chars().count() >= 6
+    })
+}
+
+/// "PIN карты 4829": a PIN with its digits a word or two later.
+fn pin_code(plain: &str) -> bool {
+    let words: Vec<String> = plain.split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase()).collect();
+    words.iter().enumerate().any(|(i, w)| {
+        matches!(w.as_str(), "pin" | "пин" | "пин-код" | "пинкод")
+            && words[i + 1..].iter().take(2).any(|v| (4..=8).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
+fn looks_prompt(plain: &str) -> bool {
+    let lower = plain.to_lowercase();
+    const STARTS: &[&str] = &[
+        "ты —", "ты -", "ты это", "you are", "act as", "представь, что", "представь что", "выступи в роли", "действуй как",
+        "объясни", "переведи", "перепиши", "сократи", "write a", "rewrite", "summarize", "explain",
+    ];
+    // Addressing a model, anywhere in a longer text.
+    const PHRASES: &[&str] = &[
+        "твоя задача", "формат ответа", "ответь ", "ответь:", "your task", "respond with", "answer in", "act as", "you are a",
+    ];
+    let starts = STARTS.iter().any(|p| lower.starts_with(p));
+    let long_and_addressed = plain.chars().count() > 300 && PHRASES.iter().filter(|p| lower.contains(*p)).count() >= 1;
+    // Template markers: {{variable}}, "### Section", "Role:"/"Task:" lines.
+    let placeholders = !crate::card::prompt_placeholders(plain).is_empty();
+    let sections = plain.lines().filter(|l| l.trim_start().starts_with("###")).count() >= 2
+        || plain.lines().any(|l| {
+            let l = l.trim_start().to_lowercase();
+            ["role:", "роль:", "system:"].iter().any(|p| l.starts_with(p))
+        });
+    starts || long_and_addressed || placeholders || sections
+}
+
+/// At least half of the text is URLs.
+fn looks_link(plain: &str) -> bool {
+    let total: usize = plain.split_whitespace().map(|w| w.chars().count()).sum();
+    let urls: usize = plain
+        .split_whitespace()
+        // Not `REDIS_URL=redis://…`: that's a setting.
+        .filter(|w| (w.contains("://") || w.starts_with("www.")) && !w.split("://").next().unwrap_or("").contains('='))
+        .map(|w| w.chars().count())
+        .sum();
+    total > 0 && urls * 2 >= total
+}
+
+/// Commands, hosts, paths, `KEY=value`: two such lines, or a short note that is one.
+fn looks_reference(plain: &str) -> bool {
+    let lines: Vec<&str> = plain.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let env = |l: &str| {
+        l.split_once('=').is_some_and(|(k, v)| {
+            !k.is_empty() && !v.is_empty() && k.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        })
+    };
+    // "Прокси: proxy.corp.example.com:3128": the label doesn't hide the host.
+    let technical = |l: &str| {
+        let value = l.split_once(": ").map_or(l, |(_, v)| v);
+        crate::card::looks_technical(l) || crate::card::looks_technical(value) || env(l)
+    };
+    let count = lines.iter().filter(|l| technical(l)).count();
+    count >= 2 || (count >= 1 && lines.len() <= 2 && plain.chars().count() <= 120)
+}
+
+fn looks_idea(plain: &str) -> bool {
+    let first = plain.lines().next().unwrap_or("").trim();
+    let lower = first.to_lowercase();
+    const STARTS: &[&str] = &["а что если", "что если", "а если", "попробовать", "можно сделать", "what if", "try "];
+    let named = lower.split(|c: char| !c.is_alphanumeric()).any(|w| matches!(w, "идея" | "идеи" | "idea"));
+    // A short question to oneself, not a question about something that happened.
+    let question = first.ends_with('?') && first.chars().count() <= 100 && plain.lines().count() == 1
+        && ["что если", "а если", "может", "what if", "should"].iter().any(|p| lower.contains(p));
+    named || question || STARTS.iter().any(|p| lower.starts_with(p))
 }
 
 fn tags(plain: &str) -> Vec<String> {
@@ -475,6 +571,62 @@ mod tests {
     fn converts_ticks() {
         // 2024-03-01T16:44:58Z
         assert_eq!(ticks_to_unix(638_449_082_980_000_000), 1_709_311_498);
+    }
+
+    /// Labeled synthetic notes in the `tests/fixtures/sticky-classify*.txt` format.
+    fn fixture(source: &str) -> Vec<(Kind, String)> {
+        let mut notes: Vec<(Kind, String)> = Vec::new();
+        for line in source.lines() {
+            if let Some(kind) = line.strip_prefix("=== ") {
+                notes.push((Kind::parse(kind.trim()), String::new()));
+            } else if let Some((_, text)) = notes.last_mut() {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(line);
+            }
+        }
+        notes
+    }
+
+    /// `cargo test --release classifies_the_fixture -- --nocapture` prints the misses.
+    #[test]
+    fn classifies_the_fixture() {
+        let notes = fixture(include_str!("../tests/fixtures/sticky-classify.txt"));
+        assert_eq!(notes.len(), 100);
+        let (mut misses, mut below) = (0, Vec::new());
+        for kind in [Kind::Note, Kind::Idea, Kind::Link, Kind::Prompt, Kind::Reference, Kind::Private] {
+            let labeled: Vec<&String> = notes.iter().filter(|(k, _)| *k == kind).map(|(_, t)| t).collect();
+            let found = labeled.iter().filter(|t| classify(t) == kind).count();
+            let predicted = notes.iter().filter(|(_, t)| classify(t) == kind).count();
+            let recall = found as f64 / labeled.len() as f64;
+            let precision = if predicted == 0 { 0.0 } else { found as f64 / predicted as f64 };
+            println!("{:>10}: recall {:.0}% ({found}/{}), precision {:.0}%", kind.as_str(), recall * 100.0, labeled.len(), precision * 100.0);
+            for (k, text) in notes.iter().filter(|(k, t)| (*k == kind) != (classify(t) == kind)) {
+                if *k == kind {
+                    misses += 1;
+                    println!("            miss as {}: {}", classify(text).as_str(), text.replace('\n', " / "));
+                }
+            }
+            if recall < 0.8 || precision < 0.8 {
+                below.push(kind.as_str());
+            }
+        }
+        println!("misses: {misses}/100");
+        assert!(below.is_empty(), "below 80%: {below:?}");
+    }
+
+    /// Notes the rules were not tuned on: overall accuracy only, groups are too small.
+    #[test]
+    fn classifies_held_out_notes() {
+        let notes = fixture(include_str!("../tests/fixtures/sticky-classify-holdout.txt"));
+        let misses: Vec<String> = notes
+            .iter()
+            .filter(|(k, t)| classify(t) != *k)
+            .map(|(k, t)| format!("{} as {}: {}", k.as_str(), classify(t).as_str(), t.replace('\n', " / ")))
+            .collect();
+        println!("held-out misses {}/{}:\n{}", misses.len(), notes.len(), misses.join("\n"));
+        assert!(misses.len() * 5 <= notes.len(), "held-out accuracy below 80%");
     }
 
     #[test]

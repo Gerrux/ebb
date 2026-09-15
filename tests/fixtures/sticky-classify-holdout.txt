@@ -1,0 +1,68 @@
+# Held-out synthetic notes: written after the classifier rules, never used to tune them.
+# Same format as sticky-classify.txt.
+=== note
+Забрать посылку на почте до среды, паспорт с собой
+=== note
+Идём в кино в субботу? Надо спросить у всех в чате
+=== note
+Созвон с дизайнером перенесли на 16:30
+=== note
+Главное из лекции: сон, свет утром, меньше кофе после обеда
+=== note
+Кот — корм для стерилизованных, 2 кг
+=== note
+Список дел на выходные
+- помыть окна
+- разобрать шкаф
+- позвонить бабушке
+=== note
+Показания счётчиков: вода 00312, свет 18840
+=== note
+Поздравить коллег с 8 марта
+=== note
+Retro: too many meetings, not enough focus time. Try no-meeting Wednesdays.
+=== note
+Документы для визы: справка с работы, выписка, фото 3x4
+=== idea
+Идея: трекер привычек без стриков и уведомлений
+=== idea
+Что если давать скидку за годовую подписку только в декабре?
+=== idea
+Можно сделать экспорт карточек в Markdown
+=== idea
+Попробовать вести дневник голосом
+=== idea
+Может, запустить рассылку раз в месяц?
+=== link
+https://arxiv.org/abs/2401.01234
+=== link
+Хороший разбор https://habr.example.com/articles/780000/
+=== link
+https://store.example.com/product/12345?color=black&size=m
+=== prompt
+Ты — строгий редактор. Найди в тексте канцелярит и предложи замены.
+=== prompt
+Составь план тренировок на неделю для {{уровень}} бегуна, {{дней}} дней в неделю.
+=== prompt
+Summarize this meeting transcript into decisions, owners and deadlines.
+=== reference
+docker run --rm -p 8080:80 nginx:alpine
+=== reference
+scp ./dump.sql backup@10.20.0.5:/backups/
+ssh backup@10.20.0.5
+=== reference
+Git: git log --oneline --graph --all
+=== reference
+NODE_ENV=production
+PORT=3000
+=== reference
+Сетевой диск: \\fileserver\shared\projects
+=== private
+Банк приложение пароль 7731-kfs-aa
+=== private
+логин: olga.sm
+пароль: Ромашка2023
+=== private
+PIN от домофона 2580
+=== private
+GITHUB_TOKEN=ghp_9aB8cD7eF6gH5iJ4kL3mN2
