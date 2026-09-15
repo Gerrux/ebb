@@ -1871,9 +1871,11 @@ fn panel(ui: &Ui, rect: Rect, fill: Color32, radius: CornerRadius, shadow: u8) {
 }
 
 /// The card's color, drawn the way the user picked in settings. `strength` 50
-/// (the default) is the look each marker was tuned at.
-pub(crate) fn paint_marker(ui: &Ui, rect: Rect, accent: Color32, style: card::CardStyle, hovered: bool) {
+/// (the default) is the look each marker was tuned at. Lines and glows take the
+/// hue's mark color, fills its surface (see [`card::Tint`]).
+pub(crate) fn paint_marker(ui: &Ui, rect: Rect, hue: card::Tint, style: card::CardStyle, hovered: bool) {
     use card::Marker;
+    let accent = theme::on_card(hue.color());
     let s = f32::from(style.strength) / 50.0;
     let radius = CornerRadius::same(style.radius);
     let painter = ui.painter();
@@ -1893,15 +1895,19 @@ pub(crate) fn paint_marker(ui: &Ui, rect: Rect, accent: Color32, style: card::Ca
         Marker::Border => {
             painter.rect_stroke(rect, radius, Stroke::new(1.5, accent.gamma_multiply((0.55 * s).min(1.0))), StrokeKind::Inside);
         }
-        Marker::Fill => {
-            // Opaque, like paper: a muted shade of the color over the card's own
-            // background (dark shades in the dark theme, pastels in the light one).
-            let base = theme::card_fill(false);
-            let t = if theme::is_light() { 0.38 } else { 0.3 } * s.min(2.0);
-            let l = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t.min(0.9)).round() as u8;
-            let fill = card_background(Color32::from_rgb(l(base.r(), accent.r()), l(base.g(), accent.g()), l(base.b(), accent.b())), style, false);
-            painter.rect_filled(rect, radius, fill);
-            if hovered {
+        Marker::Fill | Marker::Paper => {
+            let surface = theme::surface(hue, style.strength);
+            painter.rect_filled(rect, radius, card_background(surface, style, false));
+            if style.marker == Marker::Paper && hovered {
+                // The bar of a Sticky Notes window: the paper a shade deeper,
+                // over the meta line.
+                let t = if theme::card_is_light() { 0.32 } else { 0.22 };
+                let l = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+                let bar = Color32::from_rgb(l(surface.r(), accent.r()), l(surface.g(), accent.g()), l(surface.b(), accent.b()));
+                painter
+                    .with_clip_rect(Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + HEADER_H)).intersect(ui.clip_rect()))
+                    .rect_filled(rect, radius, card_background(bar, style, false));
+            } else if hovered {
                 painter.rect_filled(rect, radius, theme::wash(10));
             }
         }
@@ -2714,7 +2720,7 @@ fn card_ui(
     let body = Rect::from_min_max(pos2(inner.left(), meta.bottom() + 4.0), pos2(inner.right(), footer.top() - 2.0));
     let accent = theme::on_card(card.accent());
 
-    paint_marker(ui, rect, accent, style, hovered);
+    paint_marker(ui, rect, card.hue(), style, hovered);
 
     // Tags and age only while the card is hovered, edited or selected; at rest a
     // card is its text, its color marker (a setting) and the kind's mark.

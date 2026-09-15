@@ -936,8 +936,7 @@ fn preset_tile(ui: &mut Ui, preset: &crate::card::Preset, on: bool) -> egui::Res
             ui.painter().add(shadow.as_shape(card, CornerRadius::same(style.radius)));
         }
         ui.painter().rect(card, CornerRadius::same(style.radius), base, Stroke::new(1.0, theme::glass_stroke()), StrokeKind::Inside);
-        let accent = kind.accent();
-        crate::app::paint_marker(ui, card, accent, style, false);
+        crate::app::paint_marker(ui, card, kind.tint(), style, false);
         for line in 0..3 {
             let y = card.top() + 18.0 + line as f32 * 8.0;
             let w = [30.0, 22.0, 26.0][line];

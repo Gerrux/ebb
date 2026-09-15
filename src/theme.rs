@@ -187,6 +187,27 @@ pub fn card_fill(hovered: bool) -> Color32 {
     if hovered { p.card_hover } else { p.card }
 }
 
+/// Whether cards are light (text dark on them): the theme's, or a picked
+/// background's.
+pub fn card_is_light() -> bool {
+    palette().card_light
+}
+
+/// A card filled in `hue`: at strength 50 the color's own surface (paper, or a
+/// night shade); below that it fades toward the glass, above it leans toward
+/// the mark color. Opaque; the card style's opacity is applied by the caller.
+pub fn surface(hue: crate::card::Tint, strength: u8) -> Color32 {
+    let paper = hue.surface(card_is_light());
+    let s = f32::from(strength) / 50.0;
+    let (from, to, t) = if s <= 1.0 {
+        (card_fill(false), paper, s)
+    } else {
+        (paper, hue.color(), ((s - 1.0) * 0.5).min(0.5))
+    };
+    let l = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+    Color32::from_rgb(l(from.r(), to.r()), l(from.g(), to.g()), l(from.b(), to.b()))
+}
+
 pub fn card_text() -> Color32 {
     palette().card_text
 }

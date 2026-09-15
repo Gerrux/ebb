@@ -103,22 +103,24 @@ impl Kind {
         }
     }
 
-    /// Readable on the current theme (see theme::adapt).
-    pub fn accent(self) -> Color32 {
-        crate::theme::adapt(self.raw_accent())
+    /// The kind's color: one of the tints, so a kind and a color picked by hand
+    /// are painted the same way.
+    pub fn tint(self) -> Tint {
+        match self {
+            Kind::Note => Tint::Gray,
+            Kind::Idea => Tint::Yellow,
+            Kind::Prompt => Tint::Purple,
+            Kind::Link => Tint::Blue,
+            Kind::Goal => Tint::Green,
+            Kind::Reminder => Tint::Orange,
+            Kind::Reference => Tint::Teal,
+            Kind::Private => Tint::Pink,
+        }
     }
 
-    fn raw_accent(self) -> Color32 {
-        match self {
-            Kind::Note => Color32::from_rgb(160, 174, 192),
-            Kind::Idea => Color32::from_rgb(250, 204, 21),
-            Kind::Prompt => Color32::from_rgb(167, 139, 250),
-            Kind::Link => Color32::from_rgb(96, 165, 250),
-            Kind::Goal => Color32::from_rgb(52, 211, 153),
-            Kind::Reminder => Color32::from_rgb(251, 146, 60),
-            Kind::Reference => Color32::from_rgb(45, 212, 191),
-            Kind::Private => Color32::from_rgb(244, 114, 182),
-        }
+    /// The kind's mark color, readable on the current theme (see theme::adapt).
+    pub fn accent(self) -> Color32 {
+        self.tint().color()
     }
 
     /// The digit that switches a selected card to this kind (1–8, in `ALL` order).
@@ -128,7 +130,11 @@ impl Kind {
     }
 }
 
-/// A color picked for a card by hand; replaces its kind's accent.
+/// A card's color: its kind's, or one picked by hand. Two palettes per color:
+/// the *mark* (dot, glyph, strip, border, glow, the primary button), and the
+/// *surface* the whole card is filled with, which is not the mark washed over
+/// the glass (that came out muddy) but a color of its own: the paper of Sticky
+/// Notes and Keep in the light theme, a night shade like Keep's in the dark one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tint {
     Yellow,
@@ -175,8 +181,45 @@ impl Tint {
         }
     }
 
+    /// The mark color, readable on the current theme.
     pub fn color(self) -> Color32 {
         crate::theme::adapt(self.raw_color())
+    }
+
+    /// The surface color: paper on a light card, a night shade on a dark one.
+    pub fn surface(self, light: bool) -> Color32 {
+        let [r, g, b] = if light { self.paper() } else { self.night() };
+        Color32::from_rgb(r, g, b)
+    }
+
+    /// Sticky Notes' paper colors (yellow, green, pink, purple, blue, gray) and
+    /// Keep's peach and teal.
+    fn paper(self) -> [u8; 3] {
+        match self {
+            Tint::Yellow => [255, 242, 171],
+            Tint::Orange => [255, 217, 184],
+            Tint::Pink => [255, 204, 229],
+            Tint::Purple => [231, 207, 255],
+            Tint::Blue => [205, 233, 255],
+            Tint::Teal => [197, 236, 236],
+            Tint::Green => [203, 241, 196],
+            Tint::Gray => [237, 238, 241],
+        }
+    }
+
+    /// Dark shades that still read as the color, and stay mostly grey so the
+    /// layer doesn't turn into a paint box at night. Gray is the glass itself.
+    fn night(self) -> [u8; 3] {
+        match self {
+            Tint::Yellow => [64, 59, 40],
+            Tint::Orange => [68, 52, 40],
+            Tint::Pink => [66, 44, 56],
+            Tint::Purple => [54, 48, 74],
+            Tint::Blue => [36, 50, 70],
+            Tint::Teal => [34, 58, 60],
+            Tint::Green => [38, 60, 46],
+            Tint::Gray => [43, 47, 54],
+        }
     }
 
     fn raw_color(self) -> Color32 {
@@ -202,10 +245,14 @@ pub enum Marker {
     StripLeft,
     Tint,
     Border,
-    /// The whole card in a muted shade of the color (Google Keep, Sticky Notes).
+    /// The whole card in the color's surface: paper by day, a night shade in
+    /// the dark (Google Keep).
     Fill,
     /// A colored outline over a faint tint (Obsidian Canvas).
     Outline,
+    /// Paper, and while the card is hovered a darker band along the top, the
+    /// way a Sticky Notes window shows its bar.
+    Paper,
 }
 
 /// How the kind is marked in a card's meta line (the mark opens the kind menu).
@@ -255,8 +302,17 @@ impl Default for CardStyle {
 }
 
 impl Marker {
-    pub const ALL: [Marker; 8] =
-        [Marker::None, Marker::Glow, Marker::StripTop, Marker::StripLeft, Marker::Tint, Marker::Border, Marker::Fill, Marker::Outline];
+    pub const ALL: [Marker; 9] = [
+        Marker::None,
+        Marker::Glow,
+        Marker::StripTop,
+        Marker::StripLeft,
+        Marker::Tint,
+        Marker::Border,
+        Marker::Fill,
+        Marker::Paper,
+        Marker::Outline,
+    ];
 
     pub fn key(self) -> &'static str {
         match self {
@@ -268,6 +324,7 @@ impl Marker {
             Marker::Border => "border",
             Marker::Fill => "fill",
             Marker::Outline => "outline",
+            Marker::Paper => "paper",
         }
     }
 
@@ -281,6 +338,7 @@ impl Marker {
             Marker::Border => "Цветная рамка",
             Marker::Fill => "Заливка",
             Marker::Outline => "Рамка и тон",
+            Marker::Paper => "Бумага с шапкой",
         }
     }
 }
@@ -385,12 +443,12 @@ pub const PRESETS: [Preset; 8] = [
     },
     Preset {
         name: "Sticky Notes",
-        hint: "Цветная шапка заметки",
-        style: style(Marker::StripTop, IconSpot::Hover, 100, false, 8, 8, 35, 100, F::System, 29, B::Theme),
+        hint: "Цветная бумага, шапка при наведении",
+        style: style(Marker::Paper, IconSpot::Hover, 50, false, 8, 8, 35, 100, F::System, 29, B::Theme),
     },
     Preset {
         name: "Google Keep",
-        hint: "Заливка, плоско, рамка",
+        hint: "Пастель днём, ночные тона в темноте",
         style: style(Marker::Fill, IconSpot::Hover, 50, false, 5, 8, 0, 100, F::System, 28, B::Theme),
     },
     Preset {
@@ -406,7 +464,7 @@ pub const PRESETS: [Preset; 8] = [
     Preset {
         name: "Бумажный стикер",
         hint: "Заливка, тень, от руки",
-        style: style(Marker::Fill, IconSpot::Hover, 70, false, 5, 2, 70, 100, F::SegoePrint, 29, B::Theme),
+        style: style(Marker::Fill, IconSpot::Hover, 60, false, 5, 2, 70, 100, F::SegoePrint, 29, B::Theme),
     },
     Preset {
         name: "Минимализм",
@@ -439,8 +497,14 @@ pub struct Card {
 }
 
 impl Card {
+    /// The card's color: picked by hand, else its kind's.
+    pub fn hue(&self) -> Tint {
+        self.tint.unwrap_or(self.kind.tint())
+    }
+
+    /// The mark color of [`Card::hue`].
     pub fn accent(&self) -> Color32 {
-        self.tint.map_or(self.kind.accent(), Tint::color)
+        self.hue().color()
     }
 
     /// The caption of a card brought back from the archive.
@@ -1071,6 +1135,14 @@ mod tests {
         for t in Tint::ALL {
             assert_eq!(Tint::parse(t.as_str()), Some(t));
         }
+        // Every kind has a tint of its own, so its color and a picked one are painted alike.
+        let mut tints: Vec<Tint> = Kind::ALL.iter().map(|k| k.tint()).collect();
+        tints.dedup();
+        assert_eq!(tints.len(), Kind::ALL.len());
+        // The paper is Sticky Notes' yellow, the night shade is dark.
+        assert_eq!(Tint::Yellow.surface(true), Color32::from_rgb(255, 242, 171));
+        assert!(Tint::Yellow.surface(false).r() < 100);
+        assert_eq!(Marker::ALL.iter().filter(|m| m.key() == "paper").count(), 1);
     }
 
     #[test]
