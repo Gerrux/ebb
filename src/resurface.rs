@@ -8,6 +8,10 @@ pub const COOLDOWN_DAYS: i64 = 14;
 pub const REDISCOVER_LIMIT: usize = 3;
 /// A note archived or opened more recently than this isn't forgotten yet.
 pub const FORGOTTEN_AFTER_DAYS: i64 = 7;
+/// Information decay (product §12): brought back this many times without a
+/// reaction, a note stops coming back by itself. Search still finds it, a
+/// reminder still brings it, and any reaction (opening it) resets the count.
+pub const DECAY_IGNORED: i64 = 3;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Candidate {
@@ -57,6 +61,7 @@ fn eligible(now: i64, c: &Candidate) -> bool {
         // A reminder that has come due skips both waits.
         && (due(now, c.review_at)
             || (now - c.last_viewed_at >= FORGOTTEN_AFTER_DAYS * DAY
+                && c.ignored_count < DECAY_IGNORED
                 && !c.last_resurfaced_at.is_some_and(|at| now - at < COOLDOWN_DAYS * DAY)))
 }
 
@@ -215,6 +220,18 @@ mod tests {
         assert!(candidates(now, &[fresh.clone()], 5).is_empty());
         fresh.review_at = Some(now);
         assert_eq!(candidates(now, &[fresh], 5).len(), 1, "a due reminder comes back anyway");
+    }
+
+    #[test]
+    fn a_note_ignored_three_times_fades_but_a_reminder_still_brings_it() {
+        let now = 100 * DAY;
+        let mut faded = candidate(1, Kind::Idea);
+        faded.ignored_count = DECAY_IGNORED - 1;
+        assert_eq!(candidates(now, &[faded.clone()], 3).len(), 1);
+        faded.ignored_count = DECAY_IGNORED;
+        assert!(candidates(now, &[faded.clone()], 3).is_empty());
+        faded.review_at = Some(now);
+        assert_eq!(candidates(now, &[faded], 3).len(), 1);
     }
 
     #[test]

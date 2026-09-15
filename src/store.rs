@@ -557,9 +557,10 @@ impl Store {
         Ok(())
     }
 
-    /// Records that the user looked at a card (input for resurfacing).
+    /// Records that the user looked at a card (input for resurfacing). A
+    /// reaction: the times it was brought back unanswered no longer count.
     pub fn touch(&self, id: i64) -> rusqlite::Result<()> {
-        self.conn.execute("UPDATE cards SET last_viewed_at=?2 WHERE id=?1", params![id, now()])?;
+        self.conn.execute("UPDATE cards SET last_viewed_at=?2, ignored_count=0 WHERE id=?1", params![id, now()])?;
         Ok(())
     }
 
