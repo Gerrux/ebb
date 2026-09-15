@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{
-    Align, Align2, Color32, CornerRadius, FontId, Key, Layout, Modifiers, Rect, RichText, Sense, Stroke,
-    StrokeKind, Ui, UiBuilder, Vec2, ViewportId, pos2, vec2,
+    Align, Align2, Color32, CornerRadius, FontId, Key, Layout, Modifiers, Rect, RichText, Sense,
+    Ui, UiBuilder, Vec2, ViewportId, pos2, vec2,
 };
 
 use crate::card::{Kind, parse_capture};
@@ -160,13 +160,8 @@ pub fn ui(ui: &mut Ui, state: &Mutex<BarState>) {
         && st.pressed_at.is_some_and(|t| t.elapsed() > Duration::from_millis(400));
 
     let rect = ui.max_rect();
-    ui.painter().rect(
-        rect,
-        CornerRadius::same(12),
-        theme::window_fill(150),
-        Stroke::new(1.0, theme::glass_stroke()),
-        StrokeKind::Inside,
-    );
+    // Square and unstroked: DWM rounds the window and draws its border (apply_backdrop).
+    ui.painter().rect_filled(rect, CornerRadius::ZERO, theme::window_fill(150));
 
     // The window itself fades in (root, win::fade); the content rises a few
     // points while it does.

@@ -250,13 +250,8 @@ pub fn ui(ui: &mut Ui, state: &Mutex<LibraryState>) {
     }
 
     let full = ui.max_rect();
-    ui.painter().rect(
-        full,
-        CornerRadius::same(12),
-        theme::window_fill(170),
-        Stroke::new(1.0, theme::glass_stroke()),
-        StrokeKind::Inside,
-    );
+    // Square and unstroked: DWM rounds the window and draws its border (apply_backdrop).
+    ui.painter().rect_filled(full, CornerRadius::ZERO, theme::window_fill(170));
 
     let mut close = header(ui, &mut st);
     let body = Rect::from_min_max(pos2(full.left() + 20.0, full.top() + HEADER_H + 8.0), full.max - vec2(20.0, 16.0));
