@@ -1811,6 +1811,47 @@ guest / pass");
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// `cargo test --release resurfacing_speed -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn resurfacing_speed() {
+        let (store, dir) = temp_store("resurfacing-speed");
+        let t = 400 * DAY;
+        store.conn.execute_batch("BEGIN").unwrap();
+        for i in 0..10_000i64 {
+            let body = format!("Заметка {i}: {}", "немного текста для объёма ".repeat(4));
+            store.conn
+                .execute(
+                    "INSERT INTO cards (kind, title, body, tags, archived, placement, x, y, w, h, created_at, updated_at, last_viewed_at)
+                     VALUES (?1, '', ?2, '', ?3, ?4, 0, 0, 280, 160, ?5, ?5, ?5)",
+                    params![["note", "idea", "link", "prompt"][(i % 4) as usize], body, i >= 50, if i >= 50 { "archive" } else { "manual" }, t - (i % 300) * DAY],
+                )
+                .unwrap();
+        }
+        store.conn.execute_batch("COMMIT; PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        drop(store);
+
+        // As at launch: a fresh connection, then the pick.
+        for day in 0..3 {
+            let open = std::time::Instant::now();
+            let store = Store::open_at(dir.join("t.db")).unwrap();
+            let opened = open.elapsed();
+            let pick = std::time::Instant::now();
+            let picks = store.refresh_resurfacing(t + day * DAY, 0, 3).unwrap();
+            let picked = pick.elapsed();
+            let again = std::time::Instant::now();
+            store.refresh_resurfacing(t + day * DAY + 60, 0, 3).unwrap();
+            println!(
+                "day {day}: open {:.1} ms, pick {:.1} ms ({} cards), already-picked check {:.2} ms",
+                opened.as_secs_f64() * 1e3,
+                picked.as_secs_f64() * 1e3,
+                picks.len(),
+                again.elapsed().as_secs_f64() * 1e3
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// `cargo test --release search_speed -- --ignored --nocapture`
     #[test]
     #[ignore]

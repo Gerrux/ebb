@@ -39,6 +39,9 @@ use layer::{CURTAIN_DROP, TAB_SIZE, place_tab};
 use toast::Toast;
 
 const LAYER_FADE_IN: Duration = Duration::from_millis(220);
+/// Seconds after launch before a Rediscover pick not yet made today runs:
+/// clear of the first frames and of logon.
+const REDISCOVER_AFTER_START: i64 = 3;
 
 // Settings keys.
 const SET_MONITOR: &str = "layer.monitor";
@@ -135,8 +138,7 @@ impl EbbApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         store: Store,
-        mut cards: Vec<Card>,
-        fresh: Vec<i64>,
+        cards: Vec<Card>,
         main_started: Instant,
         autostarted: bool,
     ) -> Self {
@@ -187,9 +189,15 @@ impl EbbApp {
             win::set_window_alpha(h, 0);
         }
 
-        // Brought back from the archive today, appearing like a new card.
-        let appearing: Vec<(i64, Instant)> = fresh.iter().map(|id| (*id, Instant::now())).collect();
-        place_resurfaced(&store, &mut cards, &fresh, full_area);
+        // The day's pick, if not made yet, runs a few seconds in, off this thread
+        // (schedule_rediscover); checking costs one settings read.
+        let (now, offset) = (resurface::unix_now(), crate::search::local_offset_secs());
+        // Not during benchmarks: it would land in their idle window.
+        let next_rediscover = if store.resurfaced_today(now, offset) || crate::bench::path().is_some() {
+            resurface::next_day_start(now, offset)
+        } else {
+            now + REDISCOVER_AFTER_START
+        };
 
         let shell = Arc::new(shell::Shared::default());
         shell.layer_visible.store(true, Ordering::Relaxed);
@@ -232,7 +240,7 @@ impl EbbApp {
             prompt_fill: None,
             tag_input: None,
             tag_counts: None,
-            appearing,
+            appearing: Vec::new(),
             leaving: Vec::new(),
             sticky: StickyImport::default(),
             show_debug: false,
@@ -240,7 +248,7 @@ impl EbbApp {
             main_started,
             first_frame: None,
             frames: 0,
-            next_rediscover: resurface::next_day_start(resurface::unix_now(), crate::search::local_offset_secs()),
+            next_rediscover,
             rediscover_job: None,
         }
     }
@@ -294,6 +302,8 @@ impl EbbApp {
     fn bring_resurfaced(&mut self, fresh: &[i64]) {
         self.reload_cards();
         place_resurfaced(&self.store, &mut self.cards, fresh, self.full_area);
+        // They come in like new cards.
+        self.appearing.extend(fresh.iter().map(|id| (*id, Instant::now())));
         self.library.lock().unwrap().invalidate();
         self.bar.lock().unwrap().invalidate();
     }

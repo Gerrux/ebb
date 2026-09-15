@@ -145,13 +145,8 @@ fn main() -> eframe::Result {
         std::process::exit(1)
     };
     let store = Store::open().unwrap_or_else(|e| fail("открыть базу заметок", e));
-    let fresh = match store.refresh_resurfacing(resurface::unix_now(), search::local_offset_secs(), resurface::REDISCOVER_LIMIT) {
-        Ok(picks) => picks.into_iter().map(|p| p.id).collect(),
-        Err(e) => {
-            eprintln!("resurfacing failed: {e}");
-            Vec::new()
-        }
-    };
+    // The day's Rediscover pick isn't made here: on 10k notes it takes ~40 ms.
+    // The app runs it on a background thread shortly after the first frame.
     let cards = store.load().unwrap_or_else(|e| fail("прочитать заметки", e));
 
     let mut options = eframe::NativeOptions {
@@ -173,6 +168,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Ebb",
         options,
-        Box::new(move |cc| Ok(Box::new(app::EbbApp::new(cc, store, cards, fresh, main_started, autostarted)))),
+        Box::new(move |cc| Ok(Box::new(app::EbbApp::new(cc, store, cards, main_started, autostarted)))),
     )
 }
