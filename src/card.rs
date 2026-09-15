@@ -130,6 +130,53 @@ impl Kind {
     }
 }
 
+/// Where an idea stands (product.txt §4). Kept in `cards.meta`, so it survives
+/// a change of kind and comes back when the card is an idea again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdeaStatus {
+    Potential,
+    Maybe,
+    Explore,
+    Important,
+}
+
+impl IdeaStatus {
+    pub const ALL: [IdeaStatus; 4] = [IdeaStatus::Potential, IdeaStatus::Maybe, IdeaStatus::Explore, IdeaStatus::Important];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IdeaStatus::Potential => "potential",
+            IdeaStatus::Maybe => "maybe",
+            IdeaStatus::Explore => "explore",
+            IdeaStatus::Important => "important",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<IdeaStatus> {
+        IdeaStatus::ALL.into_iter().find(|v| v.as_str() == s)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            IdeaStatus::Potential => "Потенциал",
+            IdeaStatus::Maybe => "Может быть",
+            IdeaStatus::Explore => "Изучить",
+            IdeaStatus::Important => "Важно",
+        }
+    }
+
+    /// Readable on a card (see theme::on_card).
+    pub fn color(self) -> Color32 {
+        let tint = match self {
+            IdeaStatus::Potential => Tint::Blue,
+            IdeaStatus::Maybe => Tint::Gray,
+            IdeaStatus::Explore => Tint::Teal,
+            IdeaStatus::Important => Tint::Orange,
+        };
+        crate::theme::on_card(tint.color())
+    }
+}
+
 /// A card's color: its kind's, or one picked by hand. Two palettes per color:
 /// the *mark* (dot, glyph, strip, border, glow, the primary button), and the
 /// *surface* the whole card is filled with, which is not the mark washed over
@@ -494,7 +541,14 @@ pub struct Card {
     pub placement: Placement,
     /// Picked by hand; `None` takes the kind's color.
     pub tint: Option<Tint>,
+    /// Folded to one line on the layer; `size` stays what it opens to.
+    pub collapsed: bool,
+    /// Set while it was an idea; shown only while it is one.
+    pub idea_status: Option<IdeaStatus>,
 }
+
+/// Height of a collapsed card.
+pub const COLLAPSED_H: f32 = 40.0;
 
 impl Card {
     /// The card's color: picked by hand, else its kind's.
@@ -503,6 +557,21 @@ impl Card {
     }
 
     /// The mark color of [`Card::hue`].
+    /// The size the card takes on the layer: one line while collapsed.
+    pub fn shown_size(&self) -> Vec2 {
+        if self.collapsed { vec2(self.size.x, COLLAPSED_H) } else { self.size }
+    }
+
+    /// The line a collapsed card shows: the first line of its text as it reads;
+    /// for a Private card, its label (the layer never holds the value).
+    pub fn collapsed_line(&self) -> String {
+        if self.kind == Kind::Private {
+            return if self.title.is_empty() { PRIVATE_PLACEHOLDER.to_owned() } else { self.title.clone() };
+        }
+        let text = if self.title.is_empty() { self.body.clone() } else { format!("{}\n{}", self.title, self.body) };
+        crate::rich_text::strip_markup(&text).lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().to_owned()
+    }
+
     pub fn accent(&self) -> Color32 {
         self.hue().color()
     }
@@ -590,6 +659,63 @@ pub fn prompt_name(body: &str) -> Option<(&str, &str)> {
     let (first, rest) = body.split_once('\n')?;
     let (first, rest) = (first.trim(), rest.trim());
     (!first.is_empty() && !rest.is_empty() && first.chars().count() <= 80).then_some((first, rest))
+}
+
+/// `{{name}}` placeholders in a Prompt: the byte range of each and its name.
+/// A name is what's between the braces, trimmed: one line, no braces, ≤ 40 chars.
+fn prompt_placeholders(text: &str) -> Vec<(std::ops::Range<usize>, &str)> {
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(open) = text[from..].find("{{").map(|i| from + i) {
+        let Some(close) = text[open + 2..].find("}}").map(|i| open + 2 + i) else { break };
+        let inner = &text[open + 2..close];
+        let name = inner.trim();
+        let valid = !name.is_empty() && name.chars().count() <= 40 && !inner.contains(['{', '}', '\n']);
+        if valid {
+            found.push((open..close + 2, name));
+            from = close + 2;
+        } else {
+            // "{{{x}}}" or a stray "{{": look again one brace on.
+            from = open + 1;
+        }
+    }
+    found
+}
+
+/// A Prompt's variables, each once, in the order they first appear.
+pub fn prompt_variables(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for (_, name) in prompt_placeholders(text) {
+        if !names.iter().any(|n| n == name) {
+            names.push(name.to_owned());
+        }
+    }
+    names
+}
+
+/// The Prompt with each `{{name}}` replaced by its value; names without one stay as written.
+pub fn fill_prompt(text: &str, values: &[(String, String)]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for (range, name) in prompt_placeholders(text) {
+        if let Some((_, value)) = values.iter().find(|(n, _)| n == name) {
+            out.push_str(&text[last..range.start]);
+            out.push_str(value);
+            last = range.end;
+        }
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
+/// What copying a Prompt takes: its text without the name line.
+pub fn prompt_text(title: &str, body: &str) -> String {
+    let full = if title.is_empty() { body.to_owned() } else { format!("{title}\n{body}") };
+    let full = crate::rich_text::strip_markup(&full);
+    match prompt_name(&full) {
+        Some((_, rest)) => rest.to_owned(),
+        None => full.trim().to_owned(),
+    }
 }
 
 /// What a hidden Private card may show: its title, or else the first line when
@@ -821,7 +947,7 @@ pub fn free_slot_for(cards: &[Card], size: Vec2, area: Vec2) -> Pos2 {
             if !cards
                 .iter()
                 .filter(|c| !c.archived)
-                .any(|c| egui::Rect::from_min_size(c.pos, c.size).intersects(slot))
+                .any(|c| egui::Rect::from_min_size(c.pos, c.shown_size()).intersects(slot))
             {
                 return p;
             }
@@ -850,7 +976,7 @@ pub fn beside(cards: &[Card], of: &Card, area: Vec2) -> Pos2 {
                 && !cards
                     .iter()
                     .filter(|c| !c.archived)
-                    .any(|c| egui::Rect::from_min_size(c.pos, c.size).intersects(slot))
+                    .any(|c| egui::Rect::from_min_size(c.pos, c.shown_size()).intersects(slot))
         })
         .unwrap_or_else(|| free_slot_for(cards, of.size, area))
 }
@@ -1083,7 +1209,25 @@ mod tests {
             review_at: None,
             placement: Placement::Manual,
             tint: None,
+            collapsed: false,
+            idea_status: None,
         }
+    }
+
+    #[test]
+    fn collapsed_card_shows_its_first_line_and_takes_one_row() {
+        let mut card = card_at(1, 0.0, 0.0);
+        card.body = "\n  **Купить** молоко  \nи хлеб".to_owned();
+        card.collapsed = true;
+        assert_eq!(card.collapsed_line(), "Купить молоко");
+        assert_eq!(card.shown_size(), vec2(DEFAULT_SIZE.x, COLLAPSED_H));
+        // The slot under a collapsed card is free past its one row.
+        let below = free_slot_for(std::slice::from_ref(&card), vec2(DEFAULT_SIZE.x, 40.0), vec2(DEFAULT_SIZE.x + 64.0, 400.0));
+        assert!(below.y < DEFAULT_SIZE.y, "{below:?}");
+        card.kind = Kind::Private;
+        card.title = "Wi-Fi офис".to_owned();
+        card.body.clear();
+        assert_eq!(card.collapsed_line(), "Wi-Fi офис");
     }
 
     #[test]
@@ -1118,6 +1262,25 @@ mod tests {
     fn prompt_names() {
         assert_eq!(prompt_name("Ревью кода\nПосмотри на {{diff}}"), Some(("Ревью кода", "Посмотри на {{diff}}")));
         assert_eq!(prompt_name("одна строка"), None);
+    }
+
+    #[test]
+    fn prompt_variables_are_found_once_and_filled() {
+        let text = "Напиши о {{topic}} в тоне {{ tone }}. Ещё раз: {{topic}}. {{}} и {{\nнет}} — не переменные.";
+        assert_eq!(prompt_variables(text), ["topic", "tone"]);
+        let values = [("topic".to_owned(), "SQLite".to_owned()), ("tone".to_owned(), "сухом".to_owned())];
+        assert_eq!(fill_prompt(text, &values), "Напиши о SQLite в тоне сухом. Ещё раз: SQLite. {{}} и {{\nнет}} — не переменные.");
+        // A variable without a value stays as written; extra braces around one are kept.
+        assert_eq!(fill_prompt("{{a}} {{b}}", &values[..0]), "{{a}} {{b}}");
+        assert_eq!(prompt_variables("{{{x}}}"), ["x"]);
+        assert_eq!(fill_prompt("{{{x}}}", &[("x".to_owned(), "1".to_owned())]), "{1}");
+        assert!(prompt_variables("{{ не закрыта").is_empty());
+    }
+
+    #[test]
+    fn copying_a_prompt_leaves_out_its_name() {
+        assert_eq!(prompt_text("", "Ревью кода\nПосмотри на **{{diff}}**"), "Посмотри на {{diff}}");
+        assert_eq!(prompt_text("", "Переведи {{text}}"), "Переведи {{text}}");
     }
 
     #[test]
