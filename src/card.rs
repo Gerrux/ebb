@@ -725,6 +725,12 @@ fn is_reminder(lower: &str) -> bool {
 
 /// Place a new card at the first free slot of a coarse grid.
 pub fn free_slot(cards: &[Card], area: Vec2) -> Pos2 {
+    free_slot_for(cards, DEFAULT_SIZE, area)
+}
+
+/// A free grid slot for a card of `size` (a card back from the archive keeps
+/// the size it had, so the slot must hold that, not the default).
+pub fn free_slot_for(cards: &[Card], size: Vec2, area: Vec2) -> Pos2 {
     let step = vec2(DEFAULT_SIZE.x + 16.0, DEFAULT_SIZE.y + 16.0);
     let origin = pos2(32.0, 72.0);
     let cols = ((area.x - origin.x) / step.x).floor().max(1.0) as usize;
@@ -732,7 +738,11 @@ pub fn free_slot(cards: &[Card], area: Vec2) -> Pos2 {
     for row in 0..rows {
         for col in 0..cols {
             let p = origin + vec2(col as f32 * step.x, row as f32 * step.y);
-            let slot = egui::Rect::from_min_size(p, DEFAULT_SIZE);
+            let slot = egui::Rect::from_min_size(p, size);
+            // Past the layer's edge only when nothing larger could fit at all.
+            if (slot.max.x > area.x || slot.max.y > area.y) && (col > 0 || row > 0) {
+                continue;
+            }
             if !cards
                 .iter()
                 .filter(|c| !c.archived)
@@ -767,7 +777,7 @@ pub fn beside(cards: &[Card], of: &Card, area: Vec2) -> Pos2 {
                     .filter(|c| !c.archived)
                     .any(|c| egui::Rect::from_min_size(c.pos, c.size).intersects(slot))
         })
-        .unwrap_or_else(|| free_slot(cards, area))
+        .unwrap_or_else(|| free_slot_for(cards, of.size, area))
 }
 
 /// Space between cards that stick side by side: none, they sit edge to edge.
@@ -1117,6 +1127,19 @@ mod tests {
         cards.push(card_at(2, first.x, first.y));
         let second = free_slot(&cards, area);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn free_slot_holds_a_card_larger_than_default() {
+        let area = vec2(1200.0, 800.0);
+        // The first grid slot is free for a default card, but a card twice as
+        // wide placed there would run into the card in the second column.
+        let cards = vec![card_at(1, 32.0 + DEFAULT_SIZE.x + 16.0, 72.0)];
+        let big = vec2(DEFAULT_SIZE.x * 2.0, DEFAULT_SIZE.y);
+        let p = free_slot_for(&cards, big, area);
+        let slot = egui::Rect::from_min_size(p, big);
+        assert!(!egui::Rect::from_min_size(cards[0].pos, cards[0].size).intersects(slot));
+        assert!(slot.max.x <= area.x && slot.max.y <= area.y);
     }
 
     #[test]

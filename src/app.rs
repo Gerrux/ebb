@@ -243,8 +243,8 @@ impl EbbApp {
         cards.iter_mut().filter(|c| fresh.contains(&c.id)).for_each(|c| c.pos = away);
         for id in &fresh {
             let Some(idx) = cards.iter().position(|c| c.id == *id) else { continue };
-            cards[idx].pos = card::free_slot(&cards, full_area);
             cards[idx].size = cards[idx].size.max(MIN_SIZE);
+            cards[idx].pos = card::free_slot_for(&cards, cards[idx].size, full_area);
             if let Err(e) = store.save(&cards[idx]) {
                 eprintln!("save failed: {e}");
             }
@@ -1283,9 +1283,10 @@ impl EbbApp {
                 let Ok(Some(mut card)) = self.store.card(id) else { return };
                 card.archived = false;
                 card.placement = Placement::Manual;
-                card.pos = card::free_slot(&self.cards, self.full_area);
                 card.size = card.size.max(MIN_SIZE);
+                card.pos = card::free_slot_for(&self.cards, card.size, self.full_area);
                 self.appearing.push((card.id, Instant::now()));
+                self.leaving.retain(|(old, _)| old.id != card.id);
                 self.cards.push(card);
                 let idx = self.cards.len() - 1;
                 self.save(idx);
@@ -1310,6 +1311,8 @@ impl EbbApp {
             }
             let gone = self.cards.drain(..).filter(|old| !cards.iter().any(|c| c.id == old.id));
             self.leaving.extend(gone.map(|c| (c, now)));
+            // Back before its leave animation ended (a quick Undo): drawn once, not twice.
+            self.leaving.retain(|(old, _)| !cards.iter().any(|c| c.id == old.id));
             self.cards = cards;
             // A card back from the archive (pinned in the review, say) keeps its old
             // spot if it's still on the layer; an imported one never had one.
@@ -1319,7 +1322,7 @@ impl EbbApp {
                 let fresh = self.appearing.iter().any(|(id, t)| *id == c.id && *t == now);
                 if fresh && (c.pos == Pos2::ZERO || !layer.contains_rect(Rect::from_min_size(c.pos, c.size))) {
                     self.cards[idx].pos = pos2(-1.0e5, -1.0e5);
-                    self.cards[idx].pos = card::free_slot(&self.cards, self.full_area);
+                    self.cards[idx].pos = card::free_slot_for(&self.cards, self.cards[idx].size, self.full_area);
                     self.save(idx);
                 }
             }
