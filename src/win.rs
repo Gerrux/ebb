@@ -1,7 +1,7 @@
 //! Thin Win32 layer: backdrop effects, monitor placement, hotkeys, metrics.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -33,6 +33,8 @@ use windows::core::{BOOL, PCWSTR, w};
 
 /// Clipboard sequence number right after the last Private copy; 0 = none pending.
 static PRIVATE_CLIP: AtomicU32 = AtomicU32::new(0);
+/// Fingerprint of that copy's text, to recognize it after another app re-posts it.
+static PRIVATE_CLIP_PRINT: AtomicU64 = AtomicU64::new(0);
 const PRIVATE_CLIP_FOR: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Puts `value` in a movable global block, as SetClipboardData takes it.
@@ -56,6 +58,7 @@ fn clipboard_block<T: Copy>(value: &[T]) -> Option<HGLOBAL> {
 pub fn copy_private(text: &str) -> bool {
     let mut wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     let block = clipboard_block(&wide);
+    let fingerprint = clip_fingerprint(&wide[..wide.len() - 1]);
     wide.fill(0);
     let Some(mem) = block else { return false };
     let ok = unsafe {
@@ -89,28 +92,89 @@ pub fn copy_private(text: &str) -> bool {
         return false;
     }
     let sequence = unsafe { GetClipboardSequenceNumber() };
+    PRIVATE_CLIP_PRINT.store(fingerprint, Ordering::Relaxed);
     PRIVATE_CLIP.store(sequence, Ordering::Relaxed);
     std::thread::spawn(move || {
         std::thread::sleep(PRIVATE_CLIP_FOR);
-        if PRIVATE_CLIP.load(Ordering::Relaxed) == sequence {
-            clear_private_clipboard();
-        }
+        // Off the UI thread: a clipboard held by another app is waited out for a while.
+        clear_clipboard_if(sequence, 100, std::time::Duration::from_millis(100));
     });
     true
 }
 
-/// Empties the clipboard if it still holds the last Private value copied.
+/// Empties the clipboard if it still holds the last Private value copied
+/// (on exit: gives a busy clipboard only a moment).
 pub fn clear_private_clipboard() {
-    let sequence = PRIVATE_CLIP.swap(0, Ordering::Relaxed);
-    if sequence == 0 || unsafe { GetClipboardSequenceNumber() } != sequence {
-        return;
-    }
-    unsafe {
-        if OpenClipboard(None).is_ok() {
-            let _ = EmptyClipboard();
-            let _ = CloseClipboard();
+    clear_clipboard_if(PRIVATE_CLIP.load(Ordering::Relaxed), 5, std::time::Duration::from_millis(20));
+}
+
+/// Clears the copy made at `sequence` if it's still the latest Private copy and
+/// still on the clipboard: by sequence number, or by content when a clipboard
+/// manager or remote session has re-posted the same text since. The marker is
+/// dropped only once the clipboard could be opened, so a busy clipboard is retried.
+fn clear_clipboard_if(sequence: u32, attempts: u32, pause: std::time::Duration) {
+    for _ in 0..attempts {
+        if sequence == 0 || PRIVATE_CLIP.load(Ordering::Relaxed) != sequence {
+            return; // cleared already, or a newer Private copy owns the timer
         }
+        unsafe {
+            if OpenClipboard(None).is_ok() {
+                let ours = GetClipboardSequenceNumber() == sequence
+                    || clipboard_text_fingerprint() == Some(PRIVATE_CLIP_PRINT.load(Ordering::Relaxed));
+                if ours {
+                    let _ = EmptyClipboard();
+                }
+                let _ = CloseClipboard();
+                let _ = PRIVATE_CLIP.compare_exchange(sequence, 0, Ordering::Relaxed, Ordering::Relaxed);
+                return;
+            }
+        }
+        std::thread::sleep(pause);
     }
+}
+
+/// Keyed per process, so the value kept to recognize a copy says nothing on its own.
+fn clip_fingerprint(text: &[u16]) -> u64 {
+    use std::hash::BuildHasher;
+    static KEYS: std::sync::OnceLock<std::hash::RandomState> = std::sync::OnceLock::new();
+    KEYS.get_or_init(std::hash::RandomState::new).hash_one(text)
+}
+
+/// The fingerprint of the clipboard's text. The clipboard must be open.
+unsafe fn clipboard_text_fingerprint() -> Option<u64> {
+    use windows::Win32::System::DataExchange::GetClipboardData;
+    use windows::Win32::System::Memory::GlobalSize;
+    unsafe {
+        let data = GetClipboardData(u32::from(CF_UNICODETEXT.0)).ok()?;
+        let mem = HGLOBAL(data.0);
+        let ptr = GlobalLock(mem) as *const u16;
+        if ptr.is_null() {
+            return None;
+        }
+        let units = std::slice::from_raw_parts(ptr, GlobalSize(mem) / 2);
+        let len = units.iter().position(|&u| u == 0).unwrap_or(units.len());
+        let fingerprint = clip_fingerprint(&units[..len]);
+        let _ = GlobalUnlock(mem);
+        Some(fingerprint)
+    }
+}
+
+/// A blocking error dialog for failures before any window exists: release
+/// builds have no console, so a panic there would just be a launch that didn't happen.
+pub fn error_box(text: &str) {
+    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+    let text: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        MessageBoxW(None, PCWSTR(text.as_ptr()), w!("Ebb"), MB_OK | MB_ICONERROR);
+    }
+}
+
+/// Keeps a window out of screenshots and screen recording while a Private value
+/// is shown on it. Builds before Windows 10 2004 refuse the flag: best effort.
+pub fn exclude_from_capture(raw: isize, exclude: bool) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE};
+    let affinity = if exclude { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+    unsafe { SetWindowDisplayAffinity(hwnd(raw), affinity).is_ok() }
 }
 
 pub fn hwnd_of(handle: &impl HasWindowHandle) -> Option<isize> {

@@ -613,7 +613,54 @@ const REFERENCE_WORDS: &[&str] = &[
     "vpn", "ssh", "host", "server", "сервер", "endpoint", "path", "ip", "port", "порт",
 ];
 
+/// Looks like a credential: passwords, tokens, keys.
+pub fn looks_secret(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    const LABELS: &[&str] = &[
+        "пароль", "password", "passwd", "pass", "pwd", "логин", "login", "token", "токен", "api key",
+        "api_key", "apikey", "secret", "секрет", "private key", "pin", "пин",
+    ];
+    for label in LABELS {
+        for (start, _) in lower.match_indices(label) {
+            let before = lower[..start].chars().next_back();
+            let end = start + label.len();
+            let after = lower[end..].chars().next();
+            if before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                || after.is_some_and(|c| c.is_alphanumeric() || c == '_')
+            {
+                continue;
+            }
+
+            let suffix = &lower[end..];
+            let explicit = suffix.trim_start().starts_with(':') || suffix.trim_start().starts_with('=');
+            let value = suffix
+                .trim_start_matches(|c: char| c == ':' || c == '=' || c.is_whitespace())
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches(|c: char| c == '"' || c == '\'');
+            let length = value.chars().count();
+            let plausible_value = length >= 8
+                || (length >= 5 && value.chars().any(|c| c.is_ascii_digit()))
+                || (length >= 3 && value.chars().all(|c| c.is_ascii_digit()));
+            if (explicit && !value.is_empty()) || plausible_value {
+                return true;
+            }
+        }
+    }
+    // OpenAI-style keys: sk- followed by a long run of key characters.
+    lower.match_indices("sk-").any(|(i, _)| {
+        lower[i + 3..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').count() >= 20
+    })
+}
+
 pub fn parse_capture(input: &str) -> Parsed {
+    parse_capture_with(input, true)
+}
+
+/// `detect_secret` off: the user took the Private chip off a note that only
+/// looked like a credential; an explicit `private:` prefix still counts.
+pub fn parse_capture_with(input: &str, detect_secret: bool) -> Parsed {
     let text = input.trim();
     let lower = text.to_lowercase();
 
@@ -635,7 +682,10 @@ pub fn parse_capture(input: &str) -> Parsed {
             .split(|c: char| !c.is_alphanumeric() && c != '.' && c != ':' && c != '/')
             .filter(|w| !w.is_empty())
             .collect();
-        if lower.contains("http://") || lower.contains("https://") {
+        // A credential typed without a prefix is still encrypted, not indexed.
+        if detect_secret && looks_secret(&lower) {
+            kind = Kind::Private;
+        } else if lower.contains("http://") || lower.contains("https://") {
             kind = Kind::Link;
         } else if is_reminder(&lower) {
             kind = Kind::Reminder;
@@ -1042,6 +1092,13 @@ mod tests {
         );
         assert_eq!(parse_capture("https://egui.rs demo").kind, Kind::Link);
         assert_eq!(parse_capture("просто мысль").kind, Kind::Note);
+        // A credential without a prefix is Private unless the user took the chip off.
+        assert_eq!(parse_capture("wifi пароль qwerty123").kind, Kind::Private);
+        assert_eq!(parse_capture_with("wifi пароль qwerty123", false).kind, Kind::Note);
+        assert_eq!(parse_capture_with("секрет: qwerty123", false).kind, Kind::Private);
+        assert_eq!(parse_capture("идея: сменить пароль на роутере").kind, Kind::Idea);
+        assert!(!looks_secret("идея: сменить пароль на роутере"));
+        assert!(looks_secret("password: hunter2"));
     }
 
     #[test]

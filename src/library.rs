@@ -18,7 +18,7 @@ use crate::card::{Card, Kind};
 use crate::search;
 use crate::rich_text;
 use crate::resurface::{self, DAY, days_word};
-use crate::store::{Hit, ReviewAction, ReviewSnapshot, Scope, Store, TRASH_DAYS};
+use crate::store::{Hit, ReviewAction, ReviewSnapshot, STORE_FAILED, Scope, Store, TRASH_DAYS};
 use crate::theme;
 use crate::win::{self, Backdrop};
 
@@ -352,7 +352,10 @@ fn refresh(st: &mut LibraryState) {
     if st.store.is_none() {
         st.store = Store::open().ok();
     }
-    let Some(store) = st.store.as_ref() else { return };
+    let Some(store) = st.store.as_ref() else {
+        st.notice = Some((STORE_FAILED.into(), Instant::now()));
+        return;
+    };
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
     st.parsed = search::parse(&st.query, now, search::local_offset_secs());
     let scope = if st.tab == Tab::Trash { Scope::Trash } else { Scope::Archive };
@@ -535,30 +538,41 @@ fn days_ago(ts: i64) -> i64 {
 /// Primary: back to the layer / restore. Secondary: to the trash / delete forever.
 fn act(st: &mut LibraryState, primary: bool) {
     let Some(hit) = st.hits.get(st.selected).cloned() else { return };
-    let Some(store) = st.store.as_ref() else { return };
+    let Some(store) = st.store.as_ref() else {
+        st.notice = Some((STORE_FAILED.into(), Instant::now()));
+        return;
+    };
     match (st.tab, primary) {
         (Tab::Archive, true) => {
             st.outbox.push(Request::Open(hit.id));
             st.notice = Some(("Возвращено на слой".into(), Instant::now()));
         }
         (Tab::Archive, false) => {
-            let _ = store.delete(hit.id);
+            let notice = match store.delete(hit.id) {
+                Ok(()) => "Перемещено в корзину",
+                Err(_) => "Не удалось переместить в корзину",
+            };
             st.outbox.push(Request::Changed);
-            st.notice = Some(("Перемещено в корзину".into(), Instant::now()));
+            st.notice = Some((notice.into(), Instant::now()));
         }
         (Tab::Trash, true) => {
-            let _ = store.restore(hit.id);
+            let notice = match store.restore(hit.id) {
+                Ok(()) => format!("Восстановлено {}", if hit.archived { "в архив" } else { "на слой" }),
+                Err(_) => "Не удалось восстановить".into(),
+            };
             st.outbox.push(Request::Changed);
-            let place = if hit.archived { "в архив" } else { "на слой" };
-            st.notice = Some((format!("Восстановлено {place}"), Instant::now()));
+            st.notice = Some((notice, Instant::now()));
         }
         (Tab::Trash, false) => {
             if st.confirm != Some(Confirm::Purge(hit.id)) {
                 st.confirm = Some(Confirm::Purge(hit.id));
                 return;
             }
-            let _ = store.purge(hit.id);
-            st.notice = Some(("Удалено навсегда".into(), Instant::now()));
+            let notice = match store.purge(hit.id) {
+                Ok(()) => "Удалено навсегда",
+                Err(_) => "Не удалось удалить",
+            };
+            st.notice = Some((notice.into(), Instant::now()));
             st.confirm = None;
         }
         (Tab::Settings, _) => return,
@@ -611,11 +625,10 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
     });
     if empty_clicked {
         if st.confirm == Some(Confirm::EmptyTrash) {
-            if let Some(store) = st.store.as_ref() {
-                let _ = store.empty_trash();
-            }
+            let emptied = st.store.as_ref().is_some_and(|store| store.empty_trash().is_ok());
             st.confirm = None;
-            st.notice = Some(("Корзина очищена".into(), Instant::now()));
+            let notice = if emptied { "Корзина очищена" } else { "Не удалось очистить корзину" };
+            st.notice = Some((notice.into(), Instant::now()));
             st.searched = None;
         } else {
             st.confirm = Some(Confirm::EmptyTrash);

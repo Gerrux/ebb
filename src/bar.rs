@@ -15,9 +15,9 @@ use egui::{
     Ui, UiBuilder, Vec2, ViewportId, pos2, vec2,
 };
 
-use crate::card::{Kind, parse_capture};
+use crate::card::{Kind, Placement, parse_capture_with};
 use crate::search::{self, MARK_END, MARK_START};
-use crate::store::{Hit, Store};
+use crate::store::{Hit, STORE_FAILED, Store};
 use crate::theme;
 use crate::win;
 
@@ -42,7 +42,8 @@ pub enum Mode {
 
 /// Requests for the layer, applied by the root viewport.
 pub enum Outbox {
-    Captured(String),
+    /// Captured text; `true` when the Private chip was taken off it.
+    Captured(String, bool),
     /// Show this card on the layer (restoring it from the archive if needed).
     Open(i64),
     /// Cards changed in the database (pin, archive, delete): reload.
@@ -77,6 +78,8 @@ pub struct BarState {
 
     // Capture
     text: String,
+    /// The Private chip was taken off: the text only looked like a credential.
+    plain: bool,
 
     // Search
     query: String,
@@ -127,6 +130,14 @@ impl BarState {
             self.latency_ms = None;
             self.fading_in = false;
             Press::Show
+        }
+    }
+
+    /// A capture that couldn't be saved comes back into the field, unless
+    /// something new was typed since.
+    pub fn restore_capture(&mut self, text: String, plain: bool) {
+        if self.text.trim().is_empty() {
+            (self.text, self.plain) = (text, plain);
         }
     }
 
@@ -200,7 +211,12 @@ fn capture_ui(ui: &mut Ui, st: &mut BarState) -> bool {
         )
     });
 
-    let parsed = parse_capture(&st.text);
+    if st.text.trim().is_empty() {
+        st.plain = false;
+    }
+    let parsed = parse_capture_with(&st.text, !st.plain);
+    // Detected rather than asked for with a prefix: the chip can be taken off.
+    let detected = parsed.kind == Kind::Private && parse_capture_with(&st.text, false).kind != Kind::Private;
     let inner = ui.max_rect().shrink2(vec2(18.0, 14.0));
     let mut edit_resp = None;
     ui.scope_builder(UiBuilder::new().max_rect(inner), |ui| {
@@ -224,6 +240,18 @@ fn capture_ui(ui: &mut Ui, st: &mut BarState) -> bool {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(parsed.kind.icon()).font(theme::icons(11.0)).color(parsed.kind.accent()));
                 ui.label(RichText::new(parsed.kind.label()).size(12.0).color(theme::dim()));
+                if detected {
+                    let off = ui
+                        .add(egui::Label::new(RichText::new("\u{E711}").font(theme::icons(10.0)).color(theme::dim())).sense(Sense::click()))
+                        .on_hover_text("Похоже на секрет. Сохранить обычной заметкой");
+                    if off.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if off.clicked() {
+                        st.plain = true;
+                        st.request_focus = true;
+                    }
+                }
                 for tag in &parsed.tags {
                     ui.label(RichText::new(format!("#{tag}")).size(12.0).color(theme::muted()));
                 }
@@ -245,7 +273,7 @@ fn capture_ui(ui: &mut Ui, st: &mut BarState) -> bool {
     }
     if submit && !st.text.trim().is_empty() {
         let text = std::mem::take(&mut st.text);
-        st.outbox.push(Outbox::Captured(text));
+        st.outbox.push(Outbox::Captured(text, std::mem::take(&mut st.plain)));
         return true;
     }
     cancel
@@ -280,6 +308,9 @@ fn run_search(st: &mut BarState) {
     }
     if st.store.is_none() {
         st.store = Store::open().ok();
+        if st.store.is_none() {
+            st.notice = Some((STORE_FAILED.into(), Instant::now()));
+        }
     }
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
     st.parsed = search::parse(&st.query, now, st.utc_offset);
@@ -303,7 +334,10 @@ fn run_search(st: &mut BarState) {
 
 fn perform(ui: &Ui, st: &mut BarState, kind: ActionKind) -> bool {
     let Some(hit) = st.hits.get(st.selected).cloned() else { return false };
-    let Some(store) = st.store.as_ref() else { return false };
+    let Some(store) = st.store.as_ref() else {
+        st.notice = Some((STORE_FAILED.into(), Instant::now()));
+        return false;
+    };
     match kind {
         ActionKind::Open => {
             st.outbox.push(Outbox::Open(hit.id));
@@ -325,29 +359,40 @@ fn perform(ui: &Ui, st: &mut BarState, kind: ActionKind) -> bool {
             }
         }
         ActionKind::Pin => {
-            if let Ok(Some(mut card)) = store.card(hit.id) {
+            let saved = store.card(hit.id).and_then(|card| {
+                let Some(mut card) = card else { return Ok(()) };
                 card.pinned ^= true;
-                let _ = store.save(&card);
-                st.outbox.push(Outbox::Changed);
-                st.searched = None;
+                // As on the layer: a pinned Rediscover card mustn't go back to the archive tomorrow.
+                card.placement = if card.pinned { Placement::Pinned } else { Placement::Manual };
+                store.save(&card)
+            });
+            if saved.is_err() {
+                st.notice = Some(("Не удалось закрепить".into(), Instant::now()));
             }
+            st.outbox.push(Outbox::Changed);
+            st.searched = None;
         }
         ActionKind::Archive => {
             if hit.archived {
                 st.outbox.push(Outbox::Open(hit.id));
                 st.notice = Some(("Возвращено на слой".into(), Instant::now()));
-            } else if let Ok(Some(mut card)) = store.card(hit.id) {
-                card.archived = true;
-                let _ = store.save(&card);
+            } else {
+                let notice = match store.set_archived(hit.id, true) {
+                    Ok(()) => "Убрано в архив",
+                    Err(_) => "Не удалось убрать в архив",
+                };
                 st.outbox.push(Outbox::Changed);
-                st.notice = Some(("Убрано в архив".into(), Instant::now()));
+                st.notice = Some((notice.into(), Instant::now()));
             }
             st.searched = None;
         }
         ActionKind::Delete => {
-            let _ = store.delete(hit.id);
+            let notice = match store.delete(hit.id) {
+                Ok(()) => "В корзине",
+                Err(_) => "Не удалось удалить",
+            };
             st.outbox.push(Outbox::Changed);
-            st.notice = Some(("В корзине".into(), Instant::now()));
+            st.notice = Some((notice.into(), Instant::now()));
             st.action = None;
             st.searched = None;
         }

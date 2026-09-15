@@ -1,6 +1,6 @@
 //! SQLite persistence.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use egui::{pos2, vec2};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -159,33 +159,64 @@ fn now() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
+/// Shown when a window can't open its own connection to the database.
+pub const STORE_FAILED: &str = "База заметок недоступна";
+
+/// The database every connection opens: `%LOCALAPPDATA%\Ebb\ebb.db`, or the
+/// former name's database while it couldn't be moved yet (see
+/// `migrate_legacy_data`), so an empty new one never shadows the user's notes.
 pub fn db_path() -> PathBuf {
     let base = std::env::var_os("LOCALAPPDATA").map_or_else(|| PathBuf::from("."), PathBuf::from);
-    base.join("Ebb").join("ebb.db")
+    let (new_db, old_db) = (base.join("Ebb").join("ebb.db"), legacy_db(&base));
+    if !new_db.exists() && old_db.exists() { old_db } else { new_db }
+}
+
+fn legacy_db(base: &Path) -> PathBuf {
+    base.join("Ambient").join("ambient.db")
+}
+
+fn wal_of(db: &Path) -> PathBuf {
+    let mut name = db.as_os_str().to_owned();
+    name.push("-wal");
+    name.into()
 }
 
 /// Moves data left by the app's former name (`%LOCALAPPDATA%\Ambient\ambient.db`)
-/// to `db_path()`. Runs once, before the first `Store::open`; does nothing when the
-/// new database already exists. A locked old database (an old build still
-/// running) leaves everything in place for the next launch.
+/// to `%LOCALAPPDATA%\Ebb\ebb.db`. Runs before the first `Store::open`. A locked
+/// old database (an old build still running) stays where it is and in use
+/// (`db_path`) until a later launch can move it.
 pub fn migrate_legacy_data() {
-    let new_db = db_path();
-    let (Some(new_dir), Some(base)) = (new_db.parent(), new_db.parent().and_then(|p| p.parent())) else {
-        return;
-    };
-    let old_dir = base.join("Ambient");
-    if new_db.exists() || !old_dir.join("ambient.db").exists() || std::fs::create_dir_all(new_dir).is_err() {
+    let base = std::env::var_os("LOCALAPPDATA").map_or_else(|| PathBuf::from("."), PathBuf::from);
+    migrate_legacy_at(&legacy_db(&base), &base.join("Ebb").join("ebb.db"));
+}
+
+fn migrate_legacy_at(old_db: &Path, new_db: &Path) {
+    let (Some(old_dir), Some(new_dir)) = (old_db.parent(), new_db.parent()) else { return };
+    if new_db.exists() {
+        // A move cut short right after the database itself: its log still holds
+        // the last commits and must be next to it before anything opens it.
+        if !old_db.exists() && wal_of(old_db).exists() && !wal_of(new_db).exists() {
+            let _ = std::fs::rename(wal_of(old_db), wal_of(new_db));
+        }
         return;
     }
-    if std::fs::rename(old_dir.join("ambient.db"), &new_db).is_err() {
+    if !old_db.exists() || std::fs::create_dir_all(new_dir).is_err() {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(&old_dir) else { return };
+    if std::fs::rename(old_db, new_db).is_err() {
+        return;
+    }
+    if wal_of(old_db).exists() && std::fs::rename(wal_of(old_db), wal_of(new_db)).is_err() {
+        // Opened without its log the database would lose commits: put it back.
+        let _ = std::fs::rename(new_db, old_db);
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(old_dir) else { return };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().replacen("ambient.db", "ebb.db", 1);
         let _ = std::fs::rename(entry.path(), new_dir.join(name));
     }
-    let _ = std::fs::remove_dir(&old_dir);
+    let _ = std::fs::remove_dir(old_dir);
 }
 
 impl Store {
@@ -431,11 +462,12 @@ impl Store {
 
     /// Decrypts a Private value only for an explicit reveal/copy action.
     pub fn secret(&self, id: i64) -> rusqlite::Result<Option<String>> {
-        let row: Option<Vec<u8>> = self
+        let row: Option<Option<Vec<u8>>> = self
             .conn
             .query_row("SELECT secret FROM cards WHERE id=?1 AND kind='private'", [id], |r| r.get(0))
             .optional()?;
-        row.map(|bytes| crate::vault::unprotect(id, &bytes).map_err(vault_error)).transpose()
+        // A Private card whose text was cleared has no value at all.
+        row.flatten().map(|bytes| crate::vault::unprotect(id, &bytes).map_err(vault_error)).transpose()
     }
 
     /// Puts a card above every other on the layer, for the next launch too.
@@ -460,6 +492,9 @@ impl Store {
             return Ok(Vec::new());
         }
         let tx = self.conn.unchecked_transaction()?;
+        // Pinned since it came back (older builds pinned from search without
+        // touching placement): it's the user's now, never taken back.
+        tx.execute("UPDATE cards SET placement='pinned' WHERE placement='rediscover' AND pinned=1", [])?;
         // Opened since it came back: it stays, as if placed by hand. Either way a
         // reminder that brought it has been shown and doesn't bring it again.
         tx.execute(
@@ -843,6 +878,13 @@ impl Store {
         Ok(())
     }
 
+    /// Drops a Private card's encrypted value: `save` can't tell a cleared
+    /// editor from a card that never carries its value in memory.
+    pub fn clear_secret(&self, id: i64) -> rusqlite::Result<()> {
+        self.conn.execute("UPDATE cards SET secret=NULL, updated_at=?2 WHERE id=?1", params![id, now()])?;
+        Ok(())
+    }
+
     /// Moves a card to the trash.
     pub fn delete(&self, id: i64) -> rusqlite::Result<()> {
         self.conn.execute("UPDATE cards SET deleted_at=?2 WHERE id=?1", params![id, now()])?;
@@ -1066,6 +1108,63 @@ secret");
         assert_eq!(live, [(ideas[0].id, "manual"), (ideas[3].id, "rediscover")]);
         let ignored: i64 = store.conn.query_row("SELECT ignored_count FROM cards WHERE id=?1", [ideas[1].id], |r| r.get(0)).unwrap();
         assert_eq!(ignored, 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_card_pinned_while_rediscovered_stays_on_the_layer() {
+        let (store, dir) = temp_store("pinned-rediscover");
+        let idea = add(&store, "идея: annual pricing");
+        store.set_archived(idea.id, true).unwrap();
+        store.conn.execute("UPDATE cards SET created_at=1, last_viewed_at=1", []).unwrap();
+        let day = 100 * DAY;
+        assert_eq!(store.refresh_resurfacing(day, 0, 3).unwrap().len(), 1);
+        // As search used to pin it: the flag without the placement.
+        store.conn.execute("UPDATE cards SET pinned=1 WHERE id=?1", [idea.id]).unwrap();
+        store.refresh_resurfacing(day + DAY, 0, 3).unwrap();
+        let card = store.card(idea.id).unwrap().unwrap();
+        assert!(!card.archived);
+        assert_eq!(card.placement, Placement::Pinned);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn emptied_private_card_keeps_no_value() {
+        let (store, dir) = temp_store("private-clear");
+        let card = add(&store, "секрет: Wi-Fi\nhunter2");
+        store.clear_secret(card.id).unwrap();
+        assert_eq!(store.secret(card.id).unwrap(), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn legacy_database_moves_with_its_log_or_not_at_all() {
+        let dir = std::env::temp_dir().join(format!("ebb-test-legacy-move-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (old_db, new_db) = (dir.join("Ambient").join("ambient.db"), dir.join("Ebb").join("ebb.db"));
+        std::fs::create_dir_all(old_db.parent().unwrap()).unwrap();
+        std::fs::write(&old_db, "db").unwrap();
+        std::fs::write(wal_of(&old_db), "wal").unwrap();
+
+        // Held open by an old build: nothing moves, nothing new is created.
+        // As SQLite opens it: shared for reading and writing, not for delete/rename.
+        let held = std::os::windows::fs::OpenOptionsExt::share_mode(std::fs::OpenOptions::new().read(true), 0x1 | 0x2)
+            .open(&old_db)
+            .unwrap();
+        migrate_legacy_at(&old_db, &new_db);
+        assert!(old_db.exists() && !new_db.exists());
+        drop(held);
+
+        migrate_legacy_at(&old_db, &new_db);
+        assert_eq!(std::fs::read_to_string(&new_db).unwrap(), "db");
+        assert_eq!(std::fs::read_to_string(wal_of(&new_db)).unwrap(), "wal");
+        assert!(!old_db.parent().unwrap().exists());
+
+        // Cut short after the database: the log follows on the next launch.
+        std::fs::create_dir_all(old_db.parent().unwrap()).unwrap();
+        std::fs::rename(wal_of(&new_db), wal_of(&old_db)).unwrap();
+        migrate_legacy_at(&old_db, &new_db);
+        assert!(wal_of(&new_db).exists() && !wal_of(&old_db).exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 

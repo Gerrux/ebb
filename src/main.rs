@@ -61,7 +61,14 @@ fn main() -> eframe::Result {
     }
 
     store::migrate_legacy_data();
-    let store = Store::open().expect("open database");
+    let fail = |what: &str, e: rusqlite::Error| -> ! {
+        win::error_box(&format!(
+            "Не удалось {what}:\n{e}\n\n{}\n\nЗаметки не тронуты. Проверь, что диск доступен и на нём есть место, и запусти Ebb снова.",
+            store::db_path().display()
+        ));
+        std::process::exit(1)
+    };
+    let store = Store::open().unwrap_or_else(|e| fail("открыть базу заметок", e));
     let fresh = match store.refresh_resurfacing(resurface::unix_now(), search::local_offset_secs(), resurface::REDISCOVER_LIMIT) {
         Ok(picks) => picks.into_iter().map(|p| p.id).collect(),
         Err(e) => {
@@ -69,7 +76,7 @@ fn main() -> eframe::Result {
             Vec::new()
         }
     };
-    let cards = store.load().expect("load cards");
+    let cards = store.load().unwrap_or_else(|e| fail("прочитать заметки", e));
 
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

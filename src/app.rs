@@ -16,7 +16,7 @@ use crate::import_ui::StickyImport;
 use crate::library::{self, LibraryState, Request, Tab};
 use crate::rich_text;
 use crate::shell::{self, Event};
-use crate::card::{self, Card, Kind, MIN_SIZE, Placement, Sides, parse_capture};
+use crate::card::{self, Card, Kind, MIN_SIZE, Placement, Sides};
 use crate::store::Store;
 use crate::theme;
 use crate::win::{self, Backdrop};
@@ -161,6 +161,10 @@ pub struct EbbApp {
     revealed: Option<(i64, Instant)>,
     /// Plaintext is kept only for the short reveal window; it is never part of Card.
     revealed_text: Option<(i64, String)>,
+    /// The layer window is currently kept out of screen capture (while revealing).
+    capture_excluded: bool,
+    /// Layer focus last frame: a reveal ends when the layer loses focus.
+    was_focused: Option<bool>,
     /// Card just opened from search: outlined for a moment.
     highlighted: Option<(i64, Instant)>,
     toast: Option<Toast>,
@@ -284,6 +288,8 @@ impl EbbApp {
             active: None,
             revealed: None,
             revealed_text: None,
+            capture_excluded: false,
+            was_focused: None,
             highlighted: None,
             toast: None,
             appearing,
@@ -301,25 +307,39 @@ impl EbbApp {
         ui.max_rect().size()
     }
 
-    fn add_from_capture(&mut self, text: &str, area: Vec2) {
-        let parsed = parse_capture(text);
+    fn add_from_capture(&mut self, text: String, plain: bool, area: Vec2) {
+        let parsed = card::parse_capture_with(&text, !plain);
         if parsed.body.is_empty() && parsed.title.is_empty() {
             return;
         }
         let pos = card::free_slot(&self.cards, area);
-        match self.store.insert(&parsed, pos) {
-            Ok(c) => {
+        let inserted = self.store.insert(&parsed, pos);
+        match self.report(inserted, "сохранить заметку, текст остался в окне захвата") {
+            Some(c) => {
                 self.appearing.push((c.id, Instant::now()));
                 self.cards.push(c);
             }
-            Err(e) => eprintln!("insert failed: {e}"),
+            None => self.bar.lock().unwrap().restore_capture(text, plain),
         }
     }
 
-    fn save(&self, idx: usize) {
-        if let Err(e) = self.store.save(&self.cards[idx]) {
-            eprintln!("save failed: {e}");
+    /// A write that didn't reach the database is said on screen: release builds
+    /// have no console for the error to go to.
+    fn report<T>(&mut self, result: rusqlite::Result<T>, what: &str) -> Option<T> {
+        match result {
+            Ok(v) => Some(v),
+            Err(e) => {
+                eprintln!("{what}: {e}");
+                self.toast = Some(Toast::new(format!("Не удалось {what}"), None));
+                None
+            }
         }
+    }
+
+    /// Whether the card's change reached the database.
+    fn save(&mut self, idx: usize) -> bool {
+        let saved = self.store.save(&self.cards[idx]);
+        self.report(saved, "сохранить изменения").is_some()
     }
 
     fn commit_edit(&mut self) {
@@ -338,6 +358,11 @@ impl EbbApp {
             .collect();
         c.body = buf;
         self.save(idx);
+        if self.cards[idx].kind == Kind::Private && self.cards[idx].body.is_empty() {
+            // Emptied in the editor: the old value must not stay behind to show or copy.
+            let cleared = self.store.clear_secret(id);
+            self.report(cleared, "стереть секрет");
+        }
         if self.cards[idx].kind == Kind::Private {
             // Encrypted by save; on the layer only the label stays in the open.
             let c = &mut self.cards[idx];
@@ -362,8 +387,8 @@ impl EbbApp {
             self.revealed_text = None;
         }
         // The store splits the text into label and secret, or joins them back.
-        if let Err(e) = self.store.set_kind(id, kind) {
-            eprintln!("set kind failed: {e}");
+        let changed = self.store.set_kind(id, kind);
+        if self.report(changed, "сменить тип").is_none() {
             return;
         }
         if let Ok(Some(stored)) = self.store.card(id) {
@@ -649,8 +674,13 @@ impl EbbApp {
         });
         let area = self.area(ui);
 
+        // Only a change counts: a layer shown without ever being activated has
+        // no focus to lose, and its reveal ends on the timer.
+        let focused = ui.input(|i| i.viewport().focused);
+        let focus_lost = self.was_focused == Some(true) && focused == Some(false);
+        self.was_focused = focused;
         if let Some((_, t)) = self.revealed {
-            if t.elapsed() >= REVEAL_FOR {
+            if focus_lost || t.elapsed() >= REVEAL_FOR {
                 self.revealed = None;
                 self.revealed_text = None;
             } else {
@@ -780,28 +810,34 @@ impl EbbApp {
                         src.body
                     };
                     let parsed = card::Parsed { kind: src.kind, title: src.title, body, tags: src.tags };
-                    match self.store.insert(&parsed, pos) {
-                        Ok(mut copy) => {
-                            copy.size = src.size;
-                            copy.tint = src.tint;
-                            self.appearing.push((copy.id, Instant::now()));
-                            self.cards.push(copy);
-                            self.save(self.cards.len() - 1);
-                            self.library.lock().unwrap().invalidate();
-                            self.bar.lock().unwrap().invalidate();
-                        }
-                        Err(e) => eprintln!("duplicate failed: {e}"),
+                    let inserted = self.store.insert(&parsed, pos);
+                    if let Some(mut copy) = self.report(inserted, "создать копию") {
+                        copy.size = src.size;
+                        copy.tint = src.tint;
+                        self.appearing.push((copy.id, Instant::now()));
+                        self.cards.push(copy);
+                        self.save(self.cards.len() - 1);
+                        self.library.lock().unwrap().invalidate();
+                        self.bar.lock().unwrap().invalidate();
                     }
                 }
                 Action::Archive => {
+                    let placement = self.cards[idx].placement;
                     self.cards[idx].archived = true;
                     self.cards[idx].placement = Placement::Archive;
-                    self.save(idx);
+                    if !self.save(idx) {
+                        // Still in the database as it was: stays on the layer.
+                        (self.cards[idx].archived, self.cards[idx].placement) = (false, placement);
+                        continue;
+                    }
                     self.toast = Some(Toast::new("Карточка в архиве", Some(Undo::Unarchive(self.cards[idx].id))));
                     remove = Some(idx);
                 }
                 Action::Delete => {
-                    let _ = self.store.delete(self.cards[idx].id);
+                    let deleted = self.store.delete(self.cards[idx].id);
+                    if self.report(deleted, "убрать в корзину").is_none() {
+                        continue;
+                    }
                     let text = format!("Карточка в корзине, {} дней можно вернуть", crate::store::TRASH_DAYS);
                     self.toast = Some(Toast::new(text, Some(Undo::Restore(self.cards[idx].id))));
                     remove = Some(idx);
@@ -814,7 +850,8 @@ impl EbbApp {
                         // Without its value the editor would save the label as the secret.
                         match self.store.secret(c.id) {
                             Ok(Some(secret)) => card::private_text(&c.title, &secret),
-                            _ => continue,
+                            Ok(None) => card::private_text(&c.title, ""),
+                            Err(_) => continue,
                         }
                     } else {
                         edit_text(c)
@@ -836,6 +873,19 @@ impl EbbApp {
                     self.cards[idx].tint = tint;
                     self.save(idx);
                 }
+            }
+        }
+        // While a value is shown, screenshots and recordings get no layer at all.
+        if self.revealed.is_some() != self.capture_excluded
+            && let Some(h) = self.hwnd
+        {
+            let wanted = self.revealed.is_some();
+            if win::exclude_from_capture(h, wanted) {
+                self.capture_excluded = wanted;
+            } else {
+                // Keep trying while the secret is visible, or until the old
+                // affinity is actually removed after the reveal ends.
+                ui.ctx().request_repaint_after(Duration::from_millis(250));
             }
         }
         if let Some(idx) = remove {
@@ -897,18 +947,13 @@ impl EbbApp {
             }
         });
         if let Some(action) = undo {
-            match action {
-                Undo::Unarchive(id) => {
-                    let _ = self.store.set_archived(id, false);
-                }
-                Undo::Restore(id) => {
-                    let _ = self.store.restore(id);
-                }
-                Undo::Kind(id, kind) => {
-                    let _ = self.store.set_kind(id, kind);
-                }
-            }
             self.toast = None;
+            let undone = match action {
+                Undo::Unarchive(id) => self.store.set_archived(id, false),
+                Undo::Restore(id) => self.store.restore(id),
+                Undo::Kind(id, kind) => self.store.set_kind(id, kind),
+            };
+            self.report(undone, "отменить");
             self.reload_cards();
             self.bar.lock().unwrap().invalidate();
             self.library.lock().unwrap().invalidate();
@@ -1401,8 +1446,8 @@ impl eframe::App for EbbApp {
         let mut changed = false;
         for request in outbox {
             match request {
-                Outbox::Captured(text) => {
-                    self.add_from_capture(&text, self.full_area);
+                Outbox::Captured(text, plain) => {
+                    self.add_from_capture(text, plain, self.full_area);
                     changed = true;
                 }
                 Outbox::Open(id) => {

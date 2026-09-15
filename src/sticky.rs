@@ -12,7 +12,7 @@ use std::time::SystemTime;
 
 use rusqlite::{Connection, OpenFlags};
 
-use crate::card::{Kind, parse_capture};
+use crate::card::{Kind, looks_secret, parse_capture};
 
 /// .NET ticks (100 ns since 0001-01-01) at the Unix epoch.
 const TICKS_AT_UNIX_EPOCH: i64 = 621_355_968_000_000_000;
@@ -201,22 +201,6 @@ pub fn plain_text(markup: &str) -> String {
     }
     let lines: Vec<&str> = out.lines().map(str::trim_end).collect();
     lines.join("\n").trim().to_owned()
-}
-
-/// Looks like a credential: passwords, tokens, keys.
-pub fn looks_secret(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    const MARKERS: &[&str] = &[
-        "пароль", "password", "passwd", "pass:", "pwd:", "логин:", "login:", "token:", "token=", "токен:",
-        "api key", "api_key", "apikey", "secret:", "секрет:", "private key", "ssh-rsa", "pin:", "пин:",
-    ];
-    if MARKERS.iter().any(|m| lower.contains(m)) {
-        return true;
-    }
-    // OpenAI-style keys: sk- followed by a long run of key characters.
-    lower.match_indices("sk-").any(|(i, _)| {
-        lower[i + 3..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').count() >= 20
-    })
 }
 
 fn classify(plain: &str) -> Kind {
