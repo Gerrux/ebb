@@ -517,6 +517,63 @@ pub fn prompt_name(body: &str) -> Option<(&str, &str)> {
     (!first.is_empty() && !rest.is_empty() && first.chars().count() <= 80).then_some((first, rest))
 }
 
+/// `{{name}}` placeholders in a Prompt: the byte range of each and its name.
+/// A name is what's between the braces, trimmed: one line, no braces, ≤ 40 chars.
+fn prompt_placeholders(text: &str) -> Vec<(std::ops::Range<usize>, &str)> {
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(open) = text[from..].find("{{").map(|i| from + i) {
+        let Some(close) = text[open + 2..].find("}}").map(|i| open + 2 + i) else { break };
+        let inner = &text[open + 2..close];
+        let name = inner.trim();
+        let valid = !name.is_empty() && name.chars().count() <= 40 && !inner.contains(['{', '}', '\n']);
+        if valid {
+            found.push((open..close + 2, name));
+            from = close + 2;
+        } else {
+            // "{{{x}}}" or a stray "{{": look again one brace on.
+            from = open + 1;
+        }
+    }
+    found
+}
+
+/// A Prompt's variables, each once, in the order they first appear.
+pub fn prompt_variables(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for (_, name) in prompt_placeholders(text) {
+        if !names.iter().any(|n| n == name) {
+            names.push(name.to_owned());
+        }
+    }
+    names
+}
+
+/// The Prompt with each `{{name}}` replaced by its value; names without one stay as written.
+pub fn fill_prompt(text: &str, values: &[(String, String)]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for (range, name) in prompt_placeholders(text) {
+        if let Some((_, value)) = values.iter().find(|(n, _)| n == name) {
+            out.push_str(&text[last..range.start]);
+            out.push_str(value);
+            last = range.end;
+        }
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
+/// What copying a Prompt takes: its text without the name line.
+pub fn prompt_text(title: &str, body: &str) -> String {
+    let full = if title.is_empty() { body.to_owned() } else { format!("{title}\n{body}") };
+    let full = crate::rich_text::strip_markup(&full);
+    match prompt_name(&full) {
+        Some((_, rest)) => rest.to_owned(),
+        None => full.trim().to_owned(),
+    }
+}
+
 /// What a hidden Private card may show: its title, or else the first line when
 /// more lines follow ("Wi-Fi офис" above the password). Single-line notes show
 /// nothing, since that line may be the secret itself.
@@ -1041,6 +1098,25 @@ mod tests {
     fn prompt_names() {
         assert_eq!(prompt_name("Ревью кода\nПосмотри на {{diff}}"), Some(("Ревью кода", "Посмотри на {{diff}}")));
         assert_eq!(prompt_name("одна строка"), None);
+    }
+
+    #[test]
+    fn prompt_variables_are_found_once_and_filled() {
+        let text = "Напиши о {{topic}} в тоне {{ tone }}. Ещё раз: {{topic}}. {{}} и {{\nнет}} — не переменные.";
+        assert_eq!(prompt_variables(text), ["topic", "tone"]);
+        let values = [("topic".to_owned(), "SQLite".to_owned()), ("tone".to_owned(), "сухом".to_owned())];
+        assert_eq!(fill_prompt(text, &values), "Напиши о SQLite в тоне сухом. Ещё раз: SQLite. {{}} и {{\nнет}} — не переменные.");
+        // A variable without a value stays as written; extra braces around one are kept.
+        assert_eq!(fill_prompt("{{a}} {{b}}", &values[..0]), "{{a}} {{b}}");
+        assert_eq!(prompt_variables("{{{x}}}"), ["x"]);
+        assert_eq!(fill_prompt("{{{x}}}", &[("x".to_owned(), "1".to_owned())]), "{1}");
+        assert!(prompt_variables("{{ не закрыта").is_empty());
+    }
+
+    #[test]
+    fn copying_a_prompt_leaves_out_its_name() {
+        assert_eq!(prompt_text("", "Ревью кода\nПосмотри на **{{diff}}**"), "Посмотри на {{diff}}");
+        assert_eq!(prompt_text("", "Переведи {{text}}"), "Переведи {{text}}");
     }
 
     #[test]

@@ -86,6 +86,17 @@ enum Undo {
     Snooze(ReviewSnapshot),
 }
 
+struct PromptFill {
+    card: i64,
+    /// The Prompt's text as it will be copied, placeholders in place.
+    text: String,
+    values: Vec<(String, String)>,
+    /// The first field has had the focus once.
+    focused: bool,
+    /// The pass it opened in: the click that opened it isn't a click elsewhere.
+    opened_pass: u64,
+}
+
 struct Toast {
     text: String,
     undo: Option<Undo>,
@@ -178,6 +189,8 @@ pub struct EbbApp {
     /// Card just opened from search: outlined for a moment.
     highlighted: Option<(i64, Instant)>,
     toast: Option<Toast>,
+    /// Copying a Prompt with `{{variables}}`: the values asked for before it's copied.
+    prompt_fill: Option<PromptFill>,
     /// Cards that just arrived on the layer / just left it, for their animations.
     appearing: Vec<(i64, Instant)>,
     leaving: Vec<(Card, Instant)>,
@@ -294,6 +307,7 @@ impl EbbApp {
             was_focused: None,
             highlighted: None,
             toast: None,
+            prompt_fill: None,
             appearing,
             leaving: Vec::new(),
             sticky: StickyImport::default(),
@@ -425,6 +439,74 @@ impl EbbApp {
             let c = &mut self.cards[idx];
             c.title = card::private_parts(&c.title, &c.body).0;
             c.body.clear();
+        }
+    }
+
+    /// Closes the editor if it's this card's, saving what was typed.
+    fn commit_edit_of(&mut self, id: i64) {
+        if self.editing.as_ref().is_some_and(|(eid, _)| *eid == id) {
+            self.commit_edit();
+        }
+    }
+
+    /// The values for a Prompt's `{{variables}}`, over its card. Enter moves to the
+    /// next field and copies from the last; Esc or a click elsewhere closes it.
+    fn prompt_fill_ui(&mut self, ui: &mut Ui, origin: Pos2) {
+        let Some(fill) = &mut self.prompt_fill else { return };
+        let Some(card) = self.cards.iter().find(|c| c.id == fill.card) else {
+            self.prompt_fill = None;
+            return;
+        };
+        let width = card.size.x.max(260.0);
+        let at = origin + card.pos.to_vec2() + vec2(0.0, HEADER_H);
+        let count = fill.values.len();
+        let (mut copy, mut cancel) = (false, false);
+        let area = egui::Area::new(Id::new("prompt-fill")).order(egui::Order::Foreground).fixed_pos(at).show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).inner_margin(12).show(ui, |ui| {
+                ui.set_width(width - 24.0);
+                ui.add(egui::Label::new(RichText::new("Подставить в prompt").size(12.0).color(theme::muted())).selectable(false));
+                ui.add_space(4.0);
+                for (i, (name, value)) in fill.values.iter_mut().enumerate() {
+                    ui.add(egui::Label::new(RichText::new(name.as_str()).size(13.0).color(theme::text())).selectable(false));
+                    let field = egui::TextEdit::singleline(value)
+                        .id(Id::new(("prompt-var", i)))
+                        .hint_text(format!("{{{{{name}}}}}"))
+                        .desired_width(f32::INFINITY);
+                    let resp = ui.add(field);
+                    if i == 0 && !fill.focused {
+                        resp.request_focus();
+                        fill.focused = true;
+                    }
+                    // Taken from the input, or the next field, focused in this same
+                    // pass, would see the Enter too and give the focus up again.
+                    if resp.lost_focus() && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter)) {
+                        if i + 1 == count {
+                            copy = true;
+                        } else {
+                            ui.memory_mut(|m| m.request_focus(Id::new(("prompt-var", i + 1))));
+                        }
+                    }
+                    ui.add_space(2.0);
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    copy |= ui.button(RichText::new("Копировать").size(14.0)).clicked();
+                    cancel |= ui.button(RichText::new("Отмена").size(14.0)).clicked();
+                });
+            });
+        });
+        let cancelled = cancel
+            || ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+            || (ui.ctx().cumulative_pass_nr() > fill.opened_pass
+                && ui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p))));
+        if copy {
+            let (id, text) = (fill.card, card::fill_prompt(&fill.text, &fill.values));
+            ui.ctx().copy_text(text);
+            mark_copied(ui, id);
+            let _ = self.store.touch(id);
+            self.prompt_fill = None;
+        } else if cancelled {
+            self.prompt_fill = None;
         }
     }
 
@@ -850,10 +932,30 @@ impl EbbApp {
                     if c.kind == Kind::Private {
                         if let Ok(Some(secret)) = self.store.secret(c.id) {
                             let _ = win::copy_private(&secret);
+                            mark_copied(ui, c.id);
+                        }
+                    } else if c.kind == Kind::Prompt {
+                        let text = card::prompt_text(&c.title, &c.body);
+                        let variables = card::prompt_variables(&text);
+                        if variables.is_empty() {
+                            ui.ctx().copy_text(text);
+                            mark_copied(ui, c.id);
+                        } else {
+                            // Clicked again while its form is open: what's typed stays.
+                            let old = self.prompt_fill.take().filter(|f| f.card == c.id).map(|f| f.values).unwrap_or_default();
+                            let values = variables
+                                .into_iter()
+                                .map(|name| {
+                                    let value = old.iter().find(|(n, _)| *n == name).map(|(_, v)| v.clone()).unwrap_or_default();
+                                    (name, value)
+                                })
+                                .collect();
+                            self.prompt_fill = Some(PromptFill { card: c.id, text, values, focused: false, opened_pass: ui.ctx().cumulative_pass_nr() });
                         }
                     } else {
                         let text = if c.title.is_empty() { c.body.clone() } else { format!("{}\n{}", c.title, c.body) };
                         ui.ctx().copy_text(rich_text::strip_markup(&text));
+                        mark_copied(ui, c.id);
                     }
                 }
                 Action::Duplicate => {
@@ -880,6 +982,8 @@ impl EbbApp {
                     }
                 }
                 Action::Archive => {
+                    // What's typed is saved before the card goes.
+                    self.commit_edit_of(self.cards[idx].id);
                     let placement = self.cards[idx].placement;
                     self.cards[idx].archived = true;
                     self.cards[idx].placement = Placement::Archive;
@@ -892,6 +996,7 @@ impl EbbApp {
                     remove = Some(idx);
                 }
                 Action::Delete => {
+                    self.commit_edit_of(self.cards[idx].id);
                     let deleted = self.store.delete(self.cards[idx].id);
                     if self.report(deleted, "убрать в корзину").is_none() {
                         continue;
@@ -933,10 +1038,7 @@ impl EbbApp {
                 }
                 Action::Snooze(days) => {
                     let id = self.cards[idx].id;
-                    // What's typed is saved before the card goes.
-                    if self.editing.as_ref().is_some_and(|(eid, _)| *eid == id) {
-                        self.commit_edit();
-                    }
+                    self.commit_edit_of(id);
                     let until = resurface::snooze_until(resurface::unix_now(), crate::search::local_offset_secs(), days);
                     let snoozed = self.store.snooze(id, until);
                     let Some(snapshot) = self.report(snoozed, "отложить карточку") else { continue };
@@ -960,6 +1062,7 @@ impl EbbApp {
                 ui.ctx().request_repaint_after(Duration::from_millis(250));
             }
         }
+        self.prompt_fill_ui(ui, origin);
         if let Some(idx) = remove {
             let card = self.cards.remove(idx);
             self.leaving.push((card, Instant::now()));
@@ -2385,6 +2488,11 @@ fn snooze_menu(anchor: &egui::Response, popup: Id, out: &mut Vec<Action>) {
     });
 }
 
+/// Shows the check mark on a card's copy button.
+fn mark_copied(ui: &Ui, card: i64) {
+    ui.data_mut(|d| d.insert_temp(Id::new(("card", card)).with("copied"), Instant::now()));
+}
+
 /// Menu under a card's kind: every kind (with its digit key), then the card's color.
 /// `below`: the anchor is at the top of the card, so the menu opens downwards.
 fn kind_menu(anchor: &egui::Response, card: &Card, out: &mut Vec<Action>, below: bool) {
@@ -2633,10 +2741,12 @@ fn card_ui(
                     }
                     let (glyph, tip, color) = match copied {
                         Some(_) => ("\u{E73E}", "Текст скопирован", theme::SUCCESS),
+                        None if card.kind == Kind::Prompt => ("\u{E77F}", "Копировать prompt", theme::card_dim()),
                         None => ("\u{E77F}", "Копировать текст", theme::card_dim()),
                     };
+                    // The check mark comes once the text is on the clipboard: a Prompt
+                    // with variables asks for their values first.
                     if icon_button(ui, glyph, tip, color).clicked() {
-                        ui.data_mut(|d| d.insert_temp(copied_id, Instant::now()));
                         out.push(Action::Copy);
                     }
                     if card.kind == Kind::Private
