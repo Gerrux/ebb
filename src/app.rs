@@ -1,6 +1,6 @@
 //! The ambient layer (root viewport); the capture/search bar lives in `bar`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use egui::{
@@ -14,10 +14,11 @@ use std::sync::atomic::Ordering;
 use crate::bar::{self, BarState, Mode, Outbox, Press};
 use crate::import_ui::StickyImport;
 use crate::library::{self, LibraryState, Request, Tab};
+use crate::resurface;
 use crate::rich_text;
 use crate::shell::{self, Event};
 use crate::card::{self, Card, Kind, MIN_SIZE, Placement, Sides};
-use crate::store::Store;
+use crate::store::{ReviewSnapshot, Store};
 use crate::theme;
 use crate::win::{self, Backdrop};
 
@@ -33,6 +34,8 @@ const CARD_APPEAR: Duration = Duration::from_millis(220);
 const CARD_LEAVE: Duration = Duration::from_millis(160);
 pub(crate) const PANEL_APPEAR: Duration = Duration::from_millis(200);
 const PANEL_FADE_OUT: Duration = Duration::from_millis(250);
+/// "Позже" on a card: days until it comes back.
+const SNOOZE_DAYS: [i64; 4] = [1, 3, 7, 30];
 
 /// Ease-out cubic on a 0..1 progress (clamped).
 pub(crate) fn panel_ease(t: f32) -> f32 {
@@ -79,6 +82,8 @@ enum Undo {
     Restore(i64),
     /// Back to the kind a card had.
     Kind(i64, Kind),
+    /// Back on the layer as it was before "Позже".
+    Snooze(ReviewSnapshot),
 }
 
 struct Toast {
@@ -118,6 +123,8 @@ enum Action {
     Reveal,
     SetKind(Kind),
     SetTint(Option<card::Tint>),
+    /// Off the layer for this many days.
+    Snooze(i64),
 }
 
 pub struct EbbApp {
@@ -182,6 +189,11 @@ pub struct EbbApp {
     main_started: Instant,
     first_frame: Option<(f64, f64)>,
     frames: u64,
+    /// When the next morning's Rediscover pick is due (unix seconds).
+    next_rediscover: i64,
+    /// The pick running on its own thread: the cards it brought back, or None
+    /// when there was nothing to do (already made today, or it failed).
+    rediscover_job: Option<mpsc::Receiver<Option<Vec<i64>>>>,
 }
 
 impl EbbApp {
@@ -240,24 +252,9 @@ impl EbbApp {
             win::set_window_alpha(h, 0);
         }
 
-        // Brought back from the archive today: into free slots, not where each
-        // was when it was archived, and appearing like a new card.
+        // Brought back from the archive today, appearing like a new card.
         let appearing: Vec<(i64, Instant)> = fresh.iter().map(|id| (*id, Instant::now())).collect();
-        let away = pos2(-1.0e5, -1.0e5);
-        cards.iter_mut().filter(|c| fresh.contains(&c.id)).for_each(|c| c.pos = away);
-        for id in &fresh {
-            let Some(idx) = cards.iter().position(|c| c.id == *id) else { continue };
-            cards[idx].size = cards[idx].size.max(MIN_SIZE);
-            cards[idx].pos = card::free_slot_for(&cards, cards[idx].size, full_area);
-            if let Err(e) = store.save(&cards[idx]) {
-                eprintln!("save failed: {e}");
-            }
-        }
-        // On a full layer they land on other cards: above them, not under.
-        cards.sort_by_key(|c| fresh.contains(&c.id));
-        for id in &fresh {
-            let _ = store.raise(*id);
-        }
+        place_resurfaced(&store, &mut cards, &fresh, full_area);
 
         let shell = Arc::new(shell::Shared::default());
         shell.layer_visible.store(true, Ordering::Relaxed);
@@ -305,7 +302,62 @@ impl EbbApp {
             main_started,
             first_frame: None,
             frames: 0,
+            next_rediscover: resurface::next_day_start(resurface::unix_now(), crate::search::local_offset_secs()),
+            rediscover_job: None,
         }
+    }
+
+    /// The morning Rediscover pick while Ebb keeps running: a timer to the start
+    /// of the next day, the pick itself on a background thread with its own
+    /// connection, and the cards it changed brought onto the layer when it's done.
+    fn schedule_rediscover(&mut self, ctx: &egui::Context) {
+        if let Some(job) = &self.rediscover_job {
+            match job.try_recv() {
+                Err(mpsc::TryRecvError::Empty) => return,
+                Ok(Some(fresh)) => self.bring_resurfaced(&fresh),
+                Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {}
+            }
+            self.rediscover_job = None;
+        }
+        let (now, offset) = (resurface::unix_now(), crate::search::local_offset_secs());
+        if now < self.next_rediscover {
+            ctx.request_repaint_after(Duration::from_secs((self.next_rediscover - now) as u64));
+            return;
+        }
+        // Not from under someone typing: once the editor closes.
+        if self.editing.is_some() {
+            ctx.request_repaint_after(Duration::from_secs(60));
+            return;
+        }
+        self.next_rediscover = resurface::next_day_start(now, offset);
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        let spawned = std::thread::Builder::new().name("rediscover".into()).spawn(move || {
+            crate::import_ui::background_priority();
+            let result = Store::open().and_then(|store| {
+                if store.resurfaced_today(now, offset) {
+                    return Ok(None);
+                }
+                store.refresh_resurfacing(now, offset, resurface::REDISCOVER_LIMIT).map(Some)
+            });
+            let fresh = result.unwrap_or_else(|e| {
+                eprintln!("resurfacing failed: {e}");
+                None
+            });
+            let _ = tx.send(fresh.map(|picks| picks.into_iter().map(|p| p.id).collect()));
+            ctx.request_repaint();
+        });
+        if spawned.is_ok() {
+            self.rediscover_job = Some(rx);
+        }
+    }
+
+    /// After a Rediscover pick: yesterday's unanswered cards leave, today's come in.
+    fn bring_resurfaced(&mut self, fresh: &[i64]) {
+        self.reload_cards();
+        place_resurfaced(&self.store, &mut self.cards, fresh, self.full_area);
+        self.library.lock().unwrap().invalidate();
+        self.bar.lock().unwrap().invalidate();
     }
 
     fn area(&self, ui: &Ui) -> Vec2 {
@@ -879,6 +931,19 @@ impl EbbApp {
                     self.cards[idx].tint = tint;
                     self.save(idx);
                 }
+                Action::Snooze(days) => {
+                    let id = self.cards[idx].id;
+                    // What's typed is saved before the card goes.
+                    if self.editing.as_ref().is_some_and(|(eid, _)| *eid == id) {
+                        self.commit_edit();
+                    }
+                    let until = resurface::snooze_until(resurface::unix_now(), crate::search::local_offset_secs(), days);
+                    let snoozed = self.store.snooze(id, until);
+                    let Some(snapshot) = self.report(snoozed, "отложить карточку") else { continue };
+                    let text = format!("Вернётся {}", resurface::snooze_label(days));
+                    self.toast = Some(Toast::new(text, Some(Undo::Snooze(snapshot))));
+                    remove = Some(idx);
+                }
             }
         }
         // While a value is shown, screenshots and recordings get no layer at all
@@ -959,6 +1024,7 @@ impl EbbApp {
                 Undo::Unarchive(id) => self.store.set_archived(id, false),
                 Undo::Restore(id) => self.store.restore(id),
                 Undo::Kind(id, kind) => self.store.set_kind(id, kind),
+                Undo::Snooze(snapshot) => self.store.undo_review(&snapshot),
             };
             self.report(undone, "отменить");
             self.reload_cards();
@@ -1369,6 +1435,9 @@ impl eframe::App for EbbApp {
                     (lib.settings.capture_hotkey, lib.settings.search_hotkey) = (keys.capture, keys.search);
                     ctx.request_repaint_of(library::viewport_id());
                 }
+                // Slept through the morning, or the clock moved: look again now
+                // (a pick already made today is left as it is).
+                Event::ClockChanged => self.next_rediscover = 0,
                 Event::TogglePinBottom => self.set_pin_bottom(!win::PIN_BOTTOM.load(Ordering::Relaxed)),
                 Event::Exit => ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close),
                 Event::ImportSticky => self.apply_library_request(ctx, Request::ImportSticky),
@@ -1382,6 +1451,8 @@ impl eframe::App for EbbApp {
                 }
             }
         }
+
+        self.schedule_rediscover(ctx);
 
         if self.layer_faded_out.swap(false, Ordering::Relaxed) && !self.layer_visible {
             ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(false));
@@ -2274,6 +2345,46 @@ fn redacted(ui: &mut Ui, text: &str, font: FontId, color: Color32) -> Option<usi
     at
 }
 
+/// Cards brought back from the archive by Rediscover go into free slots, not
+/// where each was when it was archived, and above the cards already there.
+fn place_resurfaced(store: &Store, cards: &mut [Card], fresh: &[i64], area: Vec2) {
+    if fresh.is_empty() {
+        return;
+    }
+    let away = pos2(-1.0e5, -1.0e5);
+    cards.iter_mut().filter(|c| fresh.contains(&c.id)).for_each(|c| c.pos = away);
+    for id in fresh {
+        let Some(idx) = cards.iter().position(|c| c.id == *id) else { continue };
+        cards[idx].size = cards[idx].size.max(MIN_SIZE);
+        cards[idx].pos = card::free_slot_for(cards, cards[idx].size, area);
+        if let Err(e) = store.save(&cards[idx]) {
+            eprintln!("save failed: {e}");
+        }
+    }
+    // On a full layer they land on other cards: above them, not under.
+    cards.sort_by_key(|c| fresh.contains(&c.id));
+    for id in fresh {
+        let _ = store.raise(*id);
+    }
+}
+
+/// "Позже": which morning the card comes back on.
+fn snooze_menu(anchor: &egui::Response, popup: Id, out: &mut Vec<Action>) {
+    egui::Popup::menu(anchor).id(popup).align(egui::RectAlign::BOTTOM_END).gap(4.0).width(170.0).show(|ui| {
+        ui.spacing_mut().button_padding = vec2(8.0, 5.0);
+        ui.add(egui::Label::new(RichText::new("Убрать и вернуть").size(12.0).color(theme::muted())).selectable(false));
+        for days in SNOOZE_DAYS {
+            let label = resurface::snooze_label(days);
+            let mut chars = label.chars();
+            let label: String = chars.next().into_iter().flat_map(char::to_uppercase).chain(chars).collect();
+            let button = egui::Button::new(RichText::new(label).size(14.0)).min_size(vec2(ui.available_width(), 0.0));
+            if ui.add(button).clicked() {
+                out.push(Action::Snooze(days));
+            }
+        }
+    });
+}
+
 /// Menu under a card's kind: every kind (with its digit key), then the card's color.
 /// `below`: the anchor is at the top of the card, so the menu opens downwards.
 fn kind_menu(anchor: &egui::Response, card: &Card, out: &mut Vec<Action>, below: bool) {
@@ -2490,7 +2601,10 @@ fn card_ui(
     // card is its text, its color marker (a setting) and the kind's icon.
     let details = ui.ctx().animate_bool_with_time(id.with("details"), hovered || active || editing.is_some(), 0.15);
 
-    // Header: hover actions.
+    // Header: hover actions. They stay while the "Позже" menu is open, or the
+    // menu would lose the button it hangs from as the pointer moves onto it.
+    let snooze_popup = id.with("snooze");
+    let hovered = hovered || egui::Popup::is_id_open(ui.ctx(), snooze_popup);
     ui.scope_builder(
         UiBuilder::new().max_rect(header).layout(Layout::left_to_right(Align::Center)),
         |ui| {
@@ -2503,6 +2617,10 @@ fn card_ui(
                     }
                     if !locked && icon_button(ui, "\u{E7B8}", "В архив", theme::card_dim()).clicked() {
                         out.push(Action::Archive);
+                    }
+                    if !locked {
+                        let later = icon_button(ui, "\u{E708}", "Позже", theme::card_dim());
+                        snooze_menu(&later, snooze_popup, &mut out);
                     }
                     if icon_button(ui, "\u{E8C8}", "Дублировать", theme::card_dim()).clicked() {
                         out.push(Action::Duplicate);

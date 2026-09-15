@@ -119,8 +119,8 @@ impl ReviewAction {
     }
 }
 
-/// A card's state before a review action, for undo.
-#[derive(Clone, Debug)]
+/// A card's state before a review action or a snooze, for undo.
+#[derive(Clone, Copy, Debug)]
 pub struct ReviewSnapshot {
     pub id: i64,
     pub kind: Kind,
@@ -232,6 +232,9 @@ impl Store {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
+             -- Layer, bar and library each hold a connection: a write that meets
+             -- another one waits for it instead of failing with SQLITE_BUSY.
+             PRAGMA busy_timeout = 1000;
              -- Text a card turned Private leaves behind is zeroed where that's free.
              PRAGMA secure_delete = FAST;
              CREATE TABLE IF NOT EXISTS cards (
@@ -487,10 +490,10 @@ impl Store {
     /// forgotten ones onto the layer. A restart the same day changes nothing.
     /// Only placement metadata changes; note text is never rewritten.
     pub fn refresh_resurfacing(&self, at: i64, utc_offset: i64, limit: usize) -> rusqlite::Result<Vec<crate::resurface::Pick>> {
-        let day = (at + utc_offset).div_euclid(DAY);
-        if self.setting(SET_REDISCOVER_DAY).and_then(|v| v.parse::<i64>().ok()) == Some(day) {
+        if self.resurfaced_today(at, utc_offset) {
             return Ok(Vec::new());
         }
+        let day = crate::resurface::local_day(at, utc_offset);
         let tx = self.conn.unchecked_transaction()?;
         // Pinned since it came back (older builds pinned from search without
         // touching placement): it's the user's now, never taken back.
@@ -547,6 +550,12 @@ impl Store {
         Ok(picks)
     }
 
+    /// Whether the Rediscover pick for the day `at` falls in has been made.
+    pub fn resurfaced_today(&self, at: i64, utc_offset: i64) -> bool {
+        let day = crate::resurface::local_day(at, utc_offset);
+        self.setting(SET_REDISCOVER_DAY).and_then(|v| v.parse::<i64>().ok()) == Some(day)
+    }
+
     pub fn review_queue(&self, at: i64, limit: usize) -> rusqlite::Result<Vec<Card>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint, placement, review_at
@@ -593,8 +602,20 @@ impl Store {
         Ok(())
     }
 
-    pub fn review_action(&self, id: i64, action: ReviewAction) -> rusqlite::Result<ReviewSnapshot> {
-        let snapshot = self.conn.query_row(
+    /// Puts a card away until `until` (see `resurface::snooze_until`): off the
+    /// layer into the archive, from where Rediscover brings it back once it's due.
+    /// Unlike a snooze in the weekly review, it doesn't count as ignored.
+    pub fn snooze(&self, id: i64, until: i64) -> rusqlite::Result<ReviewSnapshot> {
+        let snapshot = self.snapshot(id)?;
+        self.conn.execute(
+            "UPDATE cards SET archived=1, pinned=0, placement='archive', review_at=?2, last_viewed_at=?3 WHERE id=?1",
+            params![id, until, now()],
+        )?;
+        Ok(snapshot)
+    }
+
+    fn snapshot(&self, id: i64) -> rusqlite::Result<ReviewSnapshot> {
+        self.conn.query_row(
             "SELECT id, kind, archived, pinned, placement, review_at, ignored_count, deleted_at, last_viewed_at
              FROM cards WHERE id=?1",
             [id],
@@ -611,7 +632,11 @@ impl Store {
                     last_viewed_at: r.get(8)?,
                 })
             },
-        )?;
+        )
+    }
+
+    pub fn review_action(&self, id: i64, action: ReviewAction) -> rusqlite::Result<ReviewSnapshot> {
+        let snapshot = self.snapshot(id)?;
         let t = now();
         match action {
             ReviewAction::Keep => {
@@ -1108,6 +1133,36 @@ secret");
         assert_eq!(live, [(ideas[0].id, "manual"), (ideas[3].id, "rediscover")]);
         let ignored: i64 = store.conn.query_row("SELECT ignored_count FROM cards WHERE id=?1", [ideas[1].id], |r| r.get(0)).unwrap();
         assert_eq!(ignored, 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn snoozed_card_leaves_the_layer_and_comes_back_on_its_morning() {
+        let (store, dir) = temp_store("snooze");
+        let card = add(&store, "идея: annual pricing");
+        let now = 100 * DAY + 20 * 3_600;
+        let until = crate::resurface::snooze_until(now, 0, 3);
+        let snapshot = store.snooze(card.id, until).unwrap();
+        assert!(store.load().unwrap().is_empty());
+        let ignored: i64 = store.conn.query_row("SELECT ignored_count FROM cards WHERE id=?1", [card.id], |r| r.get(0)).unwrap();
+        assert_eq!(ignored, 0, "putting a card off by hand isn't ignoring it");
+
+        // Undo: back on the layer as it was.
+        store.undo_review(&snapshot).unwrap();
+        assert_eq!(store.load().unwrap().len(), 1);
+        store.snooze(card.id, until).unwrap();
+        // Opened just now, so not forgotten; it comes back only because it's due.
+        store.conn.execute("UPDATE cards SET last_viewed_at=?2 WHERE id=?1", params![card.id, now]).unwrap();
+
+        for day in 1..3 {
+            let morning = crate::resurface::next_day_start(now, 0) + (day - 1) * DAY;
+            assert!(store.refresh_resurfacing(morning, 0, 3).unwrap().is_empty(), "not back on day {day}");
+        }
+        let third = crate::resurface::next_day_start(now, 0) + 2 * DAY;
+        assert!(!store.resurfaced_today(third, 0));
+        let picks = store.refresh_resurfacing(third, 0, 3).unwrap();
+        assert_eq!(picks.iter().map(|p| p.id).collect::<Vec<_>>(), vec![card.id]);
+        assert!(store.resurfaced_today(third + 3_600, 0));
         let _ = std::fs::remove_dir_all(dir);
     }
 

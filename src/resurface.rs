@@ -98,6 +98,37 @@ pub fn days_word(n: i64) -> &'static str {
     }
 }
 
+/// A Rediscover day starts in the morning, not at midnight: cards picked for
+/// the day don't change under someone still at work late in the evening.
+pub const DAY_STARTS_AT: i64 = 6 * 3_600;
+
+/// Number of the Rediscover day `at` falls in, with the local UTC offset.
+pub fn local_day(at: i64, utc_offset: i64) -> i64 {
+    (at + utc_offset - DAY_STARTS_AT).div_euclid(DAY)
+}
+
+/// When the Rediscover day after the one `at` falls in starts.
+pub fn next_day_start(at: i64, utc_offset: i64) -> i64 {
+    (local_day(at, utc_offset) + 1) * DAY + DAY_STARTS_AT - utc_offset
+}
+
+/// Until when "later" for `days` puts a card away: it comes due before the
+/// Rediscover pick on the morning `days` days on. An hour early, so a daylight
+/// saving change in between can't push it past that pick to the day after.
+pub fn snooze_until(at: i64, utc_offset: i64, days: i64) -> i64 {
+    (local_day(at, utc_offset) + days) * DAY + DAY_STARTS_AT - utc_offset - 3_600
+}
+
+/// "завтра", "через 3 дня", "через неделю", "через месяц".
+pub fn snooze_label(days: i64) -> String {
+    match days {
+        1 => "завтра".to_owned(),
+        7 => "через неделю".to_owned(),
+        30 => "через месяц".to_owned(),
+        n => format!("через {n} {}", days_word(n)),
+    }
+}
+
 pub fn unix_now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
@@ -217,6 +248,41 @@ mod tests {
         assert_eq!(reason(21 * DAY, 0, None), "Ты записал это 21 день назад");
         assert_eq!(reason(11 * DAY, 0, None), "Ты записал это 11 дней назад");
         assert_eq!(reason(5, 0, Some(1)), "Напоминание на сегодня");
+    }
+
+    #[test]
+    fn days_start_in_the_morning() {
+        let msk = 3 * 3_600;
+        // 2026-09-15 00:00 UTC = 03:00 in Moscow: still the day before.
+        let midnight_utc = 20_711 * DAY;
+        assert_eq!(local_day(midnight_utc, msk), 20_710);
+        // 06:00 Moscow = 03:00 UTC: the new day.
+        assert_eq!(local_day(midnight_utc + 3 * 3_600, msk), 20_711);
+        assert_eq!(next_day_start(midnight_utc, msk), midnight_utc + 3 * 3_600);
+        assert_eq!(next_day_start(midnight_utc + 3 * 3_600, msk), midnight_utc + DAY + 3 * 3_600);
+    }
+
+    #[test]
+    fn snoozed_card_is_due_at_the_pick_days_later_not_before() {
+        let offset = 2 * 3_600;
+        // Tuesday 22:00 local: "tomorrow" is Wednesday's morning pick.
+        let evening = 20_711 * DAY + 22 * 3_600 - offset;
+        let until = snooze_until(evening, offset, 1);
+        let wednesday = next_day_start(evening, offset);
+        assert!(until < wednesday && until > evening + 3_600);
+        assert_eq!(local_day(until + 3_600, offset), local_day(evening, offset) + 1);
+        // Snoozed for a week from 02:00 (still Tuesday's Rediscover day).
+        let night = 20_712 * DAY + 2 * 3_600 - offset;
+        assert_eq!(local_day(snooze_until(night, offset, 7) + 3_600, offset), local_day(night, offset) + 7);
+        // Even if the clocks go forward an hour on the way.
+        assert!(snooze_until(evening, offset, 7) <= next_day_start(evening, offset + 3_600) + 6 * DAY);
+    }
+
+    #[test]
+    fn snooze_labels() {
+        assert_eq!(snooze_label(1), "завтра");
+        assert_eq!(snooze_label(3), "через 3 дня");
+        assert_eq!(snooze_label(7), "через неделю");
     }
 
     #[test]

@@ -22,7 +22,7 @@
 | 5. Global quick capture | ✅ | Бар захвата |
 | 6. Universal search | ✅ | FTS5, фильтры словами, бар поиска, библиотека. Нет семантики → [10](10-semantic-search-ai.md) |
 | 7. Tags | ⚠️ | `#теги` из текста, поиск по тегам. Нет редактора, подсказок → [04](04-cards-and-types.md) |
-| 8. Basic resurfacing | ⚠️ core готов | Startup Rediscover, cooldown, snooze, приоритет типов, Private исключены → [01](01-resurfacing.md) |
+| 8. Basic resurfacing | ⚠️ core готов | Утренний Rediscover (и без перезапуска), cooldown, «Позже» на карточке, приоритет типов, Private исключены → [01](01-resurfacing.md) |
 | 9. Forgotten notes | ❌ | → [01](01-resurfacing.md) |
 | 10. Weekly review | ⚠️ core | → [02](02-weekly-review.md) |
 | 11. Import Sticky Notes | ⚠️ | Импорт «как на экране», замена прошлого импорта. Нет просмотра классификации → [08](08-import-review.md) |

@@ -65,7 +65,7 @@ fn notes(n: usize) -> String {
     format!("{n} {word}")
 }
 
-fn background_priority() {
+pub(crate) fn background_priority() {
     use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN};
     unsafe {
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
