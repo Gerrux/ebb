@@ -155,6 +155,8 @@ enum Action {
     RemoveTag(String),
     /// Open the tag field, hanging from this point.
     AddTag(Pos2),
+    /// Tick or clear the check box on this line of the text.
+    ToggleCheck(usize),
     /// Off the layer for this many days.
     Snooze(i64),
     /// The first address in a Link card, in the browser.
@@ -1145,6 +1147,9 @@ impl EbbApp {
                     let _ = self.store.touch(self.cards[idx].id);
                     self.save(idx);
                     self.toast = Some(Toast::new("Останется на слое", None));
+                }
+                Action::ToggleCheck(line) => {
+                    let _ = self.retag(idx, |text| card::toggle_check(text, line));
                 }
                 Action::SetKind(kind) => self.set_kind(idx, kind),
                 Action::RemoveTag(tag) => {
@@ -2233,6 +2238,28 @@ fn age_label(created_at: i64) -> String {
 }
 
 /// Text of a card, or its editor. True when a click opened a link in the text.
+/// What a click in a card's text did, besides placing the cursor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyHit {
+    /// A link opened.
+    Link,
+    /// A line of a Reference was copied.
+    Copied,
+    /// The check box on this line was clicked.
+    ToggleCheck(usize),
+}
+
+/// Room at the right of a Reference's text for the copy buttons of its lines.
+const COPY_GUTTER: f32 = 26.0;
+
+/// The date of a reminder, short: "29 сен".
+fn short_date(unix: i64) -> String {
+    const MONTHS: [&str; 12] = ["янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
+    let (_, m, d) = crate::search::civil_from_days((unix + crate::search::local_offset_secs()).div_euclid(86_400));
+    format!("{d} {}", MONTHS[(m - 1).clamp(0, 11) as usize])
+}
+
+/// Text of a card, or its editor. `details`: how far the hover details are shown.
 fn card_body(
     ui: &mut Ui,
     card: &Card,
@@ -2240,7 +2267,8 @@ fn card_body(
     revealed: bool,
     revealed_text: Option<&str>,
     style: card::CardStyle,
-) -> bool {
+    details: f32,
+) -> Option<BodyHit> {
     let base = style.text_size();
     let editor_id = Id::new(("card", card.id)).with("editor");
     // Where the last click in the text landed, in chars of the editor's text.
@@ -2342,7 +2370,7 @@ fn card_body(
         if !resp.has_focus() {
             resp.request_focus();
         }
-        return false;
+        return None;
     }
     if let Some(reason) = card.resurface_reason(crate::resurface::unix_now()) {
         ui.label(RichText::new(reason).size(11.5).color(theme::card_dim()));
@@ -2363,7 +2391,7 @@ fn card_body(
         let size = if label.is_none() { base } else { base - 1.0 };
         let rest_at = redacted(ui, &rest, theme::card_font(size), theme::card_dim().gamma_multiply(0.45));
         remember_click(ui, click_id, card, label.as_deref(), heading_at, &rest, rest_at);
-        return false;
+        return None;
     }
     // A Prompt's first line is its name.
     let (heading, text) = match card.kind {
@@ -2388,33 +2416,91 @@ fn card_body(
     // Every row as tall as a row of the card's own font: Consolas' rows are
     // shorter, and a command right under a heading sat on it.
     let row_height = ui.fonts_mut(|f| f.row_height(&theme::card_font(size)));
-    // Addresses in link blue and clickable, in any kind; in a Reference, commands,
-    // paths and hosts in monospace, the words around them as usual.
+    let accent = theme::on_card(card.accent());
+    let plain = rich_text::strip_markup(&text);
+    let plain_lines: Vec<&str> = plain.lines().collect();
+    // A line that starts with a list marker shows a bullet or a check box in
+    // its place; the text keeps the marker, as Sticky Notes' lists do.
+    let marks_of: Vec<Option<(card::ListMark, usize)>> = plain_lines.iter().map(|l| card::list_mark(l)).collect();
+    // In a Reference, commands, paths and hosts are set in monospace and copied
+    // a line at a time: a gutter at the right holds their copy buttons.
+    let technical: Vec<bool> = plain_lines.iter().map(|l| card.kind == Kind::Reference && card::looks_technical(l)).collect();
+    if technical.contains(&true) {
+        ui.set_max_width(ui.available_width() - COPY_GUTTER);
+    }
+    // Addresses in link blue and clickable, in any kind; a Prompt's {{variables}} as chips.
     let mut job = egui::text::LayoutJob::default();
     let mut links: Vec<(std::ops::Range<usize>, String)> = Vec::new(); // char ranges in the galley
+    let mut marks: Vec<(usize, card::ListMark, usize)> = Vec::new(); // (galley char, mark, line)
+    let mut copy_lines: Vec<(usize, String)> = Vec::new(); // (galley char, the line)
     let mut chars = 0;
+    let mut line_no = 0;
+    let mut line_start = true;
+    let mut skip = 0; // marker chars still to leave out of the galley
+    let mut lead = 0.0; // space in place of the marker, before the line's first piece
+    let mut done = false;
     for span in rich_text::spans(&text) {
         for piece in span.text.split_inclusive('\n') {
             let (line, newline) = piece.strip_suffix('\n').map_or((piece, ""), |line| (line, "\n"));
-            let technical = card.kind == Kind::Reference && card::looks_technical(line);
-            // Returns the galley's length so far, in chars.
-            let mut append = |s: &str, c: Color32| {
-                let from = chars;
-                let mono = span.style.code || technical;
-                let font = if mono {
-                    FontId::monospace(size - 1.0)
-                } else if span.style.bold {
-                    theme::card_bold(size)
-                } else {
-                    theme::card_font(size)
-                };
-                let mut format = rich_format(font, c, span.style);
-                if mono {
-                    format.line_height = Some(row_height);
-                    format.valign = Align::Center;
+            if line_start {
+                line_start = false;
+                (skip, lead, done) = (0, 0.0, false);
+                if let Some((mark, n)) = marks_of.get(line_no).copied().flatten() {
+                    (skip, lead, done) = (n, mark.indent(), mark == card::ListMark::Done);
+                    marks.push((chars, mark, line_no));
                 }
-                job.append(s, 0.0, format);
-                chars += s.chars().count();
+                if technical.get(line_no).copied().unwrap_or(false) {
+                    copy_lines.push((chars, plain_lines[line_no].trim().to_owned()));
+                }
+            }
+            let mut line = line;
+            if skip > 0 {
+                let take = skip.min(line.chars().count());
+                let byte = line.char_indices().nth(take).map_or(line.len(), |(i, _)| i);
+                line = &line[byte..];
+                skip -= take;
+            }
+            let mono = span.style.code || technical.get(line_no).copied().unwrap_or(false);
+            // Appends a piece; returns the galley's length so far, in chars.
+            let mut append = |s: &str, c: Color32, is_link: bool| {
+                let from = chars;
+                let mut emit = |s: &str, variable: bool| {
+                    let font = if variable {
+                        FontId::monospace(size - 1.5)
+                    } else if mono {
+                        FontId::monospace(size - 1.0)
+                    } else if span.style.bold {
+                        theme::card_bold(size)
+                    } else {
+                        theme::card_font(size)
+                    };
+                    let mut format = rich_format(font, if done { theme::card_muted() } else { c }, span.style);
+                    // A variable sits on the line's baseline like the words around it.
+                    if mono {
+                        format.line_height = Some(row_height);
+                        format.valign = Align::Center;
+                    }
+                    if variable {
+                        format.color = accent;
+                        format.background = accent.gamma_multiply(0.16);
+                    }
+                    if done {
+                        format.strikethrough = Stroke::new(1.0, theme::card_muted());
+                    }
+                    job.append(s, std::mem::take(&mut lead), format);
+                    chars += s.chars().count();
+                };
+                if is_link || card.kind != Kind::Prompt {
+                    emit(s, false);
+                } else {
+                    let mut last = 0;
+                    for (range, _) in card::prompt_placeholders(s) {
+                        emit(&s[last..range.start], false);
+                        emit(&s[range.clone()], true);
+                        last = range.end;
+                    }
+                    emit(&s[last..], false);
+                }
                 from..chars
             };
             let mut rest = line;
@@ -2423,28 +2509,105 @@ fn card_body(
                 // "(see https://x.org)." — the closing punctuation isn't part of the address.
                 let url = rest[start..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '"', '\'']);
                 let end = start + url.len();
-                append(&rest[..start], color);
-                let range = append(url, theme::link());
+                append(&rest[..start], color, false);
+                let range = append(url, theme::link(), true);
                 links.push((range, url.to_owned()));
                 rest = &rest[end..];
             }
-            append(rest, color);
-            append(newline, color);
+            append(rest, color, false);
+            if !newline.is_empty() {
+                append(newline, color, false);
+                line_no += 1;
+                line_start = true;
+            }
         }
     }
     let (pos, galley, resp) = egui::Label::new(job).wrap().selectable(false).layout_in_ui(ui);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, galley.text()));
     let text_at = char_at(ui, &galley, pos, resp.rect);
     let link = text_at.and_then(|at| links.iter().find(|(range, _)| range.contains(&at)).map(|(_, url)| url.as_str()));
-    galley_fading(ui, pos, galley, color);
-    let display_text = rich_text::strip_markup(&text);
-    remember_click(ui, click_id, card, displayed_heading.as_deref(), heading_at, &display_text, text_at);
-    let mut link_clicked = false;
+    galley_fading(ui, pos, galley.clone(), color);
+    let full = galley.rect.translate(pos.to_vec2());
+    let clip = ui.clip_rect();
+    let mut hit = None;
+
+    // Bullets and check boxes, in the space left in front of their lines.
+    for (at, mark, line) in &marks {
+        let cursor = galley.pos_from_cursor(egui::text::CCursor::new(*at)).translate(pos.to_vec2());
+        let alpha = fade_alpha(clip, full, cursor);
+        if alpha <= 0.0 {
+            continue;
+        }
+        let mut p = ui.painter().with_clip_rect(clip);
+        p.multiply_opacity(alpha);
+        let center = pos2(cursor.left() - mark.indent() + 7.0, cursor.center().y);
+        match mark {
+            card::ListMark::Bullet => {
+                p.circle_filled(center, 2.5, color);
+            }
+            card::ListMark::Todo | card::ListMark::Done => {
+                let done = *mark == card::ListMark::Done;
+                let r = Rect::from_center_size(center, vec2(14.0, 14.0));
+                let check = ui.interact(r.expand(3.0), click_id.with(("check", *line)), Sense::click());
+                check.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, done, plain_lines.get(*line).copied().unwrap_or("")));
+                if done {
+                    p.rect_filled(r, CornerRadius::same(4), accent);
+                    let on = theme::card_fill(false);
+                    p.text(r.center(), Align2::CENTER_CENTER, "\u{E73E}", theme::icons(9.0), Color32::from_rgb(on.r(), on.g(), on.b()));
+                } else {
+                    let stroke = if check.hovered() { theme::card_text() } else { theme::card_muted() };
+                    p.rect_stroke(r, CornerRadius::same(4), Stroke::new(1.5, stroke), StrokeKind::Inside);
+                }
+                if check.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                    hit = Some(BodyHit::ToggleCheck(*line));
+                }
+            }
+        }
+    }
+
+    // The copy buttons of a Reference's lines, in the gutter; a line just
+    // copied shows a check mark for a moment.
+    for (i, (at, line)) in copy_lines.iter().enumerate() {
+        let cursor = galley.pos_from_cursor(egui::text::CCursor::new(*at)).translate(pos.to_vec2());
+        let alpha = fade_alpha(clip, full, cursor);
+        if alpha <= 0.0 {
+            continue;
+        }
+        let button = Rect::from_center_size(pos2(clip.right() - COPY_GUTTER / 2.0, cursor.center().y), vec2(22.0, 20.0));
+        let copy = ui.interact(button, click_id.with(("copy-line", i)), Sense::click());
+        let copy_id = copy.id;
+        copy.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Копировать строку: {line}")));
+        let copied = ui.data(|d| d.get_temp::<Instant>(copy.id)).filter(|t| t.elapsed() < COPIED_FOR);
+        if let Some(t) = copied {
+            ui.ctx().request_repaint_after(COPIED_FOR.saturating_sub(t.elapsed()));
+        }
+        let shown = if copy.hovered() || copied.is_some() { 1.0 } else { details };
+        if shown > 0.0 {
+            let mut p = ui.painter().with_clip_rect(clip);
+            p.multiply_opacity(alpha * shown);
+            if copy.hovered() {
+                let row = Rect::from_min_max(pos2(pos.x - 4.0, cursor.top()), pos2(clip.right(), cursor.bottom()));
+                p.rect_filled(row, CornerRadius::same(4), theme::wash(14));
+                p.rect_filled(button, CornerRadius::same(6), theme::wash(22));
+            }
+            let (glyph, c) = if copied.is_some() { ("\u{E73E}", theme::SUCCESS) } else { ("\u{E8C8}", theme::card_dim()) };
+            p.text(button.center(), Align2::CENTER_CENTER, glyph, theme::icons(11.0), c);
+        }
+        if copy.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Копировать строку").clicked() {
+            ui.ctx().copy_text(line.clone());
+            ui.data_mut(|d| d.insert_temp(copy_id, Instant::now()));
+            hit = Some(BodyHit::Copied);
+        }
+    }
+
+    // The cursor goes where the click landed; the galley's text is what's shown,
+    // without the list markers (shown_to_source skips what isn't in it).
+    remember_click(ui, click_id, card, displayed_heading.as_deref(), heading_at, galley.text(), text_at);
     if let Some(url) = link {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
         if ui.input(|i| i.pointer.primary_clicked()) {
             win::open_url(url);
-            link_clicked = true;
+            hit = Some(BodyHit::Link);
         }
     }
     if card.kind == Kind::Link
@@ -2456,7 +2619,30 @@ fn card_body(
         let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
         galley_fading(ui, rect.min, galley, color);
     }
-    link_clicked
+    hit
+}
+
+/// How visible a row at `r` is inside `clip` when the text `full` runs past
+/// it: 0 for a row cut by the edge, then 40 % and 75 % for the two rows before
+/// it, 1 for the rest and for text that fits.
+fn fade_alpha(clip: Rect, full: Rect, r: Rect) -> f32 {
+    let past_bottom = full.bottom() > clip.bottom() + 0.5;
+    let past_top = full.top() < clip.top() - 0.5;
+    let h = r.height().max(1.0);
+    let mut alpha: f32 = 1.0;
+    if past_bottom {
+        if r.bottom() > clip.bottom() + 0.5 {
+            return 0.0;
+        }
+        alpha = alpha.min(0.4 + 0.35 * (clip.bottom() - r.bottom()) / h);
+    }
+    if past_top {
+        if r.top() < clip.top() - 0.5 {
+            return 0.0;
+        }
+        alpha = alpha.min(0.4 + 0.35 * (r.top() - clip.top()) / h);
+    }
+    alpha.min(1.0)
 }
 
 /// Paints a galley row by row, so text that runs past the card's edge ends on a
@@ -2466,34 +2652,22 @@ fn galley_fading(ui: &Ui, pos: Pos2, galley: std::sync::Arc<egui::Galley>, color
     let clip = ui.clip_rect();
     let painter = ui.painter();
     let full = galley.rect.translate(pos.to_vec2());
-    let past_bottom = full.bottom() > clip.bottom() + 0.5;
-    let past_top = full.top() < clip.top() - 0.5;
-    if !past_bottom && !past_top {
+    if full.bottom() <= clip.bottom() + 0.5 && full.top() >= clip.top() - 0.5 {
         painter.galley(pos, galley, color);
         return;
     }
     for row in &galley.rows {
         let r = row.rect().translate(pos.to_vec2());
-        let h = r.height().max(1.0);
-        // The last whole row before the edge at 40 %, the one above it at 75 %.
-        let mut alpha: f32 = 1.0;
-        if past_bottom {
-            if r.bottom() > clip.bottom() + 0.5 {
-                continue;
-            }
-            alpha = alpha.min(0.4 + 0.35 * (clip.bottom() - r.bottom()) / h);
-        }
-        if past_top {
-            if r.top() < clip.top() - 0.5 {
-                continue;
-            }
-            alpha = alpha.min(0.4 + 0.35 * (r.top() - clip.top()) / h);
+        let alpha = fade_alpha(clip, full, r);
+        if alpha <= 0.0 {
+            continue;
         }
         let mut p = painter.with_clip_rect(r.intersect(clip));
-        p.multiply_opacity(alpha.min(1.0));
+        p.multiply_opacity(alpha);
         p.galley(pos, galley.clone(), color);
     }
 }
+
 
 fn rich_format(font: FontId, color: Color32, style: rich_text::Style) -> egui::TextFormat {
     egui::TextFormat {
@@ -3110,8 +3284,13 @@ fn card_ui(
     let plain_note = card.kind == Kind::Note && card.tint.is_none();
     let mark_shown = if card.collapsed { 1.0 } else if plain_note || style.icon == card::IconSpot::Hover { details } else { 1.0 };
     let mark_font = if glyph_mode { theme::icons(if style.bold_icon { 14.0 } else { 12.0 }) } else { theme::semibold(11.5) };
-    let mark_text = if glyph_mode { card.kind.icon() } else { card.kind.label() };
-    let mark_galley = ui.painter().layout_no_wrap(mark_text.to_owned(), mark_font, accent);
+    let mark_text = match (glyph_mode, card.kind, card.review_at) {
+        (true, ..) => card.kind.icon().to_owned(),
+        // A reminder says when it's due.
+        (false, Kind::Reminder, Some(at)) => format!("{} \u{B7} {}", card.kind.label(), short_date(at)),
+        _ => card.kind.label().to_owned(),
+    };
+    let mark_galley = ui.painter().layout_no_wrap(mark_text, mark_font, accent);
     let dot_w = if glyph_mode { 0.0 } else { 13.0 };
     let mark_w = (dot_w + mark_galley.size().x + 12.0).min((pill_left - meta.left()).max(20.0));
     let mark_rect = Rect::from_min_size(pos2(meta.left() - 6.0, meta.center().y - 10.0), vec2(mark_w, 20.0));
@@ -3152,9 +3331,10 @@ fn card_ui(
     }
 
     // Body: scrolls when the text doesn't fit; the floating bar shows only on hover.
-    let link_clicked = !card.collapsed
-        && ui
-        .scope_builder(UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Min)), |ui| {
+    let hit = if card.collapsed {
+        None
+    } else {
+        ui.scope_builder(UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Min)), |ui| {
             ui.set_clip_rect(body.intersect(ui.clip_rect()));
             // A thin bar over the text, only while the pointer is on the card,
             // like the scrollbars of Windows 11; not egui's solid gutter.
@@ -3164,12 +3344,18 @@ fn card_ui(
                 .id_salt(id.with("scroll"))
                 .auto_shrink([false, false])
                 .max_height(body.height())
-                .show(ui, |ui| card_body(ui, card, editing, revealed, revealed_text, style))
+                .show(ui, |ui| card_body(ui, card, editing, revealed, revealed_text, style, details))
                 .inner
         })
-        .inner;
-    if start_edit && !link_clicked {
+        .inner
+    };
+    // A click on a link, a check box or a copy button in the text is that, not
+    // the start of editing.
+    if start_edit && hit.is_none() {
         out.push(Action::StartEdit);
+    }
+    if let Some(BodyHit::ToggleCheck(line)) = hit {
+        out.push(Action::ToggleCheck(line));
     }
 
     // Footer: tags and age.

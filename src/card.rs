@@ -663,7 +663,7 @@ pub fn prompt_name(body: &str) -> Option<(&str, &str)> {
 
 /// `{{name}}` placeholders in a Prompt: the byte range of each and its name.
 /// A name is what's between the braces, trimmed: one line, no braces, ≤ 40 chars.
-fn prompt_placeholders(text: &str) -> Vec<(std::ops::Range<usize>, &str)> {
+pub(crate) fn prompt_placeholders(text: &str) -> Vec<(std::ops::Range<usize>, &str)> {
     let mut found = Vec::new();
     let mut from = 0;
     while let Some(open) = text[from..].find("{{").map(|i| from + i) {
@@ -817,6 +817,73 @@ pub fn prompt_text(title: &str, body: &str) -> String {
         Some((_, rest)) => rest.to_owned(),
         None => full.trim().to_owned(),
     }
+}
+
+/// A list marker at the start of a line: a bullet, or a check box, the way
+/// Sticky Notes' lists and Markdown's task lists are written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListMark {
+    Bullet,
+    Todo,
+    Done,
+}
+
+impl ListMark {
+    /// Space in front of the line, where the mark is drawn in place of the marker.
+    pub fn indent(self) -> f32 {
+        match self {
+            ListMark::Bullet => 16.0,
+            ListMark::Todo | ListMark::Done => 22.0,
+        }
+    }
+}
+
+/// The marker a line starts with, and how many chars it takes (the space after
+/// it included). A lone "-" isn't a bullet; "- [ ]" with nothing after it is a
+/// check box.
+pub fn list_mark(line: &str) -> Option<(ListMark, usize)> {
+    let l = line.trim_start();
+    let pad = line.chars().count() - l.chars().count();
+    for (marker, mark) in [
+        ("- [ ]", ListMark::Todo),
+        ("* [ ]", ListMark::Todo),
+        ("- [x]", ListMark::Done),
+        ("- [X]", ListMark::Done),
+        ("* [x]", ListMark::Done),
+        ("* [X]", ListMark::Done),
+    ] {
+        if let Some(rest) = l.strip_prefix(marker)
+            && (rest.is_empty() || rest.starts_with(' '))
+        {
+            return Some((mark, pad + marker.len() + usize::from(rest.starts_with(' '))));
+        }
+    }
+    for marker in ["- ", "* ", "\u{2022} "] {
+        if l.starts_with(marker) && l.len() > marker.len() {
+            return Some((ListMark::Bullet, pad + marker.chars().count()));
+        }
+    }
+    None
+}
+
+/// The text with the check box on line `line` (counted in the text as written;
+/// markup adds no lines) ticked or cleared.
+pub fn toggle_check(text: &str, line: usize) -> String {
+    text.split_inclusive('\n')
+        .enumerate()
+        .map(|(i, l)| {
+            if i != line {
+                return l.to_owned();
+            }
+            if let Some(at) = l.find("[ ]") {
+                format!("{}[x]{}", &l[..at], &l[at + 3..])
+            } else if let Some(at) = l.find("[x]").or_else(|| l.find("[X]")) {
+                format!("{}[ ]{}", &l[..at], &l[at + 3..])
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect()
 }
 
 /// What a hidden Private card may show: its title, or else the first line when
@@ -1416,6 +1483,22 @@ mod tests {
         assert_eq!(prompt_variables("{{{x}}}"), ["x"]);
         assert_eq!(fill_prompt("{{{x}}}", &[("x".to_owned(), "1".to_owned())]), "{1}");
         assert!(prompt_variables("{{ не закрыта").is_empty());
+    }
+
+    #[test]
+    fn list_markers_are_found_and_check_boxes_toggle() {
+        assert_eq!(list_mark("- [ ] купить молоко"), Some((ListMark::Todo, 6)));
+        assert_eq!(list_mark("  * [X] сделано"), Some((ListMark::Done, 8)));
+        assert_eq!(list_mark("- [ ]"), Some((ListMark::Todo, 5)));
+        assert_eq!(list_mark("- пункт"), Some((ListMark::Bullet, 2)));
+        assert_eq!(list_mark("\u{2022} пункт"), Some((ListMark::Bullet, 2)));
+        assert_eq!(list_mark("-"), None);
+        assert_eq!(list_mark("- [y] нет"), Some((ListMark::Bullet, 2)));
+        assert_eq!(list_mark("просто текст"), None);
+        let text = "план\n- [ ] **молоко**\n- [x] хлеб";
+        assert_eq!(toggle_check(text, 1), "план\n- [x] **молоко**\n- [x] хлеб");
+        assert_eq!(toggle_check(text, 2), "план\n- [ ] **молоко**\n- [ ] хлеб");
+        assert_eq!(toggle_check(text, 0), text);
     }
 
     #[test]
