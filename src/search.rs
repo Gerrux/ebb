@@ -192,7 +192,49 @@ fn stem(word: &str) -> String {
     word.to_owned()
 }
 
+/// Parses with a fixed UTC offset for every date: deterministic, for tests.
+#[cfg(test)]
 pub fn parse(input: &str, now: i64, utc_offset: i64) -> Query {
+    parse_with(input, now, utc_offset, &|day| day * 86_400 - utc_offset)
+}
+
+/// Parses in the machine's time zone: each range boundary is that day's local
+/// midnight, with the offset in force on that date, so "прошлый месяц" in
+/// April starts at March 1 00:00 winter time, not an hour early.
+pub fn parse_local(input: &str, now: i64) -> Query {
+    let offset = local_offset_secs();
+    parse_with(input, now, offset, &|day| local_midnight_utc(day).unwrap_or(day * 86_400 - offset))
+}
+
+/// UTC seconds of local midnight starting `day` (days since 1970-01-01, local).
+fn local_midnight_utc(day: i64) -> Option<i64> {
+    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows::Win32::System::Time::{SystemTimeToFileTime, TzSpecificLocalTimeToSystemTime};
+    let (y, m, d) = civil_from_days(day);
+    let local = SYSTEMTIME { wYear: u16::try_from(y).ok()?, wMonth: m as u16, wDay: d as u16, ..Default::default() };
+    let (mut utc, mut ft) = (SYSTEMTIME::default(), FILETIME::default());
+    unsafe {
+        TzSpecificLocalTimeToSystemTime(None, &local, &mut utc).ok()?;
+        SystemTimeToFileTime(&utc, &mut ft).ok()?;
+    }
+    let ticks = ((ft.dwHighDateTime as i64) << 32) | ft.dwLowDateTime as i64;
+    // FILETIME counts 100 ns from 1601-01-01.
+    Some(ticks / 10_000_000 - 11_644_473_600)
+}
+
+#[cfg(test)]
+#[test]
+fn local_midnight_is_a_plausible_zone_offset_on_any_date() {
+    // Winter and summer dates: whatever the machine's zone, the boundary is a
+    // whole quarter hour within ±14 h of UTC midnight.
+    for (y, m) in [(2025, 1), (2025, 7), (2026, 3), (2026, 10)] {
+        let day = days_from_civil(y, m, 15);
+        let shift = local_midnight_utc(day).unwrap() - day * 86_400;
+        assert!(shift.abs() <= 14 * 3600 && shift % 900 == 0, "{y}-{m}: {shift}");
+    }
+}
+
+fn parse_with(input: &str, now: i64, utc_offset: i64, midnight: &dyn Fn(i64) -> i64) -> Query {
     let lower = input.to_lowercase();
     let words: Vec<&str> = lower
         .split(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '?' | '!' | '"' | '«' | '»' | '(' | ')'))
@@ -211,7 +253,7 @@ pub fn parse(input: &str, now: i64, utc_offset: i64) -> Query {
         }
         if q.range.is_none() {
             if let Some((n, from, to, label)) = date_phrase(&words, i, today) {
-                q.range = Some((from * 86_400 - utc_offset, to * 86_400 - utc_offset, label));
+                q.range = Some((midnight(from), midnight(to), label));
                 i += n;
                 continue;
             }

@@ -95,7 +95,6 @@ pub struct BarState {
     search_ms: f64,
     notice: Option<(String, Instant)>,
     store: Option<Store>,
-    utc_offset: i64,
 }
 
 impl BarState {
@@ -121,7 +120,6 @@ impl BarState {
             self.query.clear();
             self.searched = None;
             self.action = None;
-            self.utc_offset = search::local_offset_secs();
         }
         if was_visible {
             Press::Switch
@@ -313,7 +311,7 @@ fn run_search(st: &mut BarState) {
         }
     }
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-    st.parsed = search::parse(&st.query, now, st.utc_offset);
+    st.parsed = search::parse_local(&st.query, now);
     let selected_id = st.hits.get(st.selected).map(|h| h.id);
     let started = Instant::now();
     st.hits = st.store.as_ref().and_then(|s| s.search(&st.parsed, crate::store::Scope::Live, RESULTS).ok()).unwrap_or_default();

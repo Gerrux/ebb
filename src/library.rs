@@ -357,7 +357,7 @@ fn refresh(st: &mut LibraryState) {
         return;
     };
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-    st.parsed = search::parse(&st.query, now, search::local_offset_secs());
+    st.parsed = search::parse_local(&st.query, now);
     let scope = if st.tab == Tab::Trash { Scope::Trash } else { Scope::Archive };
     let selected_id = st.hits.get(st.selected).map(|h| h.id);
     st.hits = store.search(&st.parsed, scope, RESULTS).unwrap_or_default();
