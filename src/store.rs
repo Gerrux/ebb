@@ -59,6 +59,31 @@ pub struct Store {
 
 /// Deleted cards stay restorable for this long, then are purged on startup.
 pub const TRASH_DAYS: i64 = 30;
+/// A card kept, archived, pinned… in a weekly review isn't asked about again for this long.
+pub const REVIEW_PAUSE_DAYS: i64 = 56;
+/// "Later" in a weekly review.
+pub const REVIEW_LATER_DAYS: i64 = 14;
+/// Set once review dates planted by older builds are cleared (`clear_review_dates`).
+const SET_REVIEW_DATES_CLEARED: &str = "migrated.review_dates";
+
+/// Older builds recorded "don't ask for 8 weeks" (and "later") of the weekly
+/// review in `review_at`, which Rediscover reads as a reminder: such a card came
+/// back as "Напоминание на сегодня". Clears the dates that match a review
+/// decision to the minute; reminders set any other way stay.
+fn clear_review_dates(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE cards SET review_at=NULL WHERE review_at IS NOT NULL AND EXISTS (
+             SELECT 1 FROM review_items ri WHERE ri.card_id = cards.id AND abs(cards.review_at - ri.at
+                 - CASE ri.action WHEN 'snooze' THEN ?1 ELSE ?2 END) <= 60
+               AND ri.action IN ('keep', 'archive', 'snooze'))",
+        params![REVIEW_LATER_DAYS * DAY, REVIEW_PAUSE_DAYS * DAY],
+    )?;
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, '1') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [SET_REVIEW_DATES_CLEARED],
+    )?;
+    Ok(())
+}
 
 /// Which cards a search covers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -354,8 +379,14 @@ impl Store {
              CREATE INDEX IF NOT EXISTS cards_created ON cards(created_at);
              CREATE INDEX IF NOT EXISTS cards_updated ON cards(updated_at);
              CREATE INDEX IF NOT EXISTS cards_deleted ON cards(deleted_at) WHERE deleted_at IS NOT NULL;
-             CREATE INDEX IF NOT EXISTS cards_review ON cards(review_at) WHERE review_at IS NOT NULL;",
+             CREATE INDEX IF NOT EXISTS cards_review ON cards(review_at) WHERE review_at IS NOT NULL;
+             CREATE INDEX IF NOT EXISTS review_items_card ON review_items(card_id, at);",
         )?;
+        let cleared: bool =
+            conn.query_row("SELECT count(*) FROM settings WHERE key=?1", [SET_REVIEW_DATES_CLEARED], |r| r.get(0))?;
+        if !cleared {
+            clear_review_dates(&conn)?;
+        }
         conn.execute(
             "DELETE FROM cards WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
             [now() - TRASH_DAYS * 86_400],
@@ -567,18 +598,34 @@ impl Store {
         self.setting(SET_REDISCOVER_DAY).and_then(|v| v.parse::<i64>().ok()) == Some(day)
     }
 
+    /// Cards for a weekly review, in the order spec 02 asks: cards on the layer
+    /// not opened for a month, then reminders past due, then imported notes
+    /// never opened in Ebb. The rest of the archive is Rediscover's. A card
+    /// decided on in a review sits out `REVIEW_PAUSE_DAYS` ("later": `REVIEW_LATER_DAYS`).
     pub fn review_queue(&self, at: i64, limit: usize) -> rusqlite::Result<Vec<Card>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint, placement, review_at, collapsed,
-                    json_extract(meta, '$.idea_status')
-             FROM cards
-             WHERE deleted_at IS NULL AND kind != 'private' AND pinned=0
-               AND (review_at IS NULL OR review_at <= ?1)
-               AND (archived=1 OR last_viewed_at <= ?1 - ?2 OR (review_at IS NOT NULL AND review_at <= ?1))
-             ORDER BY archived DESC, (review_at IS NOT NULL AND review_at <= ?1) DESC, ignored_count DESC, last_viewed_at ASC
+            "SELECT * FROM (
+                 SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint, placement, review_at, collapsed,
+                        json_extract(meta, '$.idea_status'),
+                        CASE
+                            WHEN archived=0 AND last_viewed_at <= ?1 - ?2 THEN 1
+                            WHEN review_at <= ?1 THEN 2
+                            WHEN archived=1 AND last_viewed_at <= updated_at AND id IN (SELECT card_id FROM imported) THEN 3
+                        END AS rank,
+                        ignored_count, last_viewed_at
+                 FROM cards c
+                 WHERE deleted_at IS NULL AND kind != 'private' AND pinned=0
+                   AND (review_at IS NULL OR review_at <= ?1)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM review_items ri WHERE ri.card_id = c.id
+                         AND ri.at > ?1 - CASE ri.action WHEN 'snooze' THEN ?4 ELSE ?5 END)
+             )
+             WHERE rank IS NOT NULL
+             ORDER BY rank, ignored_count DESC, last_viewed_at ASC
              LIMIT ?3",
         )?;
-        stmt.query_map(params![at, 30 * DAY, limit as i64], card_row)?.collect()
+        let pauses = (REVIEW_LATER_DAYS * DAY, REVIEW_PAUSE_DAYS * DAY);
+        stmt.query_map(params![at, 30 * DAY, limit as i64, pauses.0, pauses.1], card_row)?.collect()
     }
 
     pub fn begin_review(&self, at: i64) -> rusqlite::Result<i64> {
@@ -647,27 +694,44 @@ impl Store {
         )
     }
 
-    pub fn review_action(&self, id: i64, action: ReviewAction) -> rusqlite::Result<ReviewSnapshot> {
+    /// Applies a review decision at `at` (`utc_offset` places "later" on a morning).
+    /// How long the card then sits out of reviews comes from `review_items`, not
+    /// `review_at`: that one means "bring it back", and Rediscover acts on it.
+    pub fn review_action(&self, id: i64, action: ReviewAction, at: i64, utc_offset: i64) -> rusqlite::Result<ReviewSnapshot> {
         let snapshot = self.snapshot(id)?;
-        let t = now();
+        let t = at;
         match action {
+            // A reminder past due that reached the review has been seen: it's cleared.
             ReviewAction::Keep => {
                 let placement = if snapshot.archived { Placement::Archive } else { Placement::Manual };
                 self.conn.execute(
-                    "UPDATE cards SET review_at=?2, ignored_count=0, placement=?3, last_viewed_at=?4 WHERE id=?1",
-                    params![id, t + 56 * DAY, placement.as_str(), t],
+                    "UPDATE cards SET review_at=NULL, ignored_count=0, placement=?2, last_viewed_at=?3 WHERE id=?1",
+                    params![id, placement.as_str(), t],
                 )?;
             }
             ReviewAction::Archive => {
                 self.conn.execute(
-                    "UPDATE cards SET archived=1, placement='archive', review_at=?2, last_viewed_at=?3 WHERE id=?1",
-                    params![id, t + 56 * DAY, t],
+                    "UPDATE cards SET archived=1, placement='archive', review_at=NULL, last_viewed_at=?2 WHERE id=?1",
+                    params![id, t],
                 )?;
             }
-            ReviewAction::Snooze => {
+            // Off the layer until a morning two weeks on, like "later" on the card
+            // itself; a card already in the archive just waits for a later review.
+            ReviewAction::Snooze if !snapshot.archived => {
+                let until = crate::resurface::snooze_until(t, utc_offset, REVIEW_LATER_DAYS);
                 self.conn.execute(
-                    "UPDATE cards SET review_at=?2, ignored_count=ignored_count+1, last_viewed_at=?3 WHERE id=?1",
-                    params![id, t + 14 * DAY, t],
+                    "UPDATE cards SET archived=1, placement='archive', review_at=?2, ignored_count=ignored_count+1,
+                         last_viewed_at=?3 WHERE id=?1",
+                    params![id, until, t],
+                )?;
+            }
+            // A reminder among them is put off to that morning instead.
+            ReviewAction::Snooze => {
+                let until = crate::resurface::snooze_until(t, utc_offset, REVIEW_LATER_DAYS);
+                self.conn.execute(
+                    "UPDATE cards SET review_at=CASE WHEN review_at IS NULL THEN NULL ELSE ?2 END,
+                         ignored_count=ignored_count+1 WHERE id=?1",
+                    params![id, until],
                 )?;
             }
             ReviewAction::Pin => {
@@ -1387,35 +1451,131 @@ guest / pass");
     fn weekly_review_actions_are_reversible_and_logged() {
         let (store, dir) = temp_store("weekly-review");
         let card = add(&store, "идея: review this");
-        store.set_archived(card.id, true).unwrap();
-        let queue = store.review_queue(now(), 15).unwrap();
+        let t = now();
+        store.conn.execute("UPDATE cards SET last_viewed_at=?2 WHERE id=?1", params![card.id, t - 40 * DAY]).unwrap();
+        let queue = store.review_queue(t, 15).unwrap();
         assert_eq!(queue.iter().map(|c| c.id).collect::<Vec<_>>(), vec![card.id]);
 
-        let review_id = store.begin_review(now()).unwrap();
-        let snapshot = store.review_action(card.id, ReviewAction::Snooze).unwrap();
-        store.record_review_item(review_id, card.id, ReviewAction::Snooze, now()).unwrap();
+        let review_id = store.begin_review(t).unwrap();
+        let snapshot = store.review_action(card.id, ReviewAction::Snooze, t, 0).unwrap();
+        store.record_review_item(review_id, card.id, ReviewAction::Snooze, t).unwrap();
         let snoozed = store.card(card.id).unwrap().unwrap();
         assert!(snoozed.review_at.is_some());
-        assert_eq!(snoozed.placement, Placement::Archive);
+        assert_eq!(snoozed.placement, Placement::Archive, "later takes a card off the layer");
 
         store.undo_review(&snapshot).unwrap();
         store.forget_review_item(review_id, card.id).unwrap();
         let restored = store.card(card.id).unwrap().unwrap();
         assert!(restored.review_at.is_none());
-        assert!(restored.archived);
-        store.review_action(card.id, ReviewAction::Keep).unwrap();
-        store.record_review_item(review_id, card.id, ReviewAction::Keep, now()).unwrap();
-        assert!(store.review_queue(now(), 15).unwrap().is_empty());
-        store.finish_review(review_id, now()).unwrap();
+        assert!(!restored.archived);
+        assert_eq!(store.review_queue(t, 15).unwrap().len(), 1);
+        store.review_action(card.id, ReviewAction::Keep, t, 0).unwrap();
+        store.record_review_item(review_id, card.id, ReviewAction::Keep, t).unwrap();
+        assert!(store.review_queue(t, 15).unwrap().is_empty());
+        store.finish_review(review_id, t).unwrap();
         let (kept, snoozed): (i64, i64) =
             store.conn.query_row("SELECT kept, snoozed FROM reviews WHERE id=?1", [review_id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!((kept, snoozed), (1, 0));
 
         // Trash from the review goes through the trash, and undo brings it back.
-        let snapshot = store.review_action(card.id, ReviewAction::Trash).unwrap();
+        let snapshot = store.review_action(card.id, ReviewAction::Trash, t, 0).unwrap();
         assert_eq!(store.counts().unwrap().2, 1);
         store.undo_review(&snapshot).unwrap();
         assert_eq!(store.counts().unwrap().2, 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn review_decisions_plant_no_reminders_and_pause_the_card() {
+        let (store, dir) = temp_store("review-no-reminder");
+        let kept = add(&store, "идея: kept on the layer");
+        let archived = add(&store, "идея: archived in review");
+        let t = 100 * DAY;
+        store.conn.execute("UPDATE cards SET created_at=1, last_viewed_at=?1", [t - 40 * DAY]).unwrap();
+        let review = store.begin_review(t).unwrap();
+        for (card, action) in [(&kept, ReviewAction::Keep), (&archived, ReviewAction::Archive)] {
+            store.review_action(card.id, action, t, 0).unwrap();
+            store.record_review_item(review, card.id, action, t).unwrap();
+            assert_eq!(store.card(card.id).unwrap().unwrap().review_at, None);
+        }
+
+        // Not asked again for eight weeks, though a month without opening it has passed.
+        assert!(store.review_queue(t + 31 * DAY, 15).unwrap().is_empty());
+        let queue = store.review_queue(t + 57 * DAY, 15).unwrap();
+        assert_eq!(queue.iter().map(|c| c.id).collect::<Vec<_>>(), vec![kept.id]);
+
+        // The archived one may come back forgotten, but never as a reminder.
+        let picks = store.refresh_resurfacing(t + 57 * DAY, 0, 3).unwrap();
+        assert_eq!(picks.iter().map(|p| p.id).collect::<Vec<_>>(), vec![archived.id]);
+        assert_ne!(picks[0].reason, "Напоминание на сегодня");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn review_queue_follows_the_spec_order_and_leaves_the_archive_to_rediscover() {
+        let (mut store, dir) = temp_store("review-order");
+        let t = now();
+        let batch = [planned("unopened", false), planned("opened", false)];
+        store.import("sticky:", &batch, &[None, None], &[]).unwrap();
+        let imported: Vec<i64> = store.conn.prepare("SELECT card_id FROM imported ORDER BY source_id DESC").unwrap()
+            .query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        let (unopened, opened) = (imported[0], imported[1]);
+        store.touch(opened).unwrap();
+
+        let reminder = add(&store, "напомни: renew the domain");
+        store.set_archived(reminder.id, true).unwrap();
+        store.conn.execute("UPDATE cards SET review_at=?2 WHERE id=?1", params![reminder.id, t - DAY]).unwrap();
+        let old_archived = add(&store, "идея: long archived");
+        store.set_archived(old_archived.id, true).unwrap();
+        let forgotten = add(&store, "идея: forgotten on the layer");
+        store.conn.execute(
+            "UPDATE cards SET last_viewed_at=?2 WHERE id IN (?1, ?3)",
+            params![forgotten.id, t - 60 * DAY, old_archived.id],
+        )
+        .unwrap();
+        add(&store, "идея: fresh on the layer");
+
+        let queue: Vec<i64> = store.review_queue(t, 15).unwrap().iter().map(|c| c.id).collect();
+        assert_eq!(queue, vec![forgotten.id, reminder.id, unopened]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn later_in_review_on_an_archived_note_only_waits_for_another_review() {
+        let (mut store, dir) = temp_store("review-later-archived");
+        store.import("sticky:", &[planned("a", false)], &[None], &[]).unwrap();
+        let id: i64 = store.conn.query_row("SELECT card_id FROM imported", [], |r| r.get(0)).unwrap();
+        let t = now();
+        let review = store.begin_review(t).unwrap();
+        store.review_action(id, ReviewAction::Snooze, t, 0).unwrap();
+        store.record_review_item(review, id, ReviewAction::Snooze, t).unwrap();
+        let card = store.card(id).unwrap().unwrap();
+        assert!(card.archived);
+        assert_eq!(card.review_at, None);
+        assert!(store.review_queue(t + 13 * DAY, 15).unwrap().is_empty());
+        assert_eq!(store.review_queue(t + 15 * DAY, 15).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn review_dates_from_older_builds_are_cleared_once() {
+        let (store, dir) = temp_store("review-dates");
+        let planted = add(&store, "идея: kept by an older build");
+        let reminder = add(&store, "напомни: a real one");
+        let at = 100 * DAY;
+        for (card, action, review_at) in [
+            (&planted, "keep", at + 2 + REVIEW_PAUSE_DAYS * DAY),
+            (&reminder, "keep", at + REVIEW_PAUSE_DAYS * DAY + 3 * 3_600),
+        ] {
+            store.conn.execute("INSERT INTO review_items VALUES (1, ?1, ?2, ?3)", params![card.id, action, at]).unwrap();
+            store.conn.execute("UPDATE cards SET review_at=?2 WHERE id=?1", params![card.id, review_at]).unwrap();
+        }
+        store.conn.execute("DELETE FROM settings WHERE key=?1", [SET_REVIEW_DATES_CLEARED]).unwrap();
+        drop(store);
+
+        let store = Store::open_at(dir.join("t.db")).unwrap();
+        assert_eq!(store.card(planted.id).unwrap().unwrap().review_at, None);
+        assert!(store.card(reminder.id).unwrap().unwrap().review_at.is_some());
         let _ = std::fs::remove_dir_all(dir);
     }
 

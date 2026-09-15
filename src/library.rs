@@ -393,8 +393,8 @@ fn ensure_review(st: &mut LibraryState) {
 fn review_apply(st: &mut LibraryState, action: ReviewAction) {
     let Some(store) = st.store.as_ref() else { return };
     let Some(id) = st.review.cards.get(st.review.history.len()).map(|card| card.id) else { return };
-    let Ok(snapshot) = store.review_action(id, action) else { return };
     let now = resurface::unix_now();
+    let Ok(snapshot) = store.review_action(id, action, now, search::local_offset_secs()) else { return };
     let review = &mut st.review;
     if review.id.is_none() {
         review.id = store.begin_review(now).ok();
@@ -481,7 +481,8 @@ fn review_tab(ui: &mut Ui, st: &mut LibraryState) {
     let why = if card.review_at.is_some_and(|at| at <= now) {
         "Напоминание"
     } else if card.archived {
-        "Из архива"
+        // Only imported notes never opened reach the review from the archive.
+        "Импорт, ещё не открывал"
     } else {
         "Давно не открывали"
     };
