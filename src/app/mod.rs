@@ -16,24 +16,25 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use egui::{
-    CornerRadius, Key, Modifiers, Pos2, Rect, Ui, UiBuilder, Vec2, ViewportBuilder, ViewportCommand,
-    ViewportId, pos2, vec2,
+    CornerRadius, Id, Key, Modifiers, Pos2, Rect, Ui, UiBuilder, Vec2, ViewportBuilder,
+    ViewportCommand, ViewportId, pos2, vec2,
 };
 
 use std::sync::atomic::Ordering;
 
 use crate::bar::{self, BarState, Mode, Outbox, Press};
+use crate::card::{self, Card, MIN_SIZE, Placement};
 use crate::import_ui::StickyImport;
 use crate::library::{self, LibraryState, Request, Tab};
 use crate::resurface;
 use crate::shell::{self, Event};
-use crate::card::{self, Card, MIN_SIZE, Placement};
 use crate::store::Store;
 use crate::theme;
 use crate::win::{self, Backdrop};
 
 pub(crate) use paint::{PANEL_APPEAR, glass_panel, paint_marker, panel_ease};
 
+use card_ui::{Action as CardAction, card_ui};
 use cards::{PromptFill, TagInput};
 use layer::{CURTAIN_DROP, TAB_SIZE, place_tab};
 use toast::Toast;
@@ -119,6 +120,10 @@ pub struct EbbApp {
     /// Cards that just arrived on the layer / just left it, for their animations.
     appearing: Vec<(i64, Instant)>,
     leaving: Vec<(Card, Instant)>,
+    /// Cards currently shown in their own desktop windows.
+    floating: Vec<Card>,
+    /// Desktop-window events are delivered from their viewport callbacks.
+    floating_events: Arc<Mutex<Vec<FloatingEvent>>>,
 
     sticky: StickyImport,
 
@@ -134,6 +139,12 @@ pub struct EbbApp {
     rediscover_job: Option<mpsc::Receiver<Option<Vec<i64>>>>,
 }
 
+enum FloatingEvent {
+    Dropped(i64, Pos2, bool),
+    Resized(i64, Pos2, Vec2),
+    Action(i64, CardAction),
+}
+
 impl EbbApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
@@ -143,23 +154,45 @@ impl EbbApp {
         autostarted: bool,
     ) -> Self {
         theme::install(&cc.egui_ctx);
-        let card_style = store.setting(SET_CARD_STYLE).map_or_else(card::CardStyle::default, |v| card::CardStyle::from_setting(&v));
+        let card_style = store
+            .setting(SET_CARD_STYLE)
+            .map_or_else(card::CardStyle::default, |v| {
+                card::CardStyle::from_setting(&v)
+            });
         theme::set_card_font(&cc.egui_ctx, card_style.font);
         // Before any window gets its backdrop: that follows light/dark too.
-        let theme_mode = store.setting(SET_THEME).map_or(theme::ThemeMode::System, |v| theme::ThemeMode::from_key(&v));
-        theme::apply(&cc.egui_ctx, theme_mode, card_style.background, &win::system_colors());
+        let theme_mode = store
+            .setting(SET_THEME)
+            .map_or(theme::ThemeMode::System, |v| theme::ThemeMode::from_key(&v));
+        theme::apply(
+            &cc.egui_ctx,
+            theme_mode,
+            card_style.background,
+            &win::system_colors(),
+        );
 
         let hwnd = win::hwnd_of(cc);
         // Saved layer settings. DWM acrylic turns flat grey when the window is
         // inactive; the accent one stays blurred, hence the default.
-        let backdrop = store.setting(SET_BACKDROP).as_deref().and_then(Backdrop::from_key).unwrap_or(Backdrop::AccentAcrylic);
-        let tint = store.setting(SET_TINT).and_then(|v| v.parse().ok()).unwrap_or(70);
+        let backdrop = store
+            .setting(SET_BACKDROP)
+            .as_deref()
+            .and_then(Backdrop::from_key)
+            .unwrap_or(Backdrop::AccentAcrylic);
+        let tint = store
+            .setting(SET_TINT)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(70);
         let pin_bottom = store.setting(SET_PIN_BOTTOM).is_none_or(|v| v != "0");
         win::PIN_BOTTOM.store(pin_bottom, Ordering::Relaxed);
         let dismiss_hides = store.setting(SET_DISMISS).is_some_and(|v| v == "hide");
-        let settings_on_launch = store.setting(SET_SETTINGS_ON_LAUNCH).is_none_or(|v| v != "0");
+        let settings_on_launch = store
+            .setting(SET_SETTINGS_ON_LAUNCH)
+            .is_none_or(|v| v != "0");
         let snap = store.setting(SET_SNAP).is_none_or(|v| v != "0");
-        let hide_from_capture = store.setting(SET_HIDE_FROM_CAPTURE).is_none_or(|v| v != "0");
+        let hide_from_capture = store
+            .setting(SET_HIDE_FROM_CAPTURE)
+            .is_none_or(|v| v != "0");
         let manual_start = !autostarted && crate::bench::path().is_none();
         // Launched from a shortcut: shown over the windows, not under them.
         win::RAISED.store(manual_start, Ordering::Relaxed);
@@ -171,7 +204,10 @@ impl EbbApp {
             let monitors = win::monitors();
             let saved = store.setting(SET_MONITOR);
             // The saved monitor if it's still connected, else the first secondary one.
-            let monitor = saved.as_deref().and_then(|d| monitors.iter().find(|m| m.matches_device(d))).or(monitors.first());
+            let monitor = saved
+                .as_deref()
+                .and_then(|d| monitors.iter().find(|m| m.matches_device(d)))
+                .or(monitors.first());
             if let Some(m) = monitor {
                 let (r, s) = (m.work, win::monitor_scale(m));
                 full_area = vec2((r.right - r.left) as f32 / s, (r.bottom - r.top) as f32 / s);
@@ -193,16 +229,18 @@ impl EbbApp {
         // (schedule_rediscover); checking costs one settings read.
         let (now, offset) = (resurface::unix_now(), crate::search::local_offset_secs());
         // Not during benchmarks: it would land in their idle window.
-        let next_rediscover = if store.resurfaced_today(now, offset) || crate::bench::path().is_some() {
-            resurface::next_day_start(now, offset)
-        } else {
-            now + REDISCOVER_AFTER_START
-        };
+        let next_rediscover =
+            if store.resurfaced_today(now, offset) || crate::bench::path().is_some() {
+                resurface::next_day_start(now, offset)
+            } else {
+                now + REDISCOVER_AFTER_START
+            };
 
         let shell = Arc::new(shell::Shared::default());
         shell.layer_visible.store(true, Ordering::Relaxed);
         shell.pin_bottom.store(pin_bottom, Ordering::Relaxed);
         shell::spawn(cc.egui_ctx.clone(), shell.clone());
+        let floating = store.load_desktop().unwrap_or_default();
 
         Self {
             store,
@@ -242,6 +280,8 @@ impl EbbApp {
             tag_counts: None,
             appearing: Vec::new(),
             leaving: Vec::new(),
+            floating,
+            floating_events: Arc::default(),
             sticky: StickyImport::default(),
             show_debug: false,
             autostarted,
@@ -267,7 +307,13 @@ impl EbbApp {
         }
         let (now, offset) = (resurface::unix_now(), crate::search::local_offset_secs());
         // A reminder on the layer coming due later today gets its caption then.
-        if let Some(at) = self.cards.iter().filter_map(|c| c.review_at).filter(|at| *at > now).min() {
+        if let Some(at) = self
+            .cards
+            .iter()
+            .filter_map(|c| c.review_at)
+            .filter(|at| *at > now)
+            .min()
+        {
             ctx.request_repaint_after(Duration::from_secs((at - now) as u64));
         }
         if now < self.next_rediscover {
@@ -282,21 +328,25 @@ impl EbbApp {
         self.next_rediscover = resurface::next_day_start(now, offset);
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
-        let spawned = std::thread::Builder::new().name("rediscover".into()).spawn(move || {
-            crate::import_ui::background_priority();
-            let result = Store::open().and_then(|store| {
-                if store.resurfaced_today(now, offset) {
-                    return Ok(None);
-                }
-                store.refresh_resurfacing(now, offset, resurface::REDISCOVER_LIMIT).map(Some)
+        let spawned = std::thread::Builder::new()
+            .name("rediscover".into())
+            .spawn(move || {
+                crate::import_ui::background_priority();
+                let result = Store::open().and_then(|store| {
+                    if store.resurfaced_today(now, offset) {
+                        return Ok(None);
+                    }
+                    store
+                        .refresh_resurfacing(now, offset, resurface::REDISCOVER_LIMIT)
+                        .map(Some)
+                });
+                let fresh = result.unwrap_or_else(|e| {
+                    eprintln!("resurfacing failed: {e}");
+                    None
+                });
+                let _ = tx.send(fresh.map(|picks| picks.into_iter().map(|p| p.id).collect()));
+                ctx.request_repaint();
             });
-            let fresh = result.unwrap_or_else(|e| {
-                eprintln!("resurfacing failed: {e}");
-                None
-            });
-            let _ = tx.send(fresh.map(|picks| picks.into_iter().map(|p| p.id).collect()));
-            ctx.request_repaint();
-        });
         if spawned.is_ok() {
             self.rediscover_job = Some(rx);
         }
@@ -307,7 +357,8 @@ impl EbbApp {
         self.reload_cards();
         place_resurfaced(&self.store, &mut self.cards, fresh, self.full_area);
         // They come in like new cards.
-        self.appearing.extend(fresh.iter().map(|id| (*id, Instant::now())));
+        self.appearing
+            .extend(fresh.iter().map(|id| (*id, Instant::now())));
         self.library.lock().unwrap().invalidate();
         self.bar.lock().unwrap().invalidate();
     }
@@ -323,7 +374,8 @@ impl EbbApp {
         }
         let pos = card::free_slot(&self.cards, area);
         let inserted = self.store.insert(&parsed, pos);
-        match self.report(inserted, "сохранить заметку, текст остался в окне захвата") {
+        match self.report(inserted, "сохранить заметку, текст остался в окне захвата")
+        {
             Some(c) => {
                 self.tag_counts = None;
                 self.appearing.push((c.id, Instant::now()));
@@ -354,7 +406,10 @@ impl EbbApp {
 
     fn layer_settings(&self) -> library::LayerSettings {
         library::LayerSettings {
-            monitor_device: self.hwnd.and_then(win::monitor_of).and_then(|m| m.device_ids.first().cloned()),
+            monitor_device: self
+                .hwnd
+                .and_then(win::monitor_of)
+                .and_then(|m| m.device_ids.first().cloned()),
             backdrop: self.backdrop,
             tint: self.tint,
             pin_bottom: win::PIN_BOTTOM.load(Ordering::Relaxed),
@@ -375,7 +430,10 @@ impl EbbApp {
         let mut lib = self.library.lock().unwrap();
         lib.settings = self.layer_settings();
         lib.open(tab);
-        ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::InnerSize(lib.size()));
+        ctx.send_viewport_cmd_to(
+            library::viewport_id(),
+            ViewportCommand::InnerSize(lib.size()),
+        );
         ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::Focus);
         ctx.request_repaint();
     }
@@ -388,7 +446,10 @@ impl EbbApp {
         lib.settings = self.layer_settings();
         lib.open(Tab::Settings);
         lib.welcome |= welcome;
-        ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::InnerSize(lib.size()));
+        ctx.send_viewport_cmd_to(
+            library::viewport_id(),
+            ViewportCommand::InnerSize(lib.size()),
+        );
         ctx.send_viewport_cmd_to(library::viewport_id(), ViewportCommand::Focus);
         ctx.request_repaint();
     }
@@ -408,11 +469,19 @@ impl EbbApp {
 
     /// Re-reads Windows' colors and repaints every window in the resulting theme.
     fn refresh_theme(&mut self, ctx: &egui::Context) {
-        theme::apply(ctx, self.theme_mode, self.card_style.background, &win::system_colors());
+        theme::apply(
+            ctx,
+            self.theme_mode,
+            self.card_style.background,
+            &win::system_colors(),
+        );
         if let Some(h) = self.hwnd {
             win::apply_backdrop(h, self.backdrop, self.collapsed);
         }
-        for h in [win::find_capture_window(), win::find_library_window()].into_iter().flatten() {
+        for h in [win::find_capture_window(), win::find_library_window()]
+            .into_iter()
+            .flatten()
+        {
             win::apply_backdrop(h, Backdrop::AccentAcrylic, true);
         }
         ctx.request_repaint_of(ViewportId::ROOT);
@@ -441,7 +510,9 @@ impl EbbApp {
             Request::SetCurtainTop(top) => self.set_curtain_top(top),
             Request::SetDismissHides(on) => {
                 self.dismiss_hides = on;
-                let _ = self.store.set_setting(SET_DISMISS, if on { "hide" } else { "back" });
+                let _ = self
+                    .store
+                    .set_setting(SET_DISMISS, if on { "hide" } else { "back" });
             }
             Request::SetSettingsOnLaunch(on) => {
                 self.settings_on_launch = on;
@@ -529,6 +600,137 @@ impl EbbApp {
         );
     }
 
+    fn floating_viewports(&self, ui: &Ui) {
+        let layer_rect = ui
+            .input(|i| i.viewport().outer_rect)
+            .map(|r| Rect::from_min_size(r.min, self.full_area));
+        let layer_accepts_drop = self.layer_visible && !self.collapsed;
+        let style = self.card_style;
+        for card in &self.floating {
+            let (card, events) = (card.clone(), self.floating_events.clone());
+            let title = format!("Ebb Note {}", card.id);
+            let created = win::find_own_window_title(&title).is_none();
+            let mut viewport = ViewportBuilder::default()
+                .with_title(title.clone())
+                .with_decorations(false)
+                .with_transparent(true)
+                .with_resizable(!card.pinned && !card.collapsed)
+                .with_min_inner_size(MIN_SIZE)
+                .with_taskbar(false);
+            if created {
+                viewport = viewport
+                    .with_inner_size(card.shown_size())
+                    .with_position(card.pos);
+            }
+            ui.ctx().show_viewport_deferred(
+                ViewportId::from_hash_of(("floating-card", card.id)),
+                viewport,
+                move |ui, _class| {
+                    let hwnd = win::find_own_window_title(&title);
+                    if let Some(h) = hwnd {
+                        win::set_window_rounded(h, false);
+                        win::install_window_rules(h, win::BORDERLESS);
+                    }
+                    let full = ui.max_rect();
+                    let original_size = card.size;
+                    let mut card = card.clone();
+                    card.pos = Pos2::ZERO;
+                    let viewport_rect = ui.input(|i| i.viewport().outer_rect);
+                    let scale = ui.input(|i| i.viewport().native_pixels_per_point);
+                    let native_resize_id = Id::new(("card", card.id)).with("window-resize");
+                    let native_resizing = ui
+                        .data(|data| data.get_temp::<bool>(native_resize_id))
+                        .unwrap_or(false);
+                    if native_resizing && !card.collapsed {
+                        card.size = full.size();
+                    }
+                    let hovered = ui
+                        .input(|i| i.pointer.hover_pos())
+                        .is_some_and(|p| full.contains(p));
+                    let actions = card_ui(
+                        ui,
+                        full.min,
+                        full.size(),
+                        &mut card,
+                        hovered,
+                        None,
+                        false,
+                        None,
+                        false,
+                        None,
+                        style,
+                        true,
+                    );
+                    let desired_size = card.shown_size();
+                    let native_size = ui
+                        .input(|i| i.viewport().inner_rect)
+                        .map(|rect| rect.size());
+                    let safe = viewport_rect.zip(scale).map(|(rect, scale)| {
+                        let desired = Rect::from_min_size(rect.min, desired_size);
+                        hwnd.map_or_else(
+                            || win::clamp_to_work_area(desired, scale),
+                            |h| win::clamp_to_work_area_on(h, desired, scale),
+                        )
+                    });
+                    if let (Some(rect), Some(safe)) = (viewport_rect, safe) {
+                        if safe != rect.min {
+                            ui.ctx()
+                                .send_viewport_cmd(ViewportCommand::OuterPosition(safe));
+                        }
+                    }
+                    if card.size != original_size {
+                        if !native_resizing && native_size != Some(desired_size) {
+                            ui.ctx()
+                                .send_viewport_cmd(ViewportCommand::InnerSize(desired_size));
+                        }
+                        if let Some(safe) = safe {
+                            events
+                                .lock()
+                                .unwrap()
+                                .push(FloatingEvent::Resized(card.id, safe, card.size));
+                            ui.ctx().request_repaint_of(ViewportId::ROOT);
+                        }
+                    }
+                    for action in actions {
+                        match action {
+                            CardAction::WindowDragStopped => {
+                                if let Some((rect, scale)) = ui.input(|i| {
+                                    i.viewport()
+                                        .outer_rect
+                                        .zip(i.viewport().native_pixels_per_point)
+                                }) {
+                                    let safe = win::clamp_to_work_area(
+                                        Rect::from_min_size(rect.min, card.shown_size()),
+                                        scale,
+                                    );
+                                    let over_layer = layer_accepts_drop
+                                        && layer_rect.is_some_and(|target| {
+                                            target.contains(
+                                                Rect::from_min_size(safe, card.shown_size())
+                                                    .center(),
+                                            )
+                                        });
+                                    events
+                                        .lock()
+                                        .unwrap()
+                                        .push(FloatingEvent::Dropped(card.id, safe, over_layer));
+                                    ui.ctx().request_repaint_of(ViewportId::ROOT);
+                                }
+                            }
+                            action => {
+                                events
+                                    .lock()
+                                    .unwrap()
+                                    .push(FloatingEvent::Action(card.id, action));
+                                ui.ctx().request_repaint_of(ViewportId::ROOT);
+                            }
+                        }
+                    }
+                },
+            );
+        }
+    }
+
     /// Shows a card on the layer: brings it to front, or restores it from the archive
     /// into a free slot. Counts as viewed.
     fn open_card(&mut self, ctx: &egui::Context, id: i64) {
@@ -537,7 +739,9 @@ impl EbbApp {
         let idx = match self.cards.iter().position(|c| c.id == id) {
             Some(idx) => idx,
             None => {
-                let Ok(Some(mut card)) = self.store.card(id) else { return };
+                let Ok(Some(mut card)) = self.store.card(id) else {
+                    return;
+                };
                 card.archived = false;
                 card.placement = Placement::Manual;
                 card.size = card.size.max(MIN_SIZE);
@@ -568,23 +772,37 @@ impl EbbApp {
         if let Ok(cards) = self.store.load() {
             let now = Instant::now();
             // Cards that weren't on the layer before appear; ones that left fade out.
-            for c in cards.iter().filter(|c| !self.cards.iter().any(|old| old.id == c.id)) {
+            for c in cards
+                .iter()
+                .filter(|c| !self.cards.iter().any(|old| old.id == c.id))
+            {
                 self.appearing.push((c.id, now));
             }
-            let gone = self.cards.drain(..).filter(|old| !cards.iter().any(|c| c.id == old.id));
+            let gone = self
+                .cards
+                .drain(..)
+                .filter(|old| !cards.iter().any(|c| c.id == old.id));
             self.leaving.extend(gone.map(|c| (c, now)));
             // Back before its leave animation ended (a quick Undo): drawn once, not twice.
-            self.leaving.retain(|(old, _)| !cards.iter().any(|c| c.id == old.id));
+            self.leaving
+                .retain(|(old, _)| !cards.iter().any(|c| c.id == old.id));
             self.cards = cards;
             // A card back from the archive (pinned in the review, say) keeps its old
             // spot if it's still on the layer; an imported one never had one.
             let layer = Rect::from_min_size(Pos2::ZERO, self.full_area);
             for idx in 0..self.cards.len() {
                 let c = &self.cards[idx];
-                let fresh = self.appearing.iter().any(|(id, t)| *id == c.id && *t == now);
-                if fresh && (c.pos == Pos2::ZERO || !layer.contains_rect(Rect::from_min_size(c.pos, c.size))) {
+                let fresh = self
+                    .appearing
+                    .iter()
+                    .any(|(id, t)| *id == c.id && *t == now);
+                if fresh
+                    && (c.pos == Pos2::ZERO
+                        || !layer.contains_rect(Rect::from_min_size(c.pos, c.size)))
+                {
                     self.cards[idx].pos = pos2(-1.0e5, -1.0e5);
-                    self.cards[idx].pos = card::free_slot_for(&self.cards, self.cards[idx].size, self.full_area);
+                    self.cards[idx].pos =
+                        card::free_slot_for(&self.cards, self.cards[idx].size, self.full_area);
                     self.save(idx);
                 }
             }
@@ -594,13 +812,190 @@ impl EbbApp {
 
 impl eframe::App for EbbApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut events = self.floating_events.lock().unwrap();
+        for event in events.drain(..) {
+            match event {
+                FloatingEvent::Resized(id, pos, size) => {
+                    if let Some(card) = self.floating.iter_mut().find(|c| c.id == id) {
+                        card.pos = pos;
+                        card.size = size;
+                        let _ = self.store.save(card);
+                    }
+                }
+                FloatingEvent::Dropped(id, pos, over_layer) => {
+                    if over_layer {
+                        if let Some(idx) = self.floating.iter().position(|c| c.id == id) {
+                            let mut card = self.floating.remove(idx);
+                            let origin = ctx
+                                .input(|i| i.viewport().outer_rect.map_or(Pos2::ZERO, |r| r.min));
+                            let max = self.full_area - card.size;
+                            card.pos = pos2(
+                                (pos.x - origin.x).clamp(0.0, max.x.max(0.0)),
+                                (pos.y - origin.y).clamp(0.0, max.y.max(0.0)),
+                            );
+                            card.placement = Placement::Manual;
+                            let _ = self.store.save(&card);
+                            self.cards.push(card);
+                        }
+                    } else if let Some(card) = self.floating.iter_mut().find(|c| c.id == id) {
+                        card.pos = pos;
+                        let _ = self.store.save(card);
+                    }
+                }
+                FloatingEvent::Action(id, action) => {
+                    let Some(idx) = self.floating.iter().position(|c| c.id == id) else {
+                        continue;
+                    };
+                    match action {
+                        CardAction::Front | CardAction::Moved | CardAction::WindowDragStopped => {
+                            let _ = self.store.touch(id);
+                        }
+                        CardAction::Copy => {
+                            let c = &self.floating[idx];
+                            if c.kind == card::Kind::Private {
+                                if let Ok(Some(secret)) = self.store.secret(id) {
+                                    let _ = win::copy_private(&secret);
+                                }
+                            } else {
+                                let text = if c.title.is_empty() {
+                                    c.body.clone()
+                                } else {
+                                    format!("{}\n{}", c.title, c.body)
+                                };
+                                ctx.copy_text(crate::rich_text::strip_markup(&text));
+                            }
+                            let _ = self.store.touch(id);
+                        }
+                        CardAction::Duplicate => {
+                            let src = self.floating[idx].clone();
+                            let body = if src.kind == card::Kind::Private {
+                                match self.store.secret(src.id) {
+                                    Ok(Some(secret)) => secret,
+                                    _ => continue,
+                                }
+                            } else {
+                                src.body.clone()
+                            };
+                            let parsed = card::Parsed {
+                                kind: src.kind,
+                                title: src.title.clone(),
+                                body,
+                                tags: src.tags.clone(),
+                            };
+                            if let Ok(mut copy) = self.store.insert(&parsed, Pos2::ZERO) {
+                                copy.size = src.size;
+                                copy.tint = src.tint;
+                                copy.pos = src.pos + vec2(24.0, 24.0);
+                                copy.placement = Placement::Desktop;
+                                if self.store.save(&copy).is_ok() {
+                                    self.floating.push(copy);
+                                }
+                            }
+                        }
+                        CardAction::TogglePin => {
+                            let c = &mut self.floating[idx];
+                            c.pinned = !c.pinned;
+                            let _ = self.store.save(c);
+                        }
+                        CardAction::SetTint(tint) => {
+                            self.floating[idx].tint = tint;
+                            let c = &self.floating[idx];
+                            let _ = self.store.save(c);
+                        }
+                        CardAction::SetKind(kind) => {
+                            if self.store.set_kind(id, kind).is_ok()
+                                && let Ok(Some(stored)) = self.store.card(id)
+                            {
+                                self.floating[idx].kind = stored.kind;
+                                self.floating[idx].title = stored.title;
+                                self.floating[idx].body = stored.body;
+                            }
+                        }
+                        CardAction::ToggleCollapse => {
+                            let collapsed = !self.floating[idx].collapsed;
+                            if self.store.set_collapsed(id, collapsed).is_ok() {
+                                self.floating[idx].collapsed = collapsed;
+                            }
+                        }
+                        CardAction::SetIdeaStatus(status) => {
+                            if self.store.set_idea_status(id, status).is_ok() {
+                                self.floating[idx].idea_status = status;
+                            }
+                        }
+                        CardAction::ToggleCheck(line) => {
+                            let text = card::toggle_check(&self.floating[idx].body, line);
+                            self.floating[idx].body = text;
+                            let c = &self.floating[idx];
+                            let _ = self.store.save(c);
+                        }
+                        CardAction::RemoveTag(tag) => {
+                            self.floating[idx].body =
+                                card::without_tag(&self.floating[idx].body, &tag);
+                            self.floating[idx].tags = card::tags_of(
+                                &crate::rich_text::strip_markup(&self.floating[idx].body),
+                            );
+                            let c = &self.floating[idx];
+                            let _ = self.store.save(c);
+                        }
+                        CardAction::OpenLink => {
+                            if let Some(url) = card::first_url(&self.floating[idx].body) {
+                                win::open_url(url);
+                            }
+                        }
+                        CardAction::Archive | CardAction::Done => {
+                            let c = &mut self.floating[idx];
+                            c.archived = true;
+                            c.placement = Placement::Archive;
+                            if self.store.save(c).is_ok() {
+                                self.floating.remove(idx);
+                            }
+                        }
+                        CardAction::Delete => {
+                            if self.store.delete(id).is_ok() {
+                                self.floating.remove(idx);
+                            }
+                        }
+                        CardAction::Snooze(days) => {
+                            if self
+                                .store
+                                .snooze(
+                                    id,
+                                    resurface::snooze_until(
+                                        resurface::unix_now(),
+                                        crate::search::local_offset_secs(),
+                                        days,
+                                    ),
+                                )
+                                .is_ok()
+                            {
+                                self.floating.remove(idx);
+                            }
+                        }
+                        CardAction::Keep => {
+                            let mut card = self.floating.remove(idx);
+                            card.placement = Placement::Manual;
+                            card.pos = card::free_slot_for(&self.cards, card.size, self.full_area);
+                            let _ = self.store.save(&card);
+                            self.cards.push(card);
+                        }
+                        CardAction::Detach(_)
+                        | CardAction::StartEdit
+                        | CardAction::Reveal
+                        | CardAction::AddTag(_) => {}
+                    }
+                }
+            }
+        }
+        drop(events);
         // Runs even while the layer is hidden, so tray and hotkey events work then too.
         let mut pressed = None;
         for event in self.shell.take_events() {
             match event {
                 Event::Capture(t) => pressed = Some((Mode::Capture, t)),
                 Event::Search(t) => pressed = Some((Mode::Search, t)),
-                Event::ToggleLayer if self.layer_visible && !self.collapsed => self.set_layer_visible(ctx, false),
+                Event::ToggleLayer if self.layer_visible && !self.collapsed => {
+                    self.set_layer_visible(ctx, false)
+                }
                 Event::ToggleLayer => self.summon(ctx),
                 Event::TrayClick => self.tray_click(ctx),
                 Event::Launched => {
@@ -613,18 +1008,28 @@ impl eframe::App for EbbApp {
                 Event::HotkeysChanged => {
                     let keys = self.shell.hotkeys().unwrap_or_default();
                     let mut lib = self.library.lock().unwrap();
-                    (lib.settings.capture_hotkey, lib.settings.search_hotkey) = (keys.capture, keys.search);
+                    (lib.settings.capture_hotkey, lib.settings.search_hotkey) =
+                        (keys.capture, keys.search);
                     ctx.request_repaint_of(library::viewport_id());
                 }
                 // Slept through the morning, or the clock moved: look again now
                 // (a pick already made today is left as it is).
                 Event::ClockChanged => self.next_rediscover = 0,
-                Event::TogglePinBottom => self.set_pin_bottom(!win::PIN_BOTTOM.load(Ordering::Relaxed)),
+                Event::TogglePinBottom => {
+                    self.set_pin_bottom(!win::PIN_BOTTOM.load(Ordering::Relaxed))
+                }
                 Event::Exit => ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close),
                 Event::ImportSticky => self.apply_library_request(ctx, Request::ImportSticky),
                 Event::OpenLibrary(true) => self.open_settings(ctx, false),
                 event @ (Event::OpenLibrary(false) | Event::OpenReview) => {
-                    self.open_library(ctx, if matches!(event, Event::OpenReview) { Tab::Review } else { Tab::Archive });
+                    self.open_library(
+                        ctx,
+                        if matches!(event, Event::OpenReview) {
+                            Tab::Review
+                        } else {
+                            Tab::Archive
+                        },
+                    );
                 }
             }
         }
@@ -697,10 +1102,16 @@ impl eframe::App for EbbApp {
             match bar.hwnd {
                 Some(h) => {
                     let (done, ctx) = (self.bar_faded_out.clone(), ctx.clone());
-                    win::fade(h, 255, 0, Duration::from_secs_f32(bar::DISAPPEAR_SECS), move || {
-                        done.store(true, Ordering::Relaxed);
-                        ctx.request_repaint();
-                    });
+                    win::fade(
+                        h,
+                        255,
+                        0,
+                        Duration::from_secs_f32(bar::DISAPPEAR_SECS),
+                        move || {
+                            done.store(true, Ordering::Relaxed);
+                            ctx.request_repaint();
+                        },
+                    );
                 }
                 None => {
                     bar.shown = false;
@@ -779,7 +1190,11 @@ impl eframe::App for EbbApp {
                 let hooks = crate::bench::Hooks {
                     trigger: Some(Box::new(move |search| {
                         let t = Instant::now();
-                        let event = if search { Event::Search(t) } else { Event::Capture(t) };
+                        let event = if search {
+                            Event::Search(t)
+                        } else {
+                            Event::Capture(t)
+                        };
                         shell.events.lock().unwrap().push(event);
                         ctx.request_repaint();
                     })),
@@ -793,7 +1208,8 @@ impl eframe::App for EbbApp {
                 win::raise(h);
             }
             if self.library.lock().unwrap().placed {
-                ui.ctx().send_viewport_cmd_to(library::viewport_id(), ViewportCommand::Focus);
+                ui.ctx()
+                    .send_viewport_cmd_to(library::viewport_id(), ViewportCommand::Focus);
             }
         }
 
@@ -818,9 +1234,23 @@ impl eframe::App for EbbApp {
         if f4 {
             // Next card marker, to compare them on the real layer.
             let all = card::Marker::ALL;
-            let next = all[(all.iter().position(|m| *m == self.card_style.marker).unwrap_or(0) + 1) % all.len()];
-            self.set_card_style(ui.ctx(), card::CardStyle { marker: next, ..self.card_style });
-            self.toast = Some(Toast::new(format!("Вид карточек: {} (F4 — дальше)", next.label()), None));
+            let next = all[(all
+                .iter()
+                .position(|m| *m == self.card_style.marker)
+                .unwrap_or(0)
+                + 1)
+                % all.len()];
+            self.set_card_style(
+                ui.ctx(),
+                card::CardStyle {
+                    marker: next,
+                    ..self.card_style
+                },
+            );
+            self.toast = Some(Toast::new(
+                format!("Вид карточек: {} (F4 — дальше)", next.label()),
+                None,
+            ));
         }
         if esc && !self.collapsed {
             if self.editing.is_some() {
@@ -854,7 +1284,8 @@ impl eframe::App for EbbApp {
         } else {
             self.full_area = full.size();
             self.step_curtain(ui.ctx());
-            ui.painter().rect_filled(full, CornerRadius::ZERO, theme::scrim(self.tint));
+            ui.painter()
+                .rect_filled(full, CornerRadius::ZERO, theme::scrim(self.tint));
             // Slides down as the curtain closes.
             let drop = vec2(0.0, self.curtain_dir() * self.curtain * CURTAIN_DROP);
             let moved = full.translate(drop);
@@ -865,7 +1296,10 @@ impl eframe::App for EbbApp {
                 self.cards_ui(ui);
             });
             ui.scope_builder(UiBuilder::new().max_rect(moved), |ui| {
-                if self.sticky.ui(ui, &mut self.store, &mut self.cards, self.hwnd) {
+                if self
+                    .sticky
+                    .ui(ui, &mut self.store, &mut self.cards, self.hwnd)
+                {
                     self.open_library(ui.ctx(), Tab::Import);
                 }
                 self.toast_ui(ui);
@@ -880,6 +1314,7 @@ impl eframe::App for EbbApp {
         // saves ~4 MiB but doubles the first-show latency and flashes without acrylic.
         self.bar_viewport(ui);
         self.library_viewport(ui);
+        self.floating_viewports(ui);
     }
 
     #[cfg(feature = "glow")]
@@ -900,7 +1335,11 @@ impl eframe::App for EbbApp {
 /// Appends one line to %LOCALAPPDATA%\Ebb\timing.log. Runs off the UI thread:
 /// the logon-session and process-snapshot queries take a few milliseconds.
 fn log_first_frame(frame_at: u64, proc_ms: f64, main_ms: f64, autostarted: bool) {
-    let since = |t: Option<u64>| t.map_or("?".to_owned(), |t| format!("{:.0}", win::ms_between(t, frame_at)));
+    let since = |t: Option<u64>| {
+        t.map_or("?".to_owned(), |t| {
+            format!("{:.0}", win::ms_between(t, frame_at))
+        })
+    };
     let logon = win::logon_filetime();
     let rel = |t: Option<u64>| match (logon, t) {
         (Some(l), Some(t)) => format!("{:.0}", win::ms_between(l, t)),
@@ -919,7 +1358,11 @@ fn log_first_frame(frame_at: u64, proc_ms: f64, main_ms: f64, autostarted: bool)
 pub(crate) fn append_timing_log(line: &str) {
     if let Some(dir) = crate::store::db_path().parent() {
         use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("timing.log")) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("timing.log"))
+        {
             let _ = f.write_all(line.as_bytes());
         }
     }
@@ -935,9 +1378,14 @@ fn place_resurfaced(store: &Store, cards: &mut [Card], fresh: &[i64], area: Vec2
         return;
     }
     let away = pos2(-1.0e5, -1.0e5);
-    cards.iter_mut().filter(|c| fresh.contains(&c.id)).for_each(|c| c.pos = away);
+    cards
+        .iter_mut()
+        .filter(|c| fresh.contains(&c.id))
+        .for_each(|c| c.pos = away);
     for id in fresh {
-        let Some(idx) = cards.iter().position(|c| c.id == *id) else { continue };
+        let Some(idx) = cards.iter().position(|c| c.id == *id) else {
+            continue;
+        };
         cards[idx].size = cards[idx].size.max(MIN_SIZE);
         cards[idx].pos = card::free_slot_for(cards, cards[idx].size, area);
         if let Err(e) = store.save(&cards[idx]) {

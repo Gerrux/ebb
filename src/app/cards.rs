@@ -44,8 +44,12 @@ pub(super) struct PromptFill {
 
 impl EbbApp {
     pub(super) fn commit_edit(&mut self) {
-        let Some((id, buf)) = self.editing.take() else { return };
-        let Some(idx) = self.cards.iter().position(|c| c.id == id) else { return };
+        let Some((id, buf)) = self.editing.take() else {
+            return;
+        };
+        let Some(idx) = self.cards.iter().position(|c| c.id == id) else {
+            return;
+        };
         let buf = rich_text::trim(&buf);
         let c = &mut self.cards[idx];
         // Saved as written; an old separate title becomes the first line of the text.
@@ -77,11 +81,19 @@ impl EbbApp {
 
     /// Rewrites a card's text for a tag change; its tags follow from the text, as
     /// after editing. The title and text it had, if the change was saved.
-    fn retag(&mut self, idx: usize, change: impl FnOnce(&str) -> String) -> Option<(String, String)> {
+    fn retag(
+        &mut self,
+        idx: usize,
+        change: impl FnOnce(&str) -> String,
+    ) -> Option<(String, String)> {
         self.commit_edit_of(self.cards[idx].id);
         let c = &mut self.cards[idx];
         let old = (c.title.clone(), c.body.clone());
-        let text = if c.title.is_empty() { c.body.clone() } else { format!("{}\n{}", c.title, c.body) };
+        let text = if c.title.is_empty() {
+            c.body.clone()
+        } else {
+            format!("{}\n{}", c.title, c.body)
+        };
         c.title.clear();
         c.body = change(&text);
         c.tags = card::tags_of(&rich_text::strip_markup(&c.body));
@@ -100,7 +112,9 @@ impl EbbApp {
     /// The field under a card's "+" chip: type a tag and Enter, or pick one of
     /// the most used; Esc or a click elsewhere closes it.
     fn tag_input_ui(&mut self, ui: &mut Ui) {
-        let Some(input) = &mut self.tag_input else { return };
+        let Some(input) = &mut self.tag_input else {
+            return;
+        };
         let Some(idx) = self.cards.iter().position(|c| c.id == input.card) else {
             self.tag_input = None;
             return;
@@ -108,36 +122,58 @@ impl EbbApp {
         if self.tag_counts.is_none() {
             self.tag_counts = Some(self.store.tag_counts().unwrap_or_default());
         }
-        let suggestions = card::suggest_tags(self.tag_counts.as_deref().unwrap_or_default(), &input.text, &self.cards[idx].tags, 6);
+        let suggestions = card::suggest_tags(
+            self.tag_counts.as_deref().unwrap_or_default(),
+            &input.text,
+            &self.cards[idx].tags,
+            6,
+        );
         let (mut chosen, mut cancel) = (None, false);
-        let area = egui::Area::new(Id::new("tag-input")).order(egui::Order::Foreground).fixed_pos(input.at + vec2(0.0, 4.0)).show(ui.ctx(), |ui| {
-            egui::Frame::popup(ui.style()).inner_margin(8).show(ui, |ui| {
-                ui.set_width(200.0);
-                let field = egui::TextEdit::singleline(&mut input.text).id(Id::new("tag-input-field")).hint_text("новый тег").desired_width(f32::INFINITY);
-                let resp = ui.add(field);
-                if !input.focused {
-                    resp.request_focus();
-                    input.focused = true;
-                }
-                if resp.lost_focus() && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
-                    chosen = card::normalize_tag(&input.text);
-                    cancel = chosen.is_none();
-                }
-                if !suggestions.is_empty() {
-                    ui.add_space(4.0);
-                }
-                for tag in &suggestions {
-                    let button = egui::Button::new(RichText::new(format!("#{tag}")).size(13.5)).min_size(vec2(ui.available_width(), 0.0));
-                    if ui.add(button).clicked() {
-                        chosen = Some(tag.clone());
-                    }
-                }
+        let area = egui::Area::new(Id::new("tag-input"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(input.at + vec2(0.0, 4.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style())
+                    .inner_margin(8)
+                    .show(ui, |ui| {
+                        ui.set_width(200.0);
+                        let field = egui::TextEdit::singleline(&mut input.text)
+                            .id(Id::new("tag-input-field"))
+                            .hint_text("новый тег")
+                            .desired_width(f32::INFINITY);
+                        let resp = ui.add(field);
+                        if !input.focused {
+                            resp.request_focus();
+                            input.focused = true;
+                        }
+                        if resp.lost_focus()
+                            && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter))
+                        {
+                            chosen = card::normalize_tag(&input.text);
+                            cancel = chosen.is_none();
+                        }
+                        if !suggestions.is_empty() {
+                            ui.add_space(4.0);
+                        }
+                        for tag in &suggestions {
+                            let button =
+                                egui::Button::new(RichText::new(format!("#{tag}")).size(13.5))
+                                    .min_size(vec2(ui.available_width(), 0.0));
+                            if ui.add(button).clicked() {
+                                chosen = Some(tag.clone());
+                            }
+                        }
+                    });
             });
-        });
         let cancelled = cancel
             || ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
             || (ui.ctx().cumulative_pass_nr() > input.opened_pass
-                && ui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p))));
+                && ui.input(|i| {
+                    i.pointer.any_pressed()
+                        && i.pointer
+                            .interact_pos()
+                            .is_some_and(|p| !area.response.rect.contains(p))
+                }));
         if let Some(tag) = chosen {
             self.tag_input = None;
             self.retag(idx, |text| card::with_tag(text, &tag));
@@ -149,7 +185,9 @@ impl EbbApp {
     /// The values for a Prompt's `{{variables}}`, over its card. Enter moves to the
     /// next field and copies from the last; Esc or a click elsewhere closes it.
     fn prompt_fill_ui(&mut self, ui: &mut Ui, origin: Pos2) {
-        let Some(fill) = &mut self.prompt_fill else { return };
+        let Some(fill) = &mut self.prompt_fill else {
+            return;
+        };
         let Some(card) = self.cards.iter().find(|c| c.id == fill.card) else {
             self.prompt_fill = None;
             return;
@@ -158,44 +196,72 @@ impl EbbApp {
         let at = origin + card.pos.to_vec2() + vec2(0.0, HEADER_H);
         let count = fill.values.len();
         let (mut copy, mut cancel) = (false, false);
-        let area = egui::Area::new(Id::new("prompt-fill")).order(egui::Order::Foreground).fixed_pos(at).show(ui.ctx(), |ui| {
-            egui::Frame::popup(ui.style()).inner_margin(12).show(ui, |ui| {
-                ui.set_width(width - 24.0);
-                ui.add(egui::Label::new(RichText::new("Подставить в prompt").size(12.0).color(theme::muted())).selectable(false));
-                ui.add_space(4.0);
-                for (i, (name, value)) in fill.values.iter_mut().enumerate() {
-                    ui.add(egui::Label::new(RichText::new(name.as_str()).size(13.0).color(theme::text())).selectable(false));
-                    let field = egui::TextEdit::singleline(value)
-                        .id(Id::new(("prompt-var", i)))
-                        .hint_text(format!("{{{{{name}}}}}"))
-                        .desired_width(f32::INFINITY);
-                    let resp = ui.add(field);
-                    if i == 0 && !fill.focused {
-                        resp.request_focus();
-                        fill.focused = true;
-                    }
-                    // Taken from the input, or the next field, focused in this same
-                    // pass, would see the Enter too and give the focus up again.
-                    if resp.lost_focus() && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter)) {
-                        if i + 1 == count {
-                            copy = true;
-                        } else {
-                            ui.memory_mut(|m| m.request_focus(Id::new(("prompt-var", i + 1))));
+        let area = egui::Area::new(Id::new("prompt-fill"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(at)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style())
+                    .inner_margin(12)
+                    .show(ui, |ui| {
+                        ui.set_width(width - 24.0);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new("Подставить в prompt")
+                                    .size(12.0)
+                                    .color(theme::muted()),
+                            )
+                            .selectable(false),
+                        );
+                        ui.add_space(4.0);
+                        for (i, (name, value)) in fill.values.iter_mut().enumerate() {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(name.as_str()).size(13.0).color(theme::text()),
+                                )
+                                .selectable(false),
+                            );
+                            let field = egui::TextEdit::singleline(value)
+                                .id(Id::new(("prompt-var", i)))
+                                .hint_text(format!("{{{{{name}}}}}"))
+                                .desired_width(f32::INFINITY);
+                            let resp = ui.add(field);
+                            if i == 0 && !fill.focused {
+                                resp.request_focus();
+                                fill.focused = true;
+                            }
+                            // Taken from the input, or the next field, focused in this same
+                            // pass, would see the Enter too and give the focus up again.
+                            if resp.lost_focus()
+                                && ui.input_mut(|input| {
+                                    input.consume_key(Modifiers::NONE, Key::Enter)
+                                })
+                            {
+                                if i + 1 == count {
+                                    copy = true;
+                                } else {
+                                    ui.memory_mut(|m| {
+                                        m.request_focus(Id::new(("prompt-var", i + 1)))
+                                    });
+                                }
+                            }
+                            ui.add_space(2.0);
                         }
-                    }
-                    ui.add_space(2.0);
-                }
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    copy |= ui.button(RichText::new("Копировать").size(14.0)).clicked();
-                    cancel |= ui.button(RichText::new("Отмена").size(14.0)).clicked();
-                });
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            copy |= ui.button(RichText::new("Копировать").size(14.0)).clicked();
+                            cancel |= ui.button(RichText::new("Отмена").size(14.0)).clicked();
+                        });
+                    });
             });
-        });
         let cancelled = cancel
             || ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
             || (ui.ctx().cumulative_pass_nr() > fill.opened_pass
-                && ui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p))));
+                && ui.input(|i| {
+                    i.pointer.any_pressed()
+                        && i.pointer
+                            .interact_pos()
+                            .is_some_and(|p| !area.response.rect.contains(p))
+                }));
         if copy {
             let (id, text) = (fill.card, card::fill_prompt(&fill.text, &fill.values));
             ui.ctx().copy_text(text);
@@ -239,10 +305,13 @@ impl EbbApp {
 
     pub(super) fn cards_ui(&mut self, ui: &mut Ui) {
         let origin = ui.max_rect().min;
+        let desktop_origin = ui.input(|i| i.viewport().outer_rect.map_or(Pos2::ZERO, |r| r.min));
         // Not over a card while it's over the menu or another popup above the layer.
-        let pointer = ui
-            .input(|i| i.pointer.hover_pos())
-            .filter(|&p| ui.ctx().layer_id_at(p).is_none_or(|l| l.order == egui::Order::Background));
+        let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|&p| {
+            ui.ctx()
+                .layer_id_at(p)
+                .is_none_or(|l| l.order == egui::Order::Background)
+        });
         let hovered_id = pointer.and_then(|p| {
             self.cards
                 .iter()
@@ -275,27 +344,55 @@ impl EbbApp {
         }
 
         // Where cards are (layer coordinates), for the magnet; None with it off.
-        let rects: Vec<(i64, Rect)> = self.cards.iter().map(|c| (c.id, Rect::from_min_size(c.pos, c.shown_size()))).collect();
+        let rects: Vec<(i64, Rect)> = self
+            .cards
+            .iter()
+            .map(|c| (c.id, Rect::from_min_size(c.pos, c.shown_size())))
+            .collect();
         let magnet = self.snap.then_some(rects.as_slice());
         let style = self.card_style;
         let mut actions: Vec<(usize, Action)> = Vec::new();
         for idx in 0..self.cards.len() {
             let id = self.cards[idx].id;
-            let editing = self.editing.as_mut().filter(|(eid, _)| *eid == id).map(|(_, b)| b);
+            let editing = self
+                .editing
+                .as_mut()
+                .filter(|(eid, _)| *eid == id)
+                .map(|(_, b)| b);
             let revealed = self.revealed.is_some_and(|(rid, _)| rid == id);
-            let revealed_text = self.revealed_text.as_ref().filter(|(rid, _)| *rid == id).map(|(_, text)| text.as_str());
+            let revealed_text = self
+                .revealed_text
+                .as_ref()
+                .filter(|(rid, _)| *rid == id)
+                .map(|(_, text)| text.as_str());
             let appear = self
                 .appearing
                 .iter()
                 .find(|(aid, _)| *aid == id)
-                .map_or(1.0, |(_, at)| ease(at.elapsed().as_secs_f32() / CARD_APPEAR.as_secs_f32()));
-            let active = self.active == Some(id) || self.highlighted.is_some_and(|(hid, _)| hid == id);
+                .map_or(1.0, |(_, at)| {
+                    ease(at.elapsed().as_secs_f32() / CARD_APPEAR.as_secs_f32())
+                });
+            let active =
+                self.active == Some(id) || self.highlighted.is_some_and(|(hid, _)| hid == id);
             let card = &mut self.cards[idx];
             let hovered = hovered_id == Some(id);
             let produced = ui
                 .scope(|ui| {
                     ui.multiply_opacity(appear);
-                    card_ui(ui, origin + vec2(0.0, (1.0 - appear) * 10.0), area, card, hovered, editing, revealed, revealed_text, active, magnet, style)
+                    card_ui(
+                        ui,
+                        origin + vec2(0.0, (1.0 - appear) * 10.0),
+                        area,
+                        card,
+                        hovered,
+                        editing,
+                        revealed,
+                        revealed_text,
+                        active,
+                        magnet,
+                        style,
+                        false,
+                    )
                 })
                 .inner;
             for a in produced {
@@ -307,7 +404,20 @@ impl EbbApp {
             ui.scope(|ui| {
                 ui.disable();
                 ui.multiply_opacity(1.0 - t);
-                let _ = card_ui(ui, origin + vec2(0.0, t * 6.0), area, card, false, None, false, None, false, None, style);
+                let _ = card_ui(
+                    ui,
+                    origin + vec2(0.0, t * 6.0),
+                    area,
+                    card,
+                    false,
+                    None,
+                    false,
+                    None,
+                    false,
+                    None,
+                    style,
+                    false,
+                );
             });
         }
 
@@ -315,9 +425,15 @@ impl EbbApp {
             match self.cards.iter().find(|c| c.id == hid) {
                 Some(c) if t.elapsed() < HIGHLIGHT_FOR => {
                     let fade = 1.0 - t.elapsed().as_secs_f32() / HIGHLIGHT_FOR.as_secs_f32();
-                    let rect = Rect::from_min_size(origin + c.pos.to_vec2(), c.shown_size()).expand(3.0);
+                    let rect =
+                        Rect::from_min_size(origin + c.pos.to_vec2(), c.shown_size()).expand(3.0);
                     let stroke = Stroke::new(2.0, c.accent().gamma_multiply(fade));
-                    ui.painter().rect_stroke(rect, CornerRadius::same(self.card_style.radius + 2), stroke, StrokeKind::Outside);
+                    ui.painter().rect_stroke(
+                        rect,
+                        CornerRadius::same(self.card_style.radius + 2),
+                        stroke,
+                        StrokeKind::Outside,
+                    );
                     ui.ctx().request_repaint();
                 }
                 _ => self.highlighted = None,
@@ -325,12 +441,27 @@ impl EbbApp {
         }
 
         // 1–8 change the selected card's kind (not while typing anywhere).
-        if let Some(idx) = self.active.and_then(|a| self.cards.iter().position(|c| c.id == a))
+        if let Some(idx) = self
+            .active
+            .and_then(|a| self.cards.iter().position(|c| c.id == a))
             && self.editing.is_none()
             && !ui.ctx().egui_wants_keyboard_input()
         {
-            const DIGITS: [Key; 8] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8];
-            let pressed = ui.input_mut(|i| DIGITS.iter().position(|k| i.consume_key(Modifiers::NONE, *k)));
+            const DIGITS: [Key; 8] = [
+                Key::Num1,
+                Key::Num2,
+                Key::Num3,
+                Key::Num4,
+                Key::Num5,
+                Key::Num6,
+                Key::Num7,
+                Key::Num8,
+            ];
+            let pressed = ui.input_mut(|i| {
+                DIGITS
+                    .iter()
+                    .position(|k| i.consume_key(Modifiers::NONE, *k))
+            });
             if let Some(n) = pressed {
                 self.set_kind(idx, Kind::ALL[n]);
             }
@@ -344,6 +475,7 @@ impl EbbApp {
 
         let mut to_front = None;
         let mut remove = None;
+        let mut detach = None;
         for (idx, action) in actions {
             let done = matches!(action, Action::Done);
             match action {
@@ -361,13 +493,18 @@ impl EbbApp {
                     }
                     let _ = self.store.touch(self.cards[idx].id);
                 }
+                Action::WindowDragStopped => {}
                 Action::Moved => {
                     self.cards[idx].placement = Placement::Manual;
                     self.save(idx);
                 }
                 Action::TogglePin => {
                     self.cards[idx].pinned ^= true;
-                    self.cards[idx].placement = if self.cards[idx].pinned { Placement::Pinned } else { Placement::Manual };
+                    self.cards[idx].placement = if self.cards[idx].pinned {
+                        Placement::Pinned
+                    } else {
+                        Placement::Manual
+                    };
                     self.save(idx);
                 }
                 Action::Copy => {
@@ -386,20 +523,47 @@ impl EbbApp {
                             mark_copied(ui, c.id);
                         } else {
                             // Its form still open (press and release in one pass): what's typed stays.
-                            let old = self.prompt_fill.take().filter(|f| f.card == c.id).map(|f| f.values).unwrap_or_default();
+                            let old = self
+                                .prompt_fill
+                                .take()
+                                .filter(|f| f.card == c.id)
+                                .map(|f| f.values)
+                                .unwrap_or_default();
                             let values = variables
                                 .into_iter()
                                 .map(|name| {
-                                    let value = old.iter().find(|(n, _)| *n == name).map(|(_, v)| v.clone()).unwrap_or_default();
+                                    let value = old
+                                        .iter()
+                                        .find(|(n, _)| *n == name)
+                                        .map(|(_, v)| v.clone())
+                                        .unwrap_or_default();
                                     (name, value)
                                 })
                                 .collect();
-                            self.prompt_fill = Some(PromptFill { card: c.id, text, values, focused: false, opened_pass: ui.ctx().cumulative_pass_nr() });
+                            self.prompt_fill = Some(PromptFill {
+                                card: c.id,
+                                text,
+                                values,
+                                focused: false,
+                                opened_pass: ui.ctx().cumulative_pass_nr(),
+                            });
                         }
                     } else {
-                        let text = if c.title.is_empty() { c.body.clone() } else { format!("{}\n{}", c.title, c.body) };
+                        let text = if c.title.is_empty() {
+                            c.body.clone()
+                        } else {
+                            format!("{}\n{}", c.title, c.body)
+                        };
                         ui.ctx().copy_text(rich_text::strip_markup(&text));
                         mark_copied(ui, c.id);
+                    }
+                }
+                Action::Detach(pos) => {
+                    self.commit_edit_of(self.cards[idx].id);
+                    self.cards[idx].pos = desktop_origin + pos.to_vec2();
+                    self.cards[idx].placement = Placement::Desktop;
+                    if self.save(idx) {
+                        detach = Some(idx);
                     }
                 }
                 Action::Duplicate => {
@@ -413,7 +577,12 @@ impl EbbApp {
                     } else {
                         src.body
                     };
-                    let parsed = card::Parsed { kind: src.kind, title: src.title, body, tags: src.tags };
+                    let parsed = card::Parsed {
+                        kind: src.kind,
+                        title: src.title,
+                        body,
+                        tags: src.tags,
+                    };
                     let inserted = self.store.insert(&parsed, pos);
                     if let Some(mut copy) = self.report(inserted, "создать копию") {
                         copy.size = src.size;
@@ -428,20 +597,32 @@ impl EbbApp {
                 Action::Archive | Action::Done => {
                     // What's typed is saved before the card goes.
                     self.commit_edit_of(self.cards[idx].id);
-                    let (placement, review_at) = (self.cards[idx].placement, self.cards[idx].review_at);
+                    let (placement, review_at) =
+                        (self.cards[idx].placement, self.cards[idx].review_at);
                     // A reminder already due is dealt with; left set, Rediscover
                     // would bring the card straight back tomorrow.
-                    if self.cards[idx].due_reminder(resurface::unix_now()).is_some() {
+                    if self.cards[idx]
+                        .due_reminder(resurface::unix_now())
+                        .is_some()
+                    {
                         self.cards[idx].review_at = None;
                     }
                     self.cards[idx].archived = true;
                     self.cards[idx].placement = Placement::Archive;
                     if !self.save(idx) {
                         // Still in the database as it was: stays on the layer.
-                        (self.cards[idx].archived, self.cards[idx].placement, self.cards[idx].review_at) = (false, placement, review_at);
+                        (
+                            self.cards[idx].archived,
+                            self.cards[idx].placement,
+                            self.cards[idx].review_at,
+                        ) = (false, placement, review_at);
                         continue;
                     }
-                    let text = if done { "Сделано, карточка в архиве" } else { "Карточка в архиве" };
+                    let text = if done {
+                        "Сделано, карточка в архиве"
+                    } else {
+                        "Карточка в архиве"
+                    };
                     self.toast = Some(Toast::new(text, Some(Undo::Unarchive(self.cards[idx].id))));
                     remove = Some(idx);
                 }
@@ -451,7 +632,10 @@ impl EbbApp {
                     if self.report(deleted, "убрать в корзину").is_none() {
                         continue;
                     }
-                    let text = format!("Карточка в корзине, {} дней можно вернуть", crate::store::TRASH_DAYS);
+                    let text = format!(
+                        "Карточка в корзине, {} дней можно вернуть",
+                        crate::store::TRASH_DAYS
+                    );
                     self.toast = Some(Toast::new(text, Some(Undo::Restore(self.cards[idx].id))));
                     remove = Some(idx);
                 }
@@ -500,13 +684,24 @@ impl EbbApp {
                 Action::SetKind(kind) => self.set_kind(idx, kind),
                 Action::RemoveTag(tag) => {
                     let id = self.cards[idx].id;
-                    if let Some((title, body)) = self.retag(idx, |text| card::without_tag(text, &tag)) {
-                        self.toast = Some(Toast::new(format!("Тег #{tag} убран"), Some(Undo::Text(id, title, body))));
+                    if let Some((title, body)) =
+                        self.retag(idx, |text| card::without_tag(text, &tag))
+                    {
+                        self.toast = Some(Toast::new(
+                            format!("Тег #{tag} убран"),
+                            Some(Undo::Text(id, title, body)),
+                        ));
                     }
                 }
                 Action::AddTag(at) => {
                     let card = self.cards[idx].id;
-                    self.tag_input = Some(TagInput { card, at, text: String::new(), focused: false, opened_pass: ui.ctx().cumulative_pass_nr() });
+                    self.tag_input = Some(TagInput {
+                        card,
+                        at,
+                        text: String::new(),
+                        focused: false,
+                        opened_pass: ui.ctx().cumulative_pass_nr(),
+                    });
                 }
                 Action::SetIdeaStatus(status) => {
                     let set = self.store.set_idea_status(self.cards[idx].id, status);
@@ -519,7 +714,17 @@ impl EbbApp {
                     self.commit_edit_of(id);
                     let collapsed = !self.cards[idx].collapsed;
                     let set = self.store.set_collapsed(id, collapsed);
-                    if self.report(set, if collapsed { "свернуть карточку" } else { "развернуть карточку" }).is_some() {
+                    if self
+                        .report(
+                            set,
+                            if collapsed {
+                                "свернуть карточку"
+                            } else {
+                                "развернуть карточку"
+                            },
+                        )
+                        .is_some()
+                    {
                         self.cards[idx].collapsed = collapsed;
                     }
                 }
@@ -530,14 +735,24 @@ impl EbbApp {
                 Action::Snooze(days) => {
                     let id = self.cards[idx].id;
                     self.commit_edit_of(id);
-                    let until = resurface::snooze_until(resurface::unix_now(), crate::search::local_offset_secs(), days);
+                    let until = resurface::snooze_until(
+                        resurface::unix_now(),
+                        crate::search::local_offset_secs(),
+                        days,
+                    );
                     let snoozed = self.store.snooze(id, until);
-                    let Some(snapshot) = self.report(snoozed, "отложить карточку") else { continue };
+                    let Some(snapshot) = self.report(snoozed, "отложить карточку")
+                    else {
+                        continue;
+                    };
                     let text = format!("Вернётся {}", resurface::snooze_label(days));
                     self.toast = Some(Toast::new(text, Some(Undo::Snooze(snapshot))));
                     remove = Some(idx);
                 }
             }
+        }
+        if let Some(idx) = detach {
+            self.floating.push(self.cards.remove(idx));
         }
         // While a value is shown, screenshots and recordings get no layer at all
         // (unless turned off in settings, e.g. to show a value in a screen share).

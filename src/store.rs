@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use egui::{pos2, vec2};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::card::{Card, DEFAULT_SIZE, IdeaStatus, Kind, Parsed, Placement, Tint, private_parts, private_text};
+use crate::card::{
+    Card, DEFAULT_SIZE, IdeaStatus, Kind, Parsed, Placement, Tint, private_parts, private_text,
+};
 use crate::resurface::DAY;
 
 /// Local day number of the last Rediscover pick.
@@ -18,7 +20,8 @@ fn vault_error(error: windows::core::Error) -> rusqlite::Error {
 /// Encrypts Private cards still stored in the open, and hides labels that look
 /// like the secret itself (an early build kept any first line as the label).
 fn migrate_private_cards(conn: &Connection) -> rusqlite::Result<()> {
-    let mut stmt = conn.prepare("SELECT id, title, body, secret FROM cards WHERE kind='private'")?;
+    let mut stmt =
+        conn.prepare("SELECT id, title, body, secret FROM cards WHERE kind='private'")?;
     let rows: Vec<(i64, String, String, Option<Vec<u8>>)> = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<rusqlite::Result<_>>()?;
@@ -26,7 +29,8 @@ fn migrate_private_cards(conn: &Connection) -> rusqlite::Result<()> {
     let rows: Vec<_> = rows
         .into_iter()
         .filter(|(_, title, _, secret)| {
-            secret.is_none() || (title != crate::card::PRIVATE_PLACEHOLDER && !crate::card::fits_label(title))
+            secret.is_none()
+                || (title != crate::card::PRIVATE_PLACEHOLDER && !crate::card::fits_label(title))
         })
         .collect();
     if rows.is_empty() {
@@ -47,7 +51,10 @@ fn migrate_private_cards(conn: &Connection) -> rusqlite::Result<()> {
         };
         let (label, secret) = private_parts(&title, &body);
         let encrypted = crate::vault::protect(id, &secret).map_err(vault_error)?;
-        conn.execute("UPDATE cards SET title=?2, body='', secret=?3 WHERE id=?1", params![id, label, encrypted])?;
+        conn.execute(
+            "UPDATE cards SET title=?2, body='', secret=?3 WHERE id=?1",
+            params![id, label, encrypted],
+        )?;
     }
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA secure_delete=FAST;")?;
     Ok(())
@@ -199,17 +206,27 @@ fn card_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
         kind: Kind::parse(&r.get::<_, String>(1)?),
         title: r.get(2)?,
         body: r.get(3)?,
-        tags: tags.split(',').filter(|t| !t.is_empty()).map(str::to_owned).collect(),
+        tags: tags
+            .split(',')
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned)
+            .collect(),
         pinned: r.get(5)?,
         archived: r.get(6)?,
         pos: pos2(r.get(7)?, r.get(8)?),
         size: vec2(r.get(9)?, r.get(10)?),
         created_at: r.get(11)?,
-        tint: r.get::<_, Option<String>>(12)?.as_deref().and_then(Tint::parse),
+        tint: r
+            .get::<_, Option<String>>(12)?
+            .as_deref()
+            .and_then(Tint::parse),
         placement: Placement::parse(&r.get::<_, String>(13)?),
         review_at: r.get(14)?,
         collapsed: r.get(15)?,
-        idea_status: r.get::<_, Option<String>>(16)?.as_deref().and_then(IdeaStatus::parse),
+        idea_status: r
+            .get::<_, Option<String>>(16)?
+            .as_deref()
+            .and_then(IdeaStatus::parse),
     })
 }
 
@@ -228,7 +245,11 @@ pub const STORE_FAILED: &str = "База заметок недоступна";
 pub fn db_path() -> PathBuf {
     let base = std::env::var_os("LOCALAPPDATA").map_or_else(|| PathBuf::from("."), PathBuf::from);
     let (new_db, old_db) = (base.join("Ebb").join("ebb.db"), legacy_db(&base));
-    if !new_db.exists() && old_db.exists() { old_db } else { new_db }
+    if !new_db.exists() && old_db.exists() {
+        old_db
+    } else {
+        new_db
+    }
 }
 
 fn legacy_db(base: &Path) -> PathBuf {
@@ -251,7 +272,9 @@ pub fn migrate_legacy_data() {
 }
 
 fn migrate_legacy_at(old_db: &Path, new_db: &Path) {
-    let (Some(old_dir), Some(new_dir)) = (old_db.parent(), new_db.parent()) else { return };
+    let (Some(old_dir), Some(new_dir)) = (old_db.parent(), new_db.parent()) else {
+        return;
+    };
     if new_db.exists() {
         // A move cut short right after the database itself: its log still holds
         // the last commits and must be next to it before anything opens it.
@@ -271,9 +294,14 @@ fn migrate_legacy_at(old_db: &Path, new_db: &Path) {
         let _ = std::fs::rename(new_db, old_db);
         return;
     }
-    let Ok(entries) = std::fs::read_dir(old_dir) else { return };
+    let Ok(entries) = std::fs::read_dir(old_dir) else {
+        return;
+    };
     for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().replacen("ambient.db", "ebb.db", 1);
+        let name = entry
+            .file_name()
+            .to_string_lossy()
+            .replacen("ambient.db", "ebb.db", 1);
         let _ = std::fs::rename(entry.path(), new_dir.join(name));
     }
     let _ = std::fs::remove_dir(old_dir);
@@ -335,7 +363,11 @@ impl Store {
                  PRIMARY KEY (review_id, card_id)
              );",
         )?;
-        let has_fts: bool = conn.query_row("SELECT count(*) FROM sqlite_master WHERE name='cards_fts'", [], |r| r.get(0))?;
+        let has_fts: bool = conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name='cards_fts'",
+            [],
+            |r| r.get(0),
+        )?;
         conn.execute_batch(
             "-- External-content index over cards. unicode61 folds case for Cyrillic too;
              -- remove_diacritics folds ё→е. No `prefix=` option: on 10k notes it made
@@ -362,23 +394,35 @@ impl Store {
         )?;
         if !has_fts {
             // Column weights for `ORDER BY rank`: title, body, tags. Stored in the index.
-            conn.execute("INSERT INTO cards_fts(cards_fts, rank) VALUES ('rank', 'bm25(8.0, 1.0, 4.0)')", [])?;
+            conn.execute(
+                "INSERT INTO cards_fts(cards_fts, rank) VALUES ('rank', 'bm25(8.0, 1.0, 4.0)')",
+                [],
+            )?;
             conn.execute("INSERT INTO cards_fts(cards_fts) VALUES ('rebuild')", [])?;
         }
         // Trash: deleted cards keep their row for TRASH_DAYS.
-        let has_deleted_at: bool =
-            conn.query_row("SELECT count(*) FROM pragma_table_info('cards') WHERE name='deleted_at'", [], |r| r.get(0))?;
+        let has_deleted_at: bool = conn.query_row(
+            "SELECT count(*) FROM pragma_table_info('cards') WHERE name='deleted_at'",
+            [],
+            |r| r.get(0),
+        )?;
         if !has_deleted_at {
             conn.execute("ALTER TABLE cards ADD COLUMN deleted_at INTEGER", [])?;
         }
         // A color picked by hand (card::Tint); NULL takes the kind's.
-        let has_tint: bool =
-            conn.query_row("SELECT count(*) FROM pragma_table_info('cards') WHERE name='tint'", [], |r| r.get(0))?;
+        let has_tint: bool = conn.query_row(
+            "SELECT count(*) FROM pragma_table_info('cards') WHERE name='tint'",
+            [],
+            |r| r.get(0),
+        )?;
         if !has_tint {
             conn.execute("ALTER TABLE cards ADD COLUMN tint TEXT", [])?;
         }
-        let has_secret: bool =
-            conn.query_row("SELECT count(*) FROM pragma_table_info('cards') WHERE name='secret'", [], |r| r.get(0))?;
+        let has_secret: bool = conn.query_row(
+            "SELECT count(*) FROM pragma_table_info('cards') WHERE name='secret'",
+            [],
+            |r| r.get(0),
+        )?;
         if !has_secret {
             conn.execute("ALTER TABLE cards ADD COLUMN secret BLOB", [])?;
         }
@@ -404,7 +448,10 @@ impl Store {
                 |r| r.get(0),
             )?;
             if !exists {
-                conn.execute(&format!("ALTER TABLE cards ADD COLUMN {name} {definition}"), [])?;
+                conn.execute(
+                    &format!("ALTER TABLE cards ADD COLUMN {name} {definition}"),
+                    [],
+                )?;
             }
         }
         conn.execute_batch(
@@ -417,13 +464,22 @@ impl Store {
              CREATE INDEX IF NOT EXISTS imported_card ON imported(card_id);",
         )?;
         // Import review (spec 08): done with in the review, or not yet.
-        let has_reviewed: bool =
-            conn.query_row("SELECT count(*) FROM pragma_table_info('imported') WHERE name='reviewed'", [], |r| r.get(0))?;
+        let has_reviewed: bool = conn.query_row(
+            "SELECT count(*) FROM pragma_table_info('imported') WHERE name='reviewed'",
+            [],
+            |r| r.get(0),
+        )?;
         if !has_reviewed {
-            conn.execute("ALTER TABLE imported ADD COLUMN reviewed INTEGER NOT NULL DEFAULT 0", [])?;
+            conn.execute(
+                "ALTER TABLE imported ADD COLUMN reviewed INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
         }
-        let cleared: bool =
-            conn.query_row("SELECT count(*) FROM settings WHERE key=?1", [SET_REVIEW_DATES_CLEARED], |r| r.get(0))?;
+        let cleared: bool = conn.query_row(
+            "SELECT count(*) FROM settings WHERE key=?1",
+            [SET_REVIEW_DATES_CLEARED],
+            |r| r.get(0),
+        )?;
         if !cleared {
             clear_review_dates(&conn)?;
         }
@@ -435,7 +491,12 @@ impl Store {
     }
 
     /// Full-text search within `scope`. Private bodies are never returned as snippets.
-    pub fn search(&self, q: &crate::search::Query, scope: Scope, limit: usize) -> rusqlite::Result<Vec<Hit>> {
+    pub fn search(
+        &self,
+        q: &crate::search::Query,
+        scope: Scope,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<Hit>> {
         use rusqlite::types::Value;
 
         // Filters as a condition on `cards` (alias c). The scope condition is kept
@@ -470,7 +531,11 @@ impl Store {
                 archived: r.get(4)?,
                 pinned: r.get(5)?,
                 updated_at: r.get(6)?,
-                snippet: if kind == Kind::Private { String::new() } else { crate::search::snippet(&body, q, 160) },
+                snippet: if kind == Kind::Private {
+                    String::new()
+                } else {
+                    crate::search::snippet(&body, q, 160)
+                },
             })
         };
         let run = |sql: String, args: Vec<Value>| -> rusqlite::Result<Vec<Hit>> {
@@ -481,7 +546,11 @@ impl Store {
 
         let Some(expr) = q.fts_expression() else {
             // Filters only (or nothing): newest first.
-            let order = if scope == Scope::Trash { "c.deleted_at DESC" } else { "c.updated_at DESC" };
+            let order = if scope == Scope::Trash {
+                "c.deleted_at DESC"
+            } else {
+                "c.updated_at DESC"
+            };
             let sql = format!(
                 "SELECT {columns}, substr(c.body, 1, 400) FROM cards c WHERE 1{scope_sql}{filters}
                  ORDER BY {order} LIMIT {limit}"
@@ -496,7 +565,10 @@ impl Store {
         // so a rare kind isn't cut off by the candidate limit. Snippets are built in
         // Rust for the final rows only (cheaper than snippet() on every candidate).
         let candidates = if filters.is_empty() && scope == Scope::Live {
-            format!("SELECT rowid, rank FROM cards_fts WHERE cards_fts MATCH ? ORDER BY rank LIMIT {}", (limit * 4).max(100))
+            format!(
+                "SELECT rowid, rank FROM cards_fts WHERE cards_fts MATCH ? ORDER BY rank LIMIT {}",
+                (limit * 4).max(100)
+            )
         } else {
             "SELECT rowid, rank FROM cards_fts WHERE cards_fts MATCH ?".to_owned()
         };
@@ -521,7 +593,10 @@ impl Store {
         let mut like_args = Vec::new();
         for w in &q.words {
             like_filters.push_str(" AND (c.title || ' ' || c.body) LIKE ? ESCAPE '\\'");
-            let escaped = w.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+            let escaped = w
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
             like_args.push(Value::Text(format!("%{escaped}%")));
         }
         like_args.extend(args);
@@ -546,22 +621,34 @@ impl Store {
     pub fn secret(&self, id: i64) -> rusqlite::Result<Option<String>> {
         let row: Option<Option<Vec<u8>>> = self
             .conn
-            .query_row("SELECT secret FROM cards WHERE id=?1 AND kind='private'", [id], |r| r.get(0))
+            .query_row(
+                "SELECT secret FROM cards WHERE id=?1 AND kind='private'",
+                [id],
+                |r| r.get(0),
+            )
             .optional()?;
         // A Private card whose text was cleared has no value at all.
-        row.flatten().map(|bytes| crate::vault::unprotect(id, &bytes).map_err(vault_error)).transpose()
+        row.flatten()
+            .map(|bytes| crate::vault::unprotect(id, &bytes).map_err(vault_error))
+            .transpose()
     }
 
     /// Puts a card above every other on the layer, for the next launch too.
     pub fn raise(&self, id: i64) -> rusqlite::Result<()> {
-        self.conn.execute("UPDATE cards SET z=(SELECT coalesce(max(z), 0) + 1 FROM cards) WHERE id=?1", [id])?;
+        self.conn.execute(
+            "UPDATE cards SET z=(SELECT coalesce(max(z), 0) + 1 FROM cards) WHERE id=?1",
+            [id],
+        )?;
         Ok(())
     }
 
     /// Records that the user looked at a card (input for resurfacing). A
     /// reaction: the times it was brought back unanswered no longer count.
     pub fn touch(&self, id: i64) -> rusqlite::Result<()> {
-        self.conn.execute("UPDATE cards SET last_viewed_at=?2, ignored_count=0 WHERE id=?1", params![id, now()])?;
+        self.conn.execute(
+            "UPDATE cards SET last_viewed_at=?2, ignored_count=0 WHERE id=?1",
+            params![id, now()],
+        )?;
         Ok(())
     }
 
@@ -569,7 +656,12 @@ impl Store {
     /// cards that got no reaction back to the archive and brings up to `limit`
     /// forgotten ones onto the layer. A restart the same day changes nothing.
     /// Only placement metadata changes; note text is never rewritten.
-    pub fn refresh_resurfacing(&self, at: i64, utc_offset: i64, limit: usize) -> rusqlite::Result<Vec<crate::resurface::Pick>> {
+    pub fn refresh_resurfacing(
+        &self,
+        at: i64,
+        utc_offset: i64,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<crate::resurface::Pick>> {
         if self.resurfaced_today(at, utc_offset) {
             return Ok(Vec::new());
         }
@@ -577,7 +669,10 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         // Pinned since it came back (older builds pinned from search without
         // touching placement): it's the user's now, never taken back.
-        tx.execute("UPDATE cards SET placement='pinned' WHERE placement='rediscover' AND pinned=1", [])?;
+        tx.execute(
+            "UPDATE cards SET placement='pinned' WHERE placement='rediscover' AND pinned=1",
+            [],
+        )?;
         // Opened since it came back: it stays, as if placed by hand. Either way a
         // reminder that brought it has been shown and doesn't bring it again.
         tx.execute(
@@ -644,7 +739,9 @@ impl Store {
     /// Whether the Rediscover pick for the day `at` falls in has been made.
     pub fn resurfaced_today(&self, at: i64, utc_offset: i64) -> bool {
         let day = crate::resurface::local_day(at, utc_offset);
-        self.setting(SET_REDISCOVER_DAY).and_then(|v| v.parse::<i64>().ok()) == Some(day)
+        self.setting(SET_REDISCOVER_DAY)
+            .and_then(|v| v.parse::<i64>().ok())
+            == Some(day)
     }
 
     /// Cards for a weekly review, in the order spec 02 asks: cards on the layer
@@ -674,15 +771,26 @@ impl Store {
              LIMIT ?3",
         )?;
         let pauses = (REVIEW_LATER_DAYS * DAY, REVIEW_PAUSE_DAYS * DAY);
-        stmt.query_map(params![at, 30 * DAY, limit as i64, pauses.0, pauses.1], card_row)?.collect()
+        stmt.query_map(
+            params![at, 30 * DAY, limit as i64, pauses.0, pauses.1],
+            card_row,
+        )?
+        .collect()
     }
 
     pub fn begin_review(&self, at: i64) -> rusqlite::Result<i64> {
-        self.conn.execute("INSERT INTO reviews (started_at) VALUES (?1)", [at])?;
+        self.conn
+            .execute("INSERT INTO reviews (started_at) VALUES (?1)", [at])?;
         Ok(self.conn.last_insert_rowid())
     }
 
-    pub fn record_review_item(&self, review_id: i64, card_id: i64, action: ReviewAction, at: i64) -> rusqlite::Result<()> {
+    pub fn record_review_item(
+        &self,
+        review_id: i64,
+        card_id: i64,
+        action: ReviewAction,
+        at: i64,
+    ) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO review_items (review_id, card_id, action, at) VALUES (?1, ?2, ?3, ?4)",
             params![review_id, card_id, action.as_str(), at],
@@ -692,7 +800,10 @@ impl Store {
 
     /// An undone review action no longer counts.
     pub fn forget_review_item(&self, review_id: i64, card_id: i64) -> rusqlite::Result<()> {
-        self.conn.execute("DELETE FROM review_items WHERE review_id=?1 AND card_id=?2", params![review_id, card_id])?;
+        self.conn.execute(
+            "DELETE FROM review_items WHERE review_id=?1 AND card_id=?2",
+            params![review_id, card_id],
+        )?;
         Ok(())
     }
 
@@ -746,13 +857,23 @@ impl Store {
     /// Applies a review decision at `at` (`utc_offset` places "later" on a morning).
     /// How long the card then sits out of reviews comes from `review_items`, not
     /// `review_at`: that one means "bring it back", and Rediscover acts on it.
-    pub fn review_action(&self, id: i64, action: ReviewAction, at: i64, utc_offset: i64) -> rusqlite::Result<ReviewSnapshot> {
+    pub fn review_action(
+        &self,
+        id: i64,
+        action: ReviewAction,
+        at: i64,
+        utc_offset: i64,
+    ) -> rusqlite::Result<ReviewSnapshot> {
         let snapshot = self.snapshot(id)?;
         let t = at;
         match action {
             // A reminder past due that reached the review has been seen: it's cleared.
             ReviewAction::Keep => {
-                let placement = if snapshot.archived { Placement::Archive } else { Placement::Manual };
+                let placement = if snapshot.archived {
+                    Placement::Archive
+                } else {
+                    Placement::Manual
+                };
                 self.conn.execute(
                     "UPDATE cards SET review_at=NULL, ignored_count=0, placement=?2, last_viewed_at=?3 WHERE id=?1",
                     params![id, placement.as_str(), t],
@@ -822,7 +943,9 @@ impl Store {
 
     pub fn setting(&self, key: &str) -> Option<String> {
         self.conn
-            .query_row("SELECT value FROM settings WHERE key=?1", [key], |r| r.get(0))
+            .query_row("SELECT value FROM settings WHERE key=?1", [key], |r| {
+                r.get(0)
+            })
             .ok()
     }
 
@@ -842,7 +965,10 @@ impl Store {
     /// "Changed" is `updated_at > last_viewed_at`: an import sets last_viewed_at to
     /// the import time (layer) or the note's own updated_at (archive), and every
     /// save() moves updated_at to now.
-    pub fn import_state(&self, prefix: &str) -> rusqlite::Result<(std::collections::HashSet<String>, Vec<i64>)> {
+    pub fn import_state(
+        &self,
+        prefix: &str,
+    ) -> rusqlite::Result<(std::collections::HashSet<String>, Vec<i64>)> {
         let mut stmt = self.conn.prepare(
             "SELECT i.source_id, c.id,
                     c.id IS NOT NULL AND c.deleted_at IS NULL AND c.updated_at <= c.last_viewed_at
@@ -851,7 +977,13 @@ impl Store {
         )?;
         let mut keep = std::collections::HashSet::new();
         let mut replace = Vec::new();
-        let rows = stmt.query_map([prefix], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, bool>(2)?)))?;
+        let rows = stmt.query_map([prefix], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, bool>(2)?,
+            ))
+        })?;
         for row in rows {
             let (source, card, replaceable) = row?;
             match (replaceable, card) {
@@ -884,14 +1016,20 @@ impl Store {
                 drop_link.execute([id])?;
             }
         }
-        let batch: i64 = tx.query_row("SELECT COALESCE(MAX(batch), 0) + 1 FROM imported", [], |r| r.get(0))?;
+        let batch: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(batch), 0) + 1 FROM imported",
+            [],
+            |r| r.get(0),
+        )?;
         {
             let mut card = tx.prepare(
                 "INSERT INTO cards (kind, title, body, tags, archived, x, y, w, h, created_at, updated_at, last_viewed_at, tint)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             )?;
-            let mut protect = tx.prepare("UPDATE cards SET title=?2, body='', secret=?3 WHERE id=?1")?;
-            let mut link = tx.prepare("INSERT INTO imported (source_id, card_id, batch) VALUES (?1, ?2, ?3)")?;
+            let mut protect =
+                tx.prepare("UPDATE cards SET title=?2, body='', secret=?3 WHERE id=?1")?;
+            let mut link =
+                tx.prepare("INSERT INTO imported (source_id, card_id, batch) VALUES (?1, ?2, ?3)")?;
             for (n, rect) in notes.iter().zip(rects) {
                 let r = rect.unwrap_or(egui::Rect::from_min_size(egui::Pos2::ZERO, DEFAULT_SIZE));
                 let (title, body) = if n.kind == Kind::Private {
@@ -915,7 +1053,11 @@ impl Store {
                     // Not "viewed" in Ebb yet, except what lands on the layer now.
                     // One second back: timestamps are in seconds, and a move right
                     // after the import must still count as a change (import_state).
-                    if rect.is_some() { (viewed - 1).max(n.updated_at) } else { n.updated_at },
+                    if rect.is_some() {
+                        (viewed - 1).max(n.updated_at)
+                    } else {
+                        n.updated_at
+                    },
                     n.tint.map(Tint::as_str),
                 ])?;
                 let id = tx.last_insert_rowid();
@@ -934,7 +1076,10 @@ impl Store {
     /// Deletes the cards of an import batch and forgets it, so it can be imported again.
     pub fn undo_import(&mut self, batch: i64) -> rusqlite::Result<usize> {
         let tx = self.conn.transaction()?;
-        let n = tx.execute("DELETE FROM cards WHERE id IN (SELECT card_id FROM imported WHERE batch=?1)", [batch])?;
+        let n = tx.execute(
+            "DELETE FROM cards WHERE id IN (SELECT card_id FROM imported WHERE batch=?1)",
+            [batch],
+        )?;
         tx.execute("DELETE FROM imported WHERE batch=?1", [batch])?;
         tx.commit()?;
         Ok(n)
@@ -954,19 +1099,35 @@ impl Store {
             let (kind, title, body): (String, String, String) = (r.get(1)?, r.get(2)?, r.get(3)?);
             let kind = Kind::parse(&kind);
             let updated_at: i64 = r.get(5)?;
-            let text = if title.is_empty() { body.clone() } else { format!("{title}\n{body}") };
+            let text = if title.is_empty() {
+                body.clone()
+            } else {
+                format!("{title}\n{body}")
+            };
             let group = import_group(kind, &text, updated_at, now);
             let preview = if kind == Kind::Private || group == ImportGroup::Secrets {
-                crate::card::private_label(&title, &body).unwrap_or_else(|| crate::card::PRIVATE_PLACEHOLDER.to_owned())
+                crate::card::private_label(&title, &body)
+                    .unwrap_or_else(|| crate::card::PRIVATE_PLACEHOLDER.to_owned())
             } else {
-                let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+                let line = text
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("");
                 let line = crate::rich_text::strip_markup(line);
                 match line.char_indices().nth(90) {
                     Some((cut, _)) => format!("{}…", &line[..cut]),
                     None => line,
                 }
             };
-            Ok(ImportItem { card_id: r.get(0)?, kind, group, preview, archived: r.get(4)?, updated_at })
+            Ok(ImportItem {
+                card_id: r.get(0)?,
+                kind,
+                group,
+                preview,
+                archived: r.get(4)?,
+                updated_at,
+            })
         })?;
         rows.collect()
     }
@@ -984,7 +1145,11 @@ impl Store {
     /// Applies an import review decision to `ids` in one transaction and marks
     /// them done with. Returns what undo needs. A card turned Private leaves
     /// plaintext in freed pages and the log until `scrub_plaintext`.
-    pub fn apply_import_review(&self, ids: &[i64], action: ImportAction) -> rusqlite::Result<Vec<ImportSnapshot>> {
+    pub fn apply_import_review(
+        &self,
+        ids: &[i64],
+        action: ImportAction,
+    ) -> rusqlite::Result<Vec<ImportSnapshot>> {
         let tx = self.conn.unchecked_transaction()?;
         let mut snapshots = Vec::with_capacity(ids.len());
         for &id in ids {
@@ -1004,12 +1169,16 @@ impl Store {
             match action {
                 ImportAction::SetKind(kind) => self.set_kind(id, kind)?,
                 ImportAction::Archive => {
-                    self.conn.execute("UPDATE cards SET archived=1, pinned=0, placement='archive' WHERE id=?1", [id])?;
+                    self.conn.execute(
+                        "UPDATE cards SET archived=1, pinned=0, placement='archive' WHERE id=?1",
+                        [id],
+                    )?;
                 }
                 ImportAction::Trash => self.delete(id)?,
                 ImportAction::Keep => {}
             }
-            self.conn.execute("UPDATE imported SET reviewed=1 WHERE card_id=?1", [id])?;
+            self.conn
+                .execute("UPDATE imported SET reviewed=1 WHERE card_id=?1", [id])?;
             snapshots.push(snapshot);
         }
         tx.commit()?;
@@ -1020,7 +1189,11 @@ impl Store {
     pub fn undo_import_review(&self, snapshots: &[ImportSnapshot]) -> rusqlite::Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         for s in snapshots {
-            let kind: String = self.conn.query_row("SELECT kind FROM cards WHERE id=?1", [s.card_id], |r| r.get(0))?;
+            let kind: String =
+                self.conn
+                    .query_row("SELECT kind FROM cards WHERE id=?1", [s.card_id], |r| {
+                        r.get(0)
+                    })?;
             if Kind::parse(&kind) != s.kind {
                 self.set_kind(s.card_id, s.kind)?;
             }
@@ -1028,7 +1201,10 @@ impl Store {
                 "UPDATE cards SET archived=?2, placement=?3, deleted_at=?4 WHERE id=?1",
                 params![s.card_id, s.archived, s.placement.as_str(), s.deleted_at],
             )?;
-            self.conn.execute("UPDATE imported SET reviewed=0 WHERE card_id=?1", [s.card_id])?;
+            self.conn.execute(
+                "UPDATE imported SET reviewed=0 WHERE card_id=?1",
+                [s.card_id],
+            )?;
         }
         tx.commit()
     }
@@ -1048,10 +1224,20 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint, placement, review_at, collapsed,
                     json_extract(meta, '$.idea_status')
-             FROM cards WHERE archived = 0 AND deleted_at IS NULL ORDER BY z, updated_at",
+             FROM cards WHERE archived = 0 AND deleted_at IS NULL AND placement != 'desktop' ORDER BY z, updated_at",
         )?;
         let rows = stmt.query_map([], card_row)?;
         rows.collect()
+    }
+
+    /// Cards shown in their own desktop windows instead of on the ambient layer.
+    pub fn load_desktop(&self) -> rusqlite::Result<Vec<Card>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, title, body, tags, pinned, archived, x, y, w, h, created_at, tint, placement, review_at, collapsed,
+                    json_extract(meta, '$.idea_status')
+             FROM cards WHERE archived = 0 AND deleted_at IS NULL AND placement = 'desktop' ORDER BY z, updated_at",
+        )?;
+        stmt.query_map([], card_row)?.collect()
     }
 
     pub fn insert(&self, p: &Parsed, pos: egui::Pos2) -> rusqlite::Result<Card> {
@@ -1081,14 +1267,28 @@ impl Store {
         if p.kind == Kind::Private {
             let (_, secret) = private_parts(&p.title, &p.body);
             let encrypted = crate::vault::protect(id, &secret).map_err(vault_error)?;
-            self.conn.execute("UPDATE cards SET secret=?2 WHERE id=?1", params![id, encrypted])?;
+            self.conn.execute(
+                "UPDATE cards SET secret=?2 WHERE id=?1",
+                params![id, encrypted],
+            )?;
         }
         let review_at = (p.kind == Kind::Reminder)
-            .then(|| crate::resurface::review_at_from_text(&format!("{}
-{}", p.title, p.body), t))
+            .then(|| {
+                crate::resurface::review_at_from_text(
+                    &format!(
+                        "{}
+{}",
+                        p.title, p.body
+                    ),
+                    t,
+                )
+            })
             .flatten();
         if let Some(review_at) = review_at {
-            self.conn.execute("UPDATE cards SET review_at=?2 WHERE id=?1", params![id, review_at])?;
+            self.conn.execute(
+                "UPDATE cards SET review_at=?2 WHERE id=?1",
+                params![id, review_at],
+            )?;
         }
         Ok(Card {
             id,
@@ -1113,8 +1313,14 @@ impl Store {
     /// count as changed.
     pub fn set_idea_status(&self, id: i64, status: Option<IdeaStatus>) -> rusqlite::Result<()> {
         match status {
-            Some(s) => self.conn.execute("UPDATE cards SET meta=json_set(meta, '$.idea_status', ?2) WHERE id=?1", params![id, s.as_str()])?,
-            None => self.conn.execute("UPDATE cards SET meta=json_remove(meta, '$.idea_status') WHERE id=?1", [id])?,
+            Some(s) => self.conn.execute(
+                "UPDATE cards SET meta=json_set(meta, '$.idea_status', ?2) WHERE id=?1",
+                params![id, s.as_str()],
+            )?,
+            None => self.conn.execute(
+                "UPDATE cards SET meta=json_remove(meta, '$.idea_status') WHERE id=?1",
+                [id],
+            )?,
         };
         Ok(())
     }
@@ -1123,7 +1329,9 @@ impl Store {
     /// doesn't count as changed.
     /// How many live cards carry each tag, the most used first (then by name).
     pub fn tag_counts(&self) -> rusqlite::Result<Vec<(String, i64)>> {
-        let mut stmt = self.conn.prepare("SELECT tags FROM cards WHERE deleted_at IS NULL AND tags != ''")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT tags FROM cards WHERE deleted_at IS NULL AND tags != ''")?;
         let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         for tags in stmt.query_map([], |r| r.get::<_, String>(0))? {
             for tag in tags?.split(',').filter(|t| !t.is_empty()) {
@@ -1136,7 +1344,10 @@ impl Store {
     }
 
     pub fn set_collapsed(&self, id: i64, collapsed: bool) -> rusqlite::Result<()> {
-        self.conn.execute("UPDATE cards SET collapsed=?2 WHERE id=?1", params![id, collapsed])?;
+        self.conn.execute(
+            "UPDATE cards SET collapsed=?2 WHERE id=?1",
+            params![id, collapsed],
+        )?;
         Ok(())
     }
 
@@ -1170,19 +1381,26 @@ impl Store {
     /// Drops a Private card's encrypted value: `save` can't tell a cleared
     /// editor from a card that never carries its value in memory.
     pub fn clear_secret(&self, id: i64) -> rusqlite::Result<()> {
-        self.conn.execute("UPDATE cards SET secret=NULL, updated_at=?2 WHERE id=?1", params![id, now()])?;
+        self.conn.execute(
+            "UPDATE cards SET secret=NULL, updated_at=?2 WHERE id=?1",
+            params![id, now()],
+        )?;
         Ok(())
     }
 
     /// Moves a card to the trash.
     pub fn delete(&self, id: i64) -> rusqlite::Result<()> {
-        self.conn.execute("UPDATE cards SET deleted_at=?2 WHERE id=?1", params![id, now()])?;
+        self.conn.execute(
+            "UPDATE cards SET deleted_at=?2 WHERE id=?1",
+            params![id, now()],
+        )?;
         Ok(())
     }
 
     /// Takes a card out of the trash, back where it was (layer or archive).
     pub fn restore(&self, id: i64) -> rusqlite::Result<()> {
-        self.conn.execute("UPDATE cards SET deleted_at=NULL WHERE id=?1", [id])?;
+        self.conn
+            .execute("UPDATE cards SET deleted_at=NULL WHERE id=?1", [id])?;
         Ok(())
     }
 
@@ -1211,7 +1429,10 @@ impl Store {
                 )?;
             }
             _ => {
-                self.conn.execute("UPDATE cards SET kind=?2, updated_at=?3 WHERE id=?1", params![id, kind.as_str(), now()])?;
+                self.conn.execute(
+                    "UPDATE cards SET kind=?2, updated_at=?3 WHERE id=?1",
+                    params![id, kind.as_str(), now()],
+                )?;
             }
         }
         Ok(())
@@ -1220,19 +1441,31 @@ impl Store {
     pub fn set_archived(&self, id: i64, archived: bool) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE cards SET archived=?2, placement=?3 WHERE id=?1",
-            params![id, archived, if archived { Placement::Archive.as_str() } else { Placement::Manual.as_str() }],
+            params![
+                id,
+                archived,
+                if archived {
+                    Placement::Archive.as_str()
+                } else {
+                    Placement::Manual.as_str()
+                }
+            ],
         )?;
         Ok(())
     }
 
     /// Deletes a trashed card for good.
     pub fn purge(&self, id: i64) -> rusqlite::Result<()> {
-        self.conn.execute("DELETE FROM cards WHERE id=?1 AND deleted_at IS NOT NULL", [id])?;
+        self.conn.execute(
+            "DELETE FROM cards WHERE id=?1 AND deleted_at IS NOT NULL",
+            [id],
+        )?;
         Ok(())
     }
 
     pub fn empty_trash(&self) -> rusqlite::Result<usize> {
-        self.conn.execute("DELETE FROM cards WHERE deleted_at IS NOT NULL", [])
+        self.conn
+            .execute("DELETE FROM cards WHERE deleted_at IS NOT NULL", [])
     }
 
     /// (on the layer, archived, in the trash)
@@ -1276,18 +1509,48 @@ mod tests {
     }
 
     fn add(store: &Store, text: &str) -> Card {
-        store.insert(&crate::card::parse_capture(text), egui::pos2(0.0, 0.0)).unwrap()
+        store
+            .insert(&crate::card::parse_capture(text), egui::pos2(0.0, 0.0))
+            .unwrap()
     }
 
     fn find(store: &Store, query: &str) -> Vec<String> {
         let q = crate::search::parse(query, now(), 0);
-        store.search(&q, Scope::Live, 20).unwrap().into_iter().map(|h| format!("{}|{}", h.title, h.snippet.replace(['\u{1}', '\u{2}'], ""))).collect()
+        store
+            .search(&q, Scope::Live, 20)
+            .unwrap()
+            .into_iter()
+            .map(|h| format!("{}|{}", h.title, h.snippet.replace(['\u{1}', '\u{2}'], "")))
+            .collect()
+    }
+
+    #[test]
+    fn desktop_cards_load_separately_from_the_layer() {
+        let (store, dir) = temp_store("desktop");
+        let mut card = add(&store, "На рабочем столе");
+        card.placement = Placement::Desktop;
+        store.save(&card).unwrap();
+        assert!(store.load().unwrap().is_empty());
+        assert_eq!(
+            store
+                .load_desktop()
+                .unwrap()
+                .iter()
+                .map(|c| c.id)
+                .collect::<Vec<_>>(),
+            [card.id]
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn full_text_search() {
         let (store, dir) = temp_store("fts");
-        add(&store, "Онбординг\nПопробовать онбординг без регистрации #product");
+        add(
+            &store,
+            "Онбординг\nПопробовать онбординг без регистрации #product",
+        );
         add(&store, "идея: weekly recap по пятницам");
         add(&store, "vpn staging vpn.staging.internal #infra");
         let secret = add(&store, "секрет: Wi-Fi\nпароль hunter2");
@@ -1300,9 +1563,16 @@ mod tests {
         // Private values are neither indexed nor returned as snippets.
         assert!(find(&store, "hunter2").is_empty());
         assert_eq!(find(&store, "Wi-Fi"), ["Wi-Fi|"]);
-        assert_eq!(store.secret(secret.id).unwrap().as_deref(), Some("пароль hunter2"));
+        assert_eq!(
+            store.secret(secret.id).unwrap().as_deref(),
+            Some("пароль hunter2")
+        );
         // Substring fallback for mid-word matches.
-        assert_eq!(find(&store, "board").len(), 0, "LIKE is on title+body; 'board' isn't there");
+        assert_eq!(
+            find(&store, "board").len(),
+            0,
+            "LIKE is on title+body; 'board' isn't there"
+        );
         assert_eq!(find(&store, "taging").len(), 1);
 
         // Ordinary edits still reindex; the trash is out of normal search but can
@@ -1360,43 +1630,90 @@ mod tests {
         let card = store.card(1).unwrap().unwrap();
         assert_eq!(card.title, "Wi-Fi office");
         assert!(card.body.is_empty());
-        assert_eq!(store.secret(1).unwrap().as_deref(), Some("secret-legacy-42"));
+        assert_eq!(
+            store.secret(1).unwrap().as_deref(),
+            Some("secret-legacy-42")
+        );
         let bytes = std::fs::read(&path).unwrap();
-        assert!(!bytes.windows(b"secret-legacy-42".len()).any(|w| w == b"secret-legacy-42"));
+        assert!(
+            !bytes
+                .windows(b"secret-legacy-42".len())
+                .any(|w| w == b"secret-legacy-42")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn refresh_puts_an_old_archived_idea_back_on_the_layer_once_a_day() {
         let (store, dir) = temp_store("resurface");
-        let ideas: Vec<Card> = (0..4).map(|i| add(&store, &format!("идея: annual pricing {i}"))).collect();
-        let private = add(&store, "секрет: Wi-Fi
-secret");
+        let ideas: Vec<Card> = (0..4)
+            .map(|i| add(&store, &format!("идея: annual pricing {i}")))
+            .collect();
+        let private = add(
+            &store,
+            "секрет: Wi-Fi
+secret",
+        );
         for c in ideas.iter().chain([&private]) {
             store.set_archived(c.id, true).unwrap();
         }
-        store.conn.execute("UPDATE cards SET created_at=1, last_viewed_at=1", []).unwrap();
+        store
+            .conn
+            .execute("UPDATE cards SET created_at=1, last_viewed_at=1", [])
+            .unwrap();
 
         let day = 100 * DAY;
         let picks = store.refresh_resurfacing(day, 0, 3).unwrap();
         let picked: Vec<i64> = picks.iter().map(|p| p.id).collect();
         assert_eq!(picked, ideas[..3].iter().map(|c| c.id).collect::<Vec<_>>());
-        assert_eq!(store.card(ideas[0].id).unwrap().unwrap().placement, Placement::Rediscover);
-        assert_eq!(store.card(private.id).unwrap().unwrap().placement, Placement::Archive);
+        assert_eq!(
+            store.card(ideas[0].id).unwrap().unwrap().placement,
+            Placement::Rediscover
+        );
+        assert_eq!(
+            store.card(private.id).unwrap().unwrap().placement,
+            Placement::Archive
+        );
 
         // A restart the same day neither changes nor grows the set.
-        assert!(store.refresh_resurfacing(day + 3_600, 0, 3).unwrap().is_empty());
+        assert!(
+            store
+                .refresh_resurfacing(day + 3_600, 0, 3)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(store.load().unwrap().len(), 3);
 
         // Next day: the one that was opened stays, the ignored ones go back, and
         // the one left over comes up; the rest wait out their cooldown.
-        store.conn.execute("UPDATE cards SET last_viewed_at=?2 WHERE id=?1", params![ideas[0].id, day + 60]).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE cards SET last_viewed_at=?2 WHERE id=?1",
+                params![ideas[0].id, day + 60],
+            )
+            .unwrap();
         let picks = store.refresh_resurfacing(day + DAY, 0, 3).unwrap();
-        assert_eq!(picks.iter().map(|p| p.id).collect::<Vec<_>>(), vec![ideas[3].id]);
-        let mut live: Vec<(i64, &str)> = store.load().unwrap().iter().map(|c| (c.id, c.placement.as_str())).collect();
+        assert_eq!(
+            picks.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![ideas[3].id]
+        );
+        let mut live: Vec<(i64, &str)> = store
+            .load()
+            .unwrap()
+            .iter()
+            .map(|c| (c.id, c.placement.as_str()))
+            .collect();
         live.sort();
         assert_eq!(live, [(ideas[0].id, "manual"), (ideas[3].id, "rediscover")]);
-        let ignored: i64 = store.conn.query_row("SELECT ignored_count FROM cards WHERE id=?1", [ideas[1].id], |r| r.get(0)).unwrap();
+        let ignored: i64 = store
+            .conn
+            .query_row(
+                "SELECT ignored_count FROM cards WHERE id=?1",
+                [ideas[1].id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(ignored, 1);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1409,7 +1726,14 @@ secret");
         let until = crate::resurface::snooze_until(now, 0, 3);
         let snapshot = store.snooze(card.id, until).unwrap();
         assert!(store.load().unwrap().is_empty());
-        let ignored: i64 = store.conn.query_row("SELECT ignored_count FROM cards WHERE id=?1", [card.id], |r| r.get(0)).unwrap();
+        let ignored: i64 = store
+            .conn
+            .query_row(
+                "SELECT ignored_count FROM cards WHERE id=?1",
+                [card.id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(ignored, 0, "putting a card off by hand isn't ignoring it");
 
         // Undo: back on the layer as it was.
@@ -1417,16 +1741,28 @@ secret");
         assert_eq!(store.load().unwrap().len(), 1);
         store.snooze(card.id, until).unwrap();
         // Opened just now, so not forgotten; it comes back only because it's due.
-        store.conn.execute("UPDATE cards SET last_viewed_at=?2 WHERE id=?1", params![card.id, now]).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE cards SET last_viewed_at=?2 WHERE id=?1",
+                params![card.id, now],
+            )
+            .unwrap();
 
         for day in 1..3 {
             let morning = crate::resurface::next_day_start(now, 0) + (day - 1) * DAY;
-            assert!(store.refresh_resurfacing(morning, 0, 3).unwrap().is_empty(), "not back on day {day}");
+            assert!(
+                store.refresh_resurfacing(morning, 0, 3).unwrap().is_empty(),
+                "not back on day {day}"
+            );
         }
         let third = crate::resurface::next_day_start(now, 0) + 2 * DAY;
         assert!(!store.resurfaced_today(third, 0));
         let picks = store.refresh_resurfacing(third, 0, 3).unwrap();
-        assert_eq!(picks.iter().map(|p| p.id).collect::<Vec<_>>(), vec![card.id]);
+        assert_eq!(
+            picks.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![card.id]
+        );
         assert!(store.resurfaced_today(third + 3_600, 0));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1439,45 +1775,103 @@ secret");
         let kinds = ["идея: ", "", "prompt: ", "https://example.com/", "цель: "];
         let mut archived = Vec::new();
         for i in 0..40 {
-            let card = add(&store, &format!("{}archived note {i}", kinds[i % kinds.len()]));
+            let card = add(
+                &store,
+                &format!("{}archived note {i}", kinds[i % kinds.len()]),
+            );
             store.set_archived(card.id, true).unwrap();
             archived.push(card.id);
         }
         let sources: Vec<String> = (0..10).map(|i| format!("s{i}")).collect();
-        import_notes(&mut store, &sources.iter().map(|s| (s.as_str(), "imported sticky", false)).collect::<Vec<_>>());
+        import_notes(
+            &mut store,
+            &sources
+                .iter()
+                .map(|s| (s.as_str(), "imported sticky", false))
+                .collect::<Vec<_>>(),
+        );
         let pinned = add(&store, "идея: pinned forever");
-        store.conn.execute("UPDATE cards SET pinned=1, placement='pinned' WHERE id=?1", [pinned.id]).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE cards SET pinned=1, placement='pinned' WHERE id=?1",
+                [pinned.id],
+            )
+            .unwrap();
         for i in 0..3 {
             add(&store, &format!("on the layer {i}"));
         }
-        store.conn.execute("UPDATE cards SET created_at=?1, last_viewed_at=?1", [start - 90 * DAY]).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE cards SET created_at=?1, last_viewed_at=?1",
+                [start - 90 * DAY],
+            )
+            .unwrap();
 
         let mut last_shown: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
         for day in 0..30 {
             let morning = start + day * DAY;
-            let picks = store.refresh_resurfacing(morning, 0, crate::resurface::REDISCOVER_LIMIT).unwrap();
+            let picks = store
+                .refresh_resurfacing(morning, 0, crate::resurface::REDISCOVER_LIMIT)
+                .unwrap();
             assert!(picks.len() <= crate::resurface::REDISCOVER_LIMIT);
             for pick in &picks {
                 if let Some(prev) = last_shown.insert(pick.id, day) {
-                    assert!(day - prev >= crate::resurface::COOLDOWN_DAYS, "card {} back after {} days", pick.id, day - prev);
+                    assert!(
+                        day - prev >= crate::resurface::COOLDOWN_DAYS,
+                        "card {} back after {} days",
+                        pick.id,
+                        day - prev
+                    );
                 }
             }
             let imported_today = picks
                 .iter()
-                .filter(|p| store.conn.query_row("SELECT count(*) FROM imported WHERE card_id=?1", [p.id], |r| r.get::<_, i64>(0)).unwrap() > 0)
+                .filter(|p| {
+                    store
+                        .conn
+                        .query_row(
+                            "SELECT count(*) FROM imported WHERE card_id=?1",
+                            [p.id],
+                            |r| r.get::<_, i64>(0),
+                        )
+                        .unwrap()
+                        > 0
+                })
                 .count();
-            assert!(imported_today <= 1, "day {day}: {imported_today} notes from one import batch");
+            assert!(
+                imported_today <= 1,
+                "day {day}: {imported_today} notes from one import batch"
+            );
             // Every fifth day the first card that came back gets opened: it stays.
             if day % 5 == 0
                 && let Some(pick) = picks.first()
             {
-                store.conn.execute("UPDATE cards SET last_viewed_at=?2 WHERE id=?1", params![pick.id, morning + 600]).unwrap();
+                store
+                    .conn
+                    .execute(
+                        "UPDATE cards SET last_viewed_at=?2 WHERE id=?1",
+                        params![pick.id, morning + 600],
+                    )
+                    .unwrap();
             }
             let layer = store.load().unwrap();
-            assert!(layer.len() <= 15, "day {day}: {} cards on the layer", layer.len());
-            assert!(layer.iter().any(|c| c.id == pinned.id), "the pinned card never leaves");
+            assert!(
+                layer.len() <= 15,
+                "day {day}: {} cards on the layer",
+                layer.len()
+            );
+            assert!(
+                layer.iter().any(|c| c.id == pinned.id),
+                "the pinned card never leaves"
+            );
         }
-        assert!(last_shown.len() >= 20, "a month brings back a good part of the archive, got {}", last_shown.len());
+        assert!(
+            last_shown.len() >= 20,
+            "a month brings back a good part of the archive, got {}",
+            last_shown.len()
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1489,21 +1883,54 @@ secret");
         let later = add(&store, "напомни: call the bank");
         let other = add(&store, "обычная заметка");
         let pinned = add(&store, "напомни: pinned one");
-        store.conn.execute("UPDATE cards SET x=500, y=300, z=0", []).unwrap();
+        store
+            .conn
+            .execute("UPDATE cards SET x=500, y=300, z=0", [])
+            .unwrap();
         store.raise(other.id).unwrap();
-        store.conn.execute("UPDATE cards SET pinned=1, placement='pinned' WHERE id=?1", [pinned.id]).unwrap();
-        for (id, at) in [(due.id, day - 3_600), (later.id, day + DAY), (pinned.id, day - 3_600)] {
-            store.conn.execute("UPDATE cards SET review_at=?2 WHERE id=?1", params![id, at]).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE cards SET pinned=1, placement='pinned' WHERE id=?1",
+                [pinned.id],
+            )
+            .unwrap();
+        for (id, at) in [
+            (due.id, day - 3_600),
+            (later.id, day + DAY),
+            (pinned.id, day - 3_600),
+        ] {
+            store
+                .conn
+                .execute("UPDATE cards SET review_at=?2 WHERE id=?1", params![id, at])
+                .unwrap();
         }
 
         store.refresh_resurfacing(day, 0, 3).unwrap();
         let loaded = store.load().unwrap();
         assert_eq!(loaded.len(), 4, "nothing leaves the layer");
-        assert_eq!(loaded.last().unwrap().id, due.id, "the due reminder is drawn on top");
+        assert_eq!(
+            loaded.last().unwrap().id,
+            due.id,
+            "the due reminder is drawn on top"
+        );
         let card = loaded.iter().find(|c| c.id == due.id).unwrap();
-        assert_eq!((card.pos, card.placement), (egui::pos2(500.0, 300.0), Placement::Manual));
-        assert_eq!(card.resurface_reason(day).as_deref(), Some("Напоминание на сегодня"));
-        assert_eq!(loaded.iter().find(|c| c.id == later.id).unwrap().resurface_reason(day), None);
+        assert_eq!(
+            (card.pos, card.placement),
+            (egui::pos2(500.0, 300.0), Placement::Manual)
+        );
+        assert_eq!(
+            card.resurface_reason(day).as_deref(),
+            Some("Напоминание на сегодня")
+        );
+        assert_eq!(
+            loaded
+                .iter()
+                .find(|c| c.id == later.id)
+                .unwrap()
+                .resurface_reason(day),
+            None
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1512,11 +1939,17 @@ secret");
         let (store, dir) = temp_store("pinned-rediscover");
         let idea = add(&store, "идея: annual pricing");
         store.set_archived(idea.id, true).unwrap();
-        store.conn.execute("UPDATE cards SET created_at=1, last_viewed_at=1", []).unwrap();
+        store
+            .conn
+            .execute("UPDATE cards SET created_at=1, last_viewed_at=1", [])
+            .unwrap();
         let day = 100 * DAY;
         assert_eq!(store.refresh_resurfacing(day, 0, 3).unwrap().len(), 1);
         // As search used to pin it: the flag without the placement.
-        store.conn.execute("UPDATE cards SET pinned=1 WHERE id=?1", [idea.id]).unwrap();
+        store
+            .conn
+            .execute("UPDATE cards SET pinned=1 WHERE id=?1", [idea.id])
+            .unwrap();
         store.refresh_resurfacing(day + DAY, 0, 3).unwrap();
         let card = store.card(idea.id).unwrap().unwrap();
         assert!(!card.archived);
@@ -1537,16 +1970,22 @@ secret");
     fn legacy_database_moves_with_its_log_or_not_at_all() {
         let dir = std::env::temp_dir().join(format!("ebb-test-legacy-move-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let (old_db, new_db) = (dir.join("Ambient").join("ambient.db"), dir.join("Ebb").join("ebb.db"));
+        let (old_db, new_db) = (
+            dir.join("Ambient").join("ambient.db"),
+            dir.join("Ebb").join("ebb.db"),
+        );
         std::fs::create_dir_all(old_db.parent().unwrap()).unwrap();
         std::fs::write(&old_db, "db").unwrap();
         std::fs::write(wal_of(&old_db), "wal").unwrap();
 
         // Held open by an old build: nothing moves, nothing new is created.
         // As SQLite opens it: shared for reading and writing, not for delete/rename.
-        let held = std::os::windows::fs::OpenOptionsExt::share_mode(std::fs::OpenOptions::new().read(true), 0x1 | 0x2)
-            .open(&old_db)
-            .unwrap();
+        let held = std::os::windows::fs::OpenOptionsExt::share_mode(
+            std::fs::OpenOptions::new().read(true),
+            0x1 | 0x2,
+        )
+        .open(&old_db)
+        .unwrap();
         migrate_legacy_at(&old_db, &new_db);
         assert!(old_db.exists() && !new_db.exists());
         drop(held);
@@ -1588,7 +2027,10 @@ secret");
         add(&store, "#дом");
         let gone = add(&store, "#еда #работа");
         store.delete(gone.id).unwrap();
-        assert_eq!(store.tag_counts().unwrap(), [("дом".to_owned(), 2), ("еда".to_owned(), 1)]);
+        assert_eq!(
+            store.tag_counts().unwrap(),
+            [("дом".to_owned(), 2), ("еда".to_owned(), 1)]
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1596,9 +2038,25 @@ secret");
     fn raised_cards_load_on_top() {
         let (store, dir) = temp_store("z-order");
         let ids: Vec<i64> = ["a", "b", "c"].iter().map(|t| add(&store, t).id).collect();
-        assert_eq!(store.load().unwrap().iter().map(|c| c.id).collect::<Vec<_>>(), ids);
+        assert_eq!(
+            store
+                .load()
+                .unwrap()
+                .iter()
+                .map(|c| c.id)
+                .collect::<Vec<_>>(),
+            ids
+        );
         store.raise(ids[0]).unwrap();
-        assert_eq!(store.load().unwrap().iter().map(|c| c.id).collect::<Vec<_>>(), [ids[1], ids[2], ids[0]]);
+        assert_eq!(
+            store
+                .load()
+                .unwrap()
+                .iter()
+                .map(|c| c.id)
+                .collect::<Vec<_>>(),
+            [ids[1], ids[2], ids[0]]
+        );
         // A new card starts above the raised one.
         let d = add(&store, "d").id;
         assert_eq!(store.load().unwrap().last().map(|c| c.id), Some(d));
@@ -1623,7 +2081,10 @@ secret");
         let store = Store::open_at(PathBuf::from(path)).unwrap();
         let hidden = store.card(card.id).unwrap().unwrap();
         assert_eq!(hidden.title, crate::card::PRIVATE_PLACEHOLDER);
-        assert_eq!(store.secret(card.id).unwrap().as_deref(), Some("API_KEY=abc123\nrest"));
+        assert_eq!(
+            store.secret(card.id).unwrap().as_deref(),
+            Some("API_KEY=abc123\nrest")
+        );
         assert!(find(&store, "abc123").is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1631,16 +2092,28 @@ secret");
     #[test]
     fn private_kind_round_trip_keeps_label_and_value() {
         let (store, dir) = temp_store("private-kind");
-        let card = add(&store, "Wi-Fi офис
-guest / pass");
+        let card = add(
+            &store,
+            "Wi-Fi офис
+guest / pass",
+        );
         store.set_kind(card.id, Kind::Private).unwrap();
         let hidden = store.card(card.id).unwrap().unwrap();
-        assert_eq!((hidden.title.as_str(), hidden.body.as_str()), ("Wi-Fi офис", ""));
-        assert_eq!(store.secret(card.id).unwrap().as_deref(), Some("guest / pass"));
+        assert_eq!(
+            (hidden.title.as_str(), hidden.body.as_str()),
+            ("Wi-Fi офис", "")
+        );
+        assert_eq!(
+            store.secret(card.id).unwrap().as_deref(),
+            Some("guest / pass")
+        );
         store.set_kind(card.id, Kind::Note).unwrap();
         let open = store.card(card.id).unwrap().unwrap();
-        assert_eq!(open.body, "Wi-Fi офис
-guest / pass");
+        assert_eq!(
+            open.body,
+            "Wi-Fi офис
+guest / pass"
+        );
         assert!(store.secret(card.id).unwrap().is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1649,14 +2122,24 @@ guest / pass");
     fn idea_status_survives_a_change_of_kind() {
         let (store, dir) = temp_store("idea-status");
         let card = add(&store, "идея: annual pricing");
-        store.set_idea_status(card.id, Some(IdeaStatus::Explore)).unwrap();
+        store
+            .set_idea_status(card.id, Some(IdeaStatus::Explore))
+            .unwrap();
         store.set_kind(card.id, Kind::Goal).unwrap();
         store.set_kind(card.id, Kind::Idea).unwrap();
         let loaded = store.card(card.id).unwrap().unwrap();
-        assert_eq!((loaded.kind, loaded.idea_status), (Kind::Idea, Some(IdeaStatus::Explore)));
+        assert_eq!(
+            (loaded.kind, loaded.idea_status),
+            (Kind::Idea, Some(IdeaStatus::Explore))
+        );
         store.set_idea_status(card.id, None).unwrap();
         assert_eq!(store.card(card.id).unwrap().unwrap().idea_status, None);
-        let meta: String = store.conn.query_row("SELECT meta FROM cards WHERE id=?1", [card.id], |r| r.get(0)).unwrap();
+        let meta: String = store
+            .conn
+            .query_row("SELECT meta FROM cards WHERE id=?1", [card.id], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(meta, "{}");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1669,10 +2152,18 @@ guest / pass");
         for c in [&plain, &important] {
             store.set_archived(c.id, true).unwrap();
         }
-        store.set_idea_status(important.id, Some(IdeaStatus::Important)).unwrap();
-        store.conn.execute("UPDATE cards SET created_at=1, last_viewed_at=1", []).unwrap();
+        store
+            .set_idea_status(important.id, Some(IdeaStatus::Important))
+            .unwrap();
+        store
+            .conn
+            .execute("UPDATE cards SET created_at=1, last_viewed_at=1", [])
+            .unwrap();
         let picks = store.refresh_resurfacing(100 * DAY, 0, 1).unwrap();
-        assert_eq!(picks.iter().map(|p| p.id).collect::<Vec<_>>(), vec![important.id]);
+        assert_eq!(
+            picks.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![important.id]
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1681,16 +2172,33 @@ guest / pass");
         let (store, dir) = temp_store("weekly-review");
         let card = add(&store, "идея: review this");
         let t = now();
-        store.conn.execute("UPDATE cards SET last_viewed_at=?2 WHERE id=?1", params![card.id, t - 40 * DAY]).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE cards SET last_viewed_at=?2 WHERE id=?1",
+                params![card.id, t - 40 * DAY],
+            )
+            .unwrap();
         let queue = store.review_queue(t, 15).unwrap();
-        assert_eq!(queue.iter().map(|c| c.id).collect::<Vec<_>>(), vec![card.id]);
+        assert_eq!(
+            queue.iter().map(|c| c.id).collect::<Vec<_>>(),
+            vec![card.id]
+        );
 
         let review_id = store.begin_review(t).unwrap();
-        let snapshot = store.review_action(card.id, ReviewAction::Snooze, t, 0).unwrap();
-        store.record_review_item(review_id, card.id, ReviewAction::Snooze, t).unwrap();
+        let snapshot = store
+            .review_action(card.id, ReviewAction::Snooze, t, 0)
+            .unwrap();
+        store
+            .record_review_item(review_id, card.id, ReviewAction::Snooze, t)
+            .unwrap();
         let snoozed = store.card(card.id).unwrap().unwrap();
         assert!(snoozed.review_at.is_some());
-        assert_eq!(snoozed.placement, Placement::Archive, "later takes a card off the layer");
+        assert_eq!(
+            snoozed.placement,
+            Placement::Archive,
+            "later takes a card off the layer"
+        );
 
         store.undo_review(&snapshot).unwrap();
         store.forget_review_item(review_id, card.id).unwrap();
@@ -1698,16 +2206,28 @@ guest / pass");
         assert!(restored.review_at.is_none());
         assert!(!restored.archived);
         assert_eq!(store.review_queue(t, 15).unwrap().len(), 1);
-        store.review_action(card.id, ReviewAction::Keep, t, 0).unwrap();
-        store.record_review_item(review_id, card.id, ReviewAction::Keep, t).unwrap();
+        store
+            .review_action(card.id, ReviewAction::Keep, t, 0)
+            .unwrap();
+        store
+            .record_review_item(review_id, card.id, ReviewAction::Keep, t)
+            .unwrap();
         assert!(store.review_queue(t, 15).unwrap().is_empty());
         store.finish_review(review_id, t).unwrap();
-        let (kept, snoozed): (i64, i64) =
-            store.conn.query_row("SELECT kept, snoozed FROM reviews WHERE id=?1", [review_id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        let (kept, snoozed): (i64, i64) = store
+            .conn
+            .query_row(
+                "SELECT kept, snoozed FROM reviews WHERE id=?1",
+                [review_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
         assert_eq!((kept, snoozed), (1, 0));
 
         // Trash from the review goes through the trash, and undo brings it back.
-        let snapshot = store.review_action(card.id, ReviewAction::Trash, t, 0).unwrap();
+        let snapshot = store
+            .review_action(card.id, ReviewAction::Trash, t, 0)
+            .unwrap();
         assert_eq!(store.counts().unwrap().2, 1);
         store.undo_review(&snapshot).unwrap();
         assert_eq!(store.counts().unwrap().2, 0);
@@ -1717,15 +2237,29 @@ guest / pass");
     fn import_notes(store: &mut Store, notes: &[(&str, &str, bool)]) -> Vec<i64> {
         let planned: Vec<Planned> = notes
             .iter()
-            .map(|(id, text, on_layer)| Planned { body: (*text).into(), ..planned(id, *on_layer) })
+            .map(|(id, text, on_layer)| Planned {
+                body: (*text).into(),
+                ..planned(id, *on_layer)
+            })
             .collect();
-        let rects: Vec<Option<egui::Rect>> =
-            notes.iter().map(|(_, _, on)| on.then(|| egui::Rect::from_min_size(egui::pos2(0.0, 0.0), DEFAULT_SIZE))).collect();
+        let rects: Vec<Option<egui::Rect>> = notes
+            .iter()
+            .map(|(_, _, on)| {
+                on.then(|| egui::Rect::from_min_size(egui::pos2(0.0, 0.0), DEFAULT_SIZE))
+            })
+            .collect();
         store.import("sticky:", &planned, &rects, &[]).unwrap();
         notes
             .iter()
             .map(|(id, _, _)| {
-                store.conn.query_row("SELECT card_id FROM imported WHERE source_id=?1", [format!("sticky:{id}")], |r| r.get(0)).unwrap()
+                store
+                    .conn
+                    .query_row(
+                        "SELECT card_id FROM imported WHERE source_id=?1",
+                        [format!("sticky:{id}")],
+                        |r| r.get(0),
+                    )
+                    .unwrap()
             })
             .collect()
     }
@@ -1744,16 +2278,29 @@ guest / pass");
             ],
         );
         // An import before these rules: everything came in as a plain note.
-        store.conn.execute("UPDATE cards SET kind='note'", []).unwrap();
+        store
+            .conn
+            .execute("UPDATE cards SET kind='note'", [])
+            .unwrap();
         let now = 1_650_000_000 + 400 * DAY;
         let items = store.import_review(now).unwrap();
         let group = |id: i64| items.iter().find(|i| i.card_id == id).unwrap();
         assert_eq!(group(ids[0]).group, ImportGroup::Secrets);
-        assert_eq!(group(ids[0]).preview, "wifi дома", "the password line never shows");
+        assert_eq!(
+            group(ids[0]).preview,
+            "wifi дома",
+            "the password line never shows"
+        );
         assert_eq!(group(ids[1]).group, ImportGroup::Links);
         assert_eq!(group(ids[2]).group, ImportGroup::Ideas);
         assert_eq!(group(ids[3]).group, ImportGroup::Old);
-        assert!(store.import_review(1_650_000_000 + DAY).unwrap().iter().any(|i| i.group == ImportGroup::Other));
+        assert!(
+            store
+                .import_review(1_650_000_000 + DAY)
+                .unwrap()
+                .iter()
+                .any(|i| i.group == ImportGroup::Other)
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1761,22 +2308,46 @@ guest / pass");
     fn accepting_the_secrets_group_encrypts_and_undo_brings_the_text_back() {
         let (mut store, dir) = temp_store("import-secrets");
         let secret = "Tr0ub4dor-8812-unique";
-        let ids = import_notes(&mut store, &[("a", &format!("wifi дома\nпароль: {secret}"), false), ("b", "Купить молоко", false)]);
-        store.conn.execute("UPDATE cards SET kind='note'", []).unwrap();
+        let ids = import_notes(
+            &mut store,
+            &[
+                ("a", &format!("wifi дома\nпароль: {secret}"), false),
+                ("b", "Купить молоко", false),
+            ],
+        );
+        store
+            .conn
+            .execute("UPDATE cards SET kind='note'", [])
+            .unwrap();
 
-        let snapshots = store.apply_import_review(&ids[..1], ImportAction::SetKind(Kind::Private)).unwrap();
+        let snapshots = store
+            .apply_import_review(&ids[..1], ImportAction::SetKind(Kind::Private))
+            .unwrap();
         assert_eq!(store.card(ids[0]).unwrap().unwrap().kind, Kind::Private);
-        assert_eq!(store.secret(ids[0]).unwrap().as_deref(), Some(format!("пароль: {secret}").as_str()));
-        assert_eq!(store.import_review(now()).unwrap().len(), 1, "done with: out of the review");
+        assert_eq!(
+            store.secret(ids[0]).unwrap().as_deref(),
+            Some(format!("пароль: {secret}").as_str())
+        );
+        assert_eq!(
+            store.import_review(now()).unwrap().len(),
+            1,
+            "done with: out of the review"
+        );
         store.scrub_plaintext().unwrap();
         for file in ["t.db", "t.db-wal"] {
             let bytes = std::fs::read(dir.join(file)).unwrap_or_default();
-            assert!(!bytes.windows(secret.len()).any(|w| w == secret.as_bytes()), "plaintext left in {file}");
+            assert!(
+                !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
+                "plaintext left in {file}"
+            );
         }
 
         store.undo_import_review(&snapshots).unwrap();
         let back = store.card(ids[0]).unwrap().unwrap();
-        assert_eq!((back.kind, back.body.as_str()), (Kind::Note, format!("wifi дома\nпароль: {secret}").as_str()));
+        assert_eq!(
+            (back.kind, back.body.as_str()),
+            (Kind::Note, format!("wifi дома\nпароль: {secret}").as_str())
+        );
         assert_eq!(store.import_review(now()).unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1784,19 +2355,34 @@ guest / pass");
     #[test]
     fn import_review_group_actions_are_one_transaction_and_undoable() {
         let (mut store, dir) = temp_store("import-actions");
-        let ids = import_notes(&mut store, &[("a", "одна", true), ("b", "две", false), ("c", "три", true)]);
-        let snapshots = store.apply_import_review(&ids, ImportAction::Archive).unwrap();
+        let ids = import_notes(
+            &mut store,
+            &[("a", "одна", true), ("b", "две", false), ("c", "три", true)],
+        );
+        let snapshots = store
+            .apply_import_review(&ids, ImportAction::Archive)
+            .unwrap();
         assert!(store.load().unwrap().is_empty());
         store.undo_import_review(&snapshots).unwrap();
-        assert_eq!(store.load().unwrap().len(), 2, "the two from the layer are back on it");
+        assert_eq!(
+            store.load().unwrap().len(),
+            2,
+            "the two from the layer are back on it"
+        );
 
         // A failing card rolls the whole group back.
         let missing = ids.iter().copied().chain([9_999]).collect::<Vec<_>>();
-        assert!(store.apply_import_review(&missing, ImportAction::Trash).is_err());
+        assert!(
+            store
+                .apply_import_review(&missing, ImportAction::Trash)
+                .is_err()
+        );
         assert_eq!(store.counts().unwrap().2, 0);
         assert_eq!(store.import_review(now()).unwrap().len(), 3);
 
-        let snapshots = store.apply_import_review(&ids[..1], ImportAction::Trash).unwrap();
+        let snapshots = store
+            .apply_import_review(&ids[..1], ImportAction::Trash)
+            .unwrap();
         assert_eq!(store.counts().unwrap().2, 1);
         store.undo_import_review(&snapshots).unwrap();
         assert_eq!(store.counts().unwrap().2, 0);
@@ -1809,22 +2395,39 @@ guest / pass");
         let kept = add(&store, "идея: kept on the layer");
         let archived = add(&store, "идея: archived in review");
         let t = 100 * DAY;
-        store.conn.execute("UPDATE cards SET created_at=1, last_viewed_at=?1", [t - 40 * DAY]).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE cards SET created_at=1, last_viewed_at=?1",
+                [t - 40 * DAY],
+            )
+            .unwrap();
         let review = store.begin_review(t).unwrap();
-        for (card, action) in [(&kept, ReviewAction::Keep), (&archived, ReviewAction::Archive)] {
+        for (card, action) in [
+            (&kept, ReviewAction::Keep),
+            (&archived, ReviewAction::Archive),
+        ] {
             store.review_action(card.id, action, t, 0).unwrap();
-            store.record_review_item(review, card.id, action, t).unwrap();
+            store
+                .record_review_item(review, card.id, action, t)
+                .unwrap();
             assert_eq!(store.card(card.id).unwrap().unwrap().review_at, None);
         }
 
         // Not asked again for eight weeks, though a month without opening it has passed.
         assert!(store.review_queue(t + 31 * DAY, 15).unwrap().is_empty());
         let queue = store.review_queue(t + 57 * DAY, 15).unwrap();
-        assert_eq!(queue.iter().map(|c| c.id).collect::<Vec<_>>(), vec![kept.id]);
+        assert_eq!(
+            queue.iter().map(|c| c.id).collect::<Vec<_>>(),
+            vec![kept.id]
+        );
 
         // The archived one may come back forgotten, but never as a reminder.
         let picks = store.refresh_resurfacing(t + 57 * DAY, 0, 3).unwrap();
-        assert_eq!(picks.iter().map(|p| p.id).collect::<Vec<_>>(), vec![archived.id]);
+        assert_eq!(
+            picks.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![archived.id]
+        );
         assert_ne!(picks[0].reason, "Напоминание на сегодня");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1835,25 +2438,44 @@ guest / pass");
         let t = now();
         let batch = [planned("unopened", false), planned("opened", false)];
         store.import("sticky:", &batch, &[None, None], &[]).unwrap();
-        let imported: Vec<i64> = store.conn.prepare("SELECT card_id FROM imported ORDER BY source_id DESC").unwrap()
-            .query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        let imported: Vec<i64> = store
+            .conn
+            .prepare("SELECT card_id FROM imported ORDER BY source_id DESC")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
         let (unopened, opened) = (imported[0], imported[1]);
         store.touch(opened).unwrap();
 
         let reminder = add(&store, "напомни: renew the domain");
         store.set_archived(reminder.id, true).unwrap();
-        store.conn.execute("UPDATE cards SET review_at=?2 WHERE id=?1", params![reminder.id, t - DAY]).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE cards SET review_at=?2 WHERE id=?1",
+                params![reminder.id, t - DAY],
+            )
+            .unwrap();
         let old_archived = add(&store, "идея: long archived");
         store.set_archived(old_archived.id, true).unwrap();
         let forgotten = add(&store, "идея: forgotten on the layer");
-        store.conn.execute(
-            "UPDATE cards SET last_viewed_at=?2 WHERE id IN (?1, ?3)",
-            params![forgotten.id, t - 60 * DAY, old_archived.id],
-        )
-        .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE cards SET last_viewed_at=?2 WHERE id IN (?1, ?3)",
+                params![forgotten.id, t - 60 * DAY, old_archived.id],
+            )
+            .unwrap();
         add(&store, "идея: fresh on the layer");
 
-        let queue: Vec<i64> = store.review_queue(t, 15).unwrap().iter().map(|c| c.id).collect();
+        let queue: Vec<i64> = store
+            .review_queue(t, 15)
+            .unwrap()
+            .iter()
+            .map(|c| c.id)
+            .collect();
         assert_eq!(queue, vec![forgotten.id, reminder.id, unopened]);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1861,12 +2483,19 @@ guest / pass");
     #[test]
     fn later_in_review_on_an_archived_note_only_waits_for_another_review() {
         let (mut store, dir) = temp_store("review-later-archived");
-        store.import("sticky:", &[planned("a", false)], &[None], &[]).unwrap();
-        let id: i64 = store.conn.query_row("SELECT card_id FROM imported", [], |r| r.get(0)).unwrap();
+        store
+            .import("sticky:", &[planned("a", false)], &[None], &[])
+            .unwrap();
+        let id: i64 = store
+            .conn
+            .query_row("SELECT card_id FROM imported", [], |r| r.get(0))
+            .unwrap();
         let t = now();
         let review = store.begin_review(t).unwrap();
         store.review_action(id, ReviewAction::Snooze, t, 0).unwrap();
-        store.record_review_item(review, id, ReviewAction::Snooze, t).unwrap();
+        store
+            .record_review_item(review, id, ReviewAction::Snooze, t)
+            .unwrap();
         let card = store.card(id).unwrap().unwrap();
         assert!(card.archived);
         assert_eq!(card.review_at, None);
@@ -1885,15 +2514,40 @@ guest / pass");
             (&planted, "keep", at + 2 + REVIEW_PAUSE_DAYS * DAY),
             (&reminder, "keep", at + REVIEW_PAUSE_DAYS * DAY + 3 * 3_600),
         ] {
-            store.conn.execute("INSERT INTO review_items VALUES (1, ?1, ?2, ?3)", params![card.id, action, at]).unwrap();
-            store.conn.execute("UPDATE cards SET review_at=?2 WHERE id=?1", params![card.id, review_at]).unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO review_items VALUES (1, ?1, ?2, ?3)",
+                    params![card.id, action, at],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "UPDATE cards SET review_at=?2 WHERE id=?1",
+                    params![card.id, review_at],
+                )
+                .unwrap();
         }
-        store.conn.execute("DELETE FROM settings WHERE key=?1", [SET_REVIEW_DATES_CLEARED]).unwrap();
+        store
+            .conn
+            .execute(
+                "DELETE FROM settings WHERE key=?1",
+                [SET_REVIEW_DATES_CLEARED],
+            )
+            .unwrap();
         drop(store);
 
         let store = Store::open_at(dir.join("t.db")).unwrap();
         assert_eq!(store.card(planted.id).unwrap().unwrap().review_at, None);
-        assert!(store.card(reminder.id).unwrap().unwrap().review_at.is_some());
+        assert!(
+            store
+                .card(reminder.id)
+                .unwrap()
+                .unwrap()
+                .review_at
+                .is_some()
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1914,7 +2568,10 @@ guest / pass");
                 )
                 .unwrap();
         }
-        store.conn.execute_batch("COMMIT; PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        store
+            .conn
+            .execute_batch("COMMIT; PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
         drop(store);
 
         // As at launch: a fresh connection, then the pick.
@@ -1942,14 +2599,31 @@ guest / pass");
     #[test]
     #[ignore]
     fn search_speed() {
-        let notes: usize = std::env::var("EBB_SPEED_NOTES").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000);
+        let notes: usize = std::env::var("EBB_SPEED_NOTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_000);
         let (store, dir) = temp_store("speed");
         // Zipf-distributed vocabulary like natural text: a few very common words,
         // a long tail of rare ones. Known words sit at chosen ranks.
         let mut vocab: Vec<String> = (0..20_000)
-            .map(|i| if i % 2 == 0 { format!("слово{i}") } else { format!("word{i}") })
+            .map(|i| {
+                if i % 2 == 0 {
+                    format!("слово{i}")
+                } else {
+                    format!("word{i}")
+                }
+            })
             .collect();
-        for (rank, w) in [(0, "и"), (1, "в"), (5, "проверить"), (40, "pricing"), (300, "онбординг"), (2000, "figma"), (8000, "vpn")] {
+        for (rank, w) in [
+            (0, "и"),
+            (1, "в"),
+            (5, "проверить"),
+            (40, "pricing"),
+            (300, "онбординг"),
+            (2000, "figma"),
+            (8000, "vpn"),
+        ] {
             vocab[rank] = w.into();
         }
         let cumulative: Vec<f64> = vocab
@@ -1972,7 +2646,10 @@ guest / pass");
         store.conn.execute_batch("BEGIN").unwrap();
         for i in 0..notes {
             // Mostly short notes, some long: 5..~400 words.
-            let len = 5 + ((next() % 1000) as f64 / 1000.0).powi(3).mul_add(400.0, 0.0) as usize;
+            let len = 5
+                + ((next() % 1000) as f64 / 1000.0)
+                    .powi(3)
+                    .mul_add(400.0, 0.0) as usize;
             let body: Vec<&str> = (0..len)
                 .map(|_| {
                     let x = (next() % 1_000_000) as f64 / 1_000_000.0 * total;
@@ -1983,11 +2660,22 @@ guest / pass");
             add(&store, &format!("{kind}Заметка {i}\n{}", body.join(" ")));
         }
         store.conn.execute_batch("COMMIT").unwrap();
-        println!("inserted {notes} notes in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+        println!(
+            "inserted {notes} notes in {:.0} ms",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
 
         for query in [
-            "pricing", "онбординга", "figma", "vpn", "проверить pricing", "онб", "идеи за месяц", "prompts figma",
-            "zzz_nothing", "ord19",
+            "pricing",
+            "онбординга",
+            "figma",
+            "vpn",
+            "проверить pricing",
+            "онб",
+            "идеи за месяц",
+            "prompts figma",
+            "zzz_nothing",
+            "ord19",
         ] {
             let q = crate::search::parse(query, now(), 0);
             let mut times = Vec::new();
@@ -1998,10 +2686,17 @@ guest / pass");
                 times.push(t.elapsed().as_secs_f64() * 1000.0);
             }
             times.sort_by(f64::total_cmp);
-            println!("{query:>24}: {n:>2} hits, p50 {:.2} ms, p95 {:.2} ms", times[15], times[28]);
+            println!(
+                "{query:>24}: {n:>2} hits, p50 {:.2} ms, p95 {:.2} ms",
+                times[15], times[28]
+            );
         }
-        let size = std::fs::metadata(dir.join("t.db")).map(|m| m.len()).unwrap_or(0)
-            + std::fs::metadata(dir.join("t.db-wal")).map(|m| m.len()).unwrap_or(0);
+        let size = std::fs::metadata(dir.join("t.db"))
+            .map(|m| m.len())
+            .unwrap_or(0)
+            + std::fs::metadata(dir.join("t.db-wal"))
+                .map(|m| m.len())
+                .unwrap_or(0);
         println!("db+wal size: {:.1} MiB", size as f64 / 1048576.0);
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
@@ -2013,13 +2708,26 @@ guest / pass");
         let mut notes = [planned("a", true), planned("b", false), planned("c", false)];
         notes[0].tint = Some(Tint::Green);
         let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(317.0, 285.0));
-        store.import("sticky:", &notes, &[Some(rect), None, None], &[]).unwrap();
+        store
+            .import("sticky:", &notes, &[Some(rect), None, None], &[])
+            .unwrap();
 
         let visible = store.load().unwrap();
         assert_eq!(visible.len(), 1, "only the on-layer note is loaded");
-        assert_eq!(visible[0].created_at, 1_600_000_000, "original timestamps are kept");
-        assert_eq!((visible[0].pos, visible[0].size), (rect.min, rect.size()), "position and size kept");
-        assert_eq!(visible[0].tint, Some(Tint::Green), "the Sticky Notes color is kept");
+        assert_eq!(
+            visible[0].created_at, 1_600_000_000,
+            "original timestamps are kept"
+        );
+        assert_eq!(
+            (visible[0].pos, visible[0].size),
+            (rect.min, rect.size()),
+            "position and size kept"
+        );
+        assert_eq!(
+            visible[0].tint,
+            Some(Tint::Green),
+            "the Sticky Notes color is kept"
+        );
 
         // Untouched: everything can be replaced.
         let (keep, replace) = store.import_state("sticky:").unwrap();
@@ -2030,7 +2738,10 @@ guest / pass");
         let mut a = visible[0].clone();
         a.pos = egui::pos2(100.0, 100.0);
         store.save(&a).unwrap();
-        let b = store.search(&crate::search::parse("note b", now(), 0), Scope::Archive, 5).unwrap()[0].id;
+        let b = store
+            .search(&crate::search::parse("note b", now(), 0), Scope::Archive, 5)
+            .unwrap()[0]
+            .id;
         store.delete(b).unwrap();
         let (keep, replace) = store.import_state("sticky:").unwrap();
         assert_eq!(keep, ["a".to_owned(), "b".to_owned()].into_iter().collect());
@@ -2051,8 +2762,14 @@ guest / pass");
             .collect();
         let again = plan(&source, &keep, 1_700_000_000);
         assert_eq!(again.notes.len(), 1);
-        let batch = store.import("sticky:", &again.notes, &[None], &replace).unwrap();
-        assert_eq!(store.counts().unwrap(), (1, 1, 1), "a on layer, new c archived, b in trash");
+        let batch = store
+            .import("sticky:", &again.notes, &[None], &replace)
+            .unwrap();
+        assert_eq!(
+            store.counts().unwrap(),
+            (1, 1, 1),
+            "a on layer, new c archived, b in trash"
+        );
 
         assert_eq!(store.undo_import(batch).unwrap(), 1);
         assert_eq!(store.counts().unwrap(), (1, 0, 1));

@@ -5,29 +5,34 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
 use windows::Win32::Graphics::Dwm::{
-    DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
-    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND,
-    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+    DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND, DwmExtendFrameIntoClientArea,
+    DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromPoint,
 };
-use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
-use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardSequenceNumber, OpenClipboard, RegisterClipboardFormatW, SetClipboardData};
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, GetClipboardSequenceNumber, OpenClipboard,
+    RegisterClipboardFormatW, SetClipboardData,
+};
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
-use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
+use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
 use windows::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
 use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindowLongPtrW, HWND_BOTTOM, MONITORINFOF_PRIMARY,
-    SET_WINDOW_POS_FLAGS, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SetWindowLongPtrW, SetWindowPos, WINDOWPOS, WM_ACTIVATEAPP, WM_STYLECHANGING, WM_WINDOWPOSCHANGING, WS_EX_APPWINDOW,
-    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_SYSMENU,
+    SET_WINDOW_POS_FLAGS, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WINDOWPOS, WM_ACTIVATEAPP, WM_NCCALCSIZE,
+    WM_STYLECHANGING, WM_WINDOWPOSCHANGING, WS_BORDER, WS_DLGFRAME, WS_EX_APPWINDOW,
+    WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_LAYERED, WS_EX_STATICEDGE, WS_EX_TOOLWINDOW,
+    WS_EX_WINDOWEDGE, WS_SYSMENU,
 };
 use windows::core::{BOOL, PCWSTR, w};
 
@@ -66,11 +71,15 @@ pub fn copy_private(text: &str) -> bool {
             let _ = GlobalFree(Some(mem));
             return false;
         }
-        let set = EmptyClipboard().is_ok() && SetClipboardData(u32::from(CF_UNICODETEXT.0), Some(HANDLE(mem.0))).is_ok();
+        let set = EmptyClipboard().is_ok()
+            && SetClipboardData(u32::from(CF_UNICODETEXT.0), Some(HANDLE(mem.0))).is_ok();
         if set {
             // Windows reads these registered formats to keep sensitive contents
             // out of history and cloud sync.
-            for name in [w!("CanIncludeInClipboardHistory"), w!("CanUploadToCloudClipboard")] {
+            for name in [
+                w!("CanIncludeInClipboardHistory"),
+                w!("CanUploadToCloudClipboard"),
+            ] {
                 let format = RegisterClipboardFormatW(name);
                 if format == 0 {
                     continue;
@@ -105,7 +114,11 @@ pub fn copy_private(text: &str) -> bool {
 /// Empties the clipboard if it still holds the last Private value copied
 /// (on exit: gives a busy clipboard only a moment).
 pub fn clear_private_clipboard() {
-    clear_clipboard_if(PRIVATE_CLIP.load(Ordering::Relaxed), 5, std::time::Duration::from_millis(20));
+    clear_clipboard_if(
+        PRIVATE_CLIP.load(Ordering::Relaxed),
+        5,
+        std::time::Duration::from_millis(20),
+    );
 }
 
 /// Clears the copy made at `sequence` if it's still the latest Private copy and
@@ -120,12 +133,18 @@ fn clear_clipboard_if(sequence: u32, attempts: u32, pause: std::time::Duration) 
         unsafe {
             if OpenClipboard(None).is_ok() {
                 let ours = GetClipboardSequenceNumber() == sequence
-                    || clipboard_text_fingerprint() == Some(PRIVATE_CLIP_PRINT.load(Ordering::Relaxed));
+                    || clipboard_text_fingerprint()
+                        == Some(PRIVATE_CLIP_PRINT.load(Ordering::Relaxed));
                 if ours {
                     let _ = EmptyClipboard();
                 }
                 let _ = CloseClipboard();
-                let _ = PRIVATE_CLIP.compare_exchange(sequence, 0, Ordering::Relaxed, Ordering::Relaxed);
+                let _ = PRIVATE_CLIP.compare_exchange(
+                    sequence,
+                    0,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
                 return;
             }
         }
@@ -172,8 +191,14 @@ pub fn error_box(text: &str) {
 /// Keeps a window out of screenshots and screen recording while a Private value
 /// is shown on it. Builds before Windows 10 2004 refuse the flag: best effort.
 pub fn exclude_from_capture(raw: isize, exclude: bool) -> bool {
-    use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE};
-    let affinity = if exclude { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+    };
+    let affinity = if exclude {
+        WDA_EXCLUDEFROMCAPTURE
+    } else {
+        WDA_NONE
+    };
     unsafe { SetWindowDisplayAffinity(hwnd(raw), affinity).is_ok() }
 }
 
@@ -321,11 +346,27 @@ pub fn apply_backdrop(raw: isize, mode: Backdrop, rounded: bool) {
         let style = GetWindowLongPtrW(h, GWL_STYLE);
         if style & WS_SYSMENU.0 as isize != 0 {
             SetWindowLongPtrW(h, GWL_STYLE, style & !(WS_SYSMENU.0 as isize));
-            let _ = SetWindowPos(h, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            let _ = SetWindowPos(
+                h,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
         }
 
-        set_dwm_i32(h, DWMWA_USE_IMMERSIVE_DARK_MODE, i32::from(!LIGHT_THEME.load(Ordering::Relaxed)));
-        let corners = if rounded { DWMWCP_ROUND } else { DWMWCP_DONOTROUND };
+        set_dwm_i32(
+            h,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            i32::from(!LIGHT_THEME.load(Ordering::Relaxed)),
+        );
+        let corners = if rounded {
+            DWMWCP_ROUND
+        } else {
+            DWMWCP_DONOTROUND
+        };
         set_dwm_i32(h, DWMWA_WINDOW_CORNER_PREFERENCE, corners.0);
         let margins = MARGINS {
             cxLeftWidth: -1,
@@ -343,7 +384,11 @@ pub fn apply_backdrop(raw: isize, mode: Backdrop, rounded: bool) {
             Backdrop::AccentAcrylic => {
                 set_dwm_i32(h, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE.0);
                 // ABGR tint; low alpha, the egui layer adds its own tint on top.
-                let tint = if LIGHT_THEME.load(Ordering::Relaxed) { 0x10_F4_F2_F0 } else { 0x10_18_14_10 };
+                let tint = if LIGHT_THEME.load(Ordering::Relaxed) {
+                    0x10_F4_F2_F0
+                } else {
+                    0x10_18_14_10
+                };
                 set_accent(h, ACCENT_ENABLE_ACRYLICBLURBEHIND, tint);
             }
             Backdrop::Off => {
@@ -378,17 +423,37 @@ impl Default for SystemColors {
     fn default() -> Self {
         Self {
             light: false,
-            palette: [[153, 235, 255], [76, 194, 255], [0, 145, 248], [0, 120, 212], [0, 103, 192], [0, 62, 146], [0, 26, 104]],
+            palette: [
+                [153, 235, 255],
+                [76, 194, 255],
+                [0, 145, 248],
+                [0, 120, 212],
+                [0, 103, 192],
+                [0, 62, 146],
+                [0, 26, 104],
+            ],
             start: None,
         }
     }
 }
 
 fn reg_value(key: PCWSTR, name: PCWSTR, buf: &mut [u8]) -> Option<usize> {
-    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_BINARY, RRF_RT_REG_DWORD, RegGetValueW};
+    use windows::Win32::System::Registry::{
+        HKEY_CURRENT_USER, RRF_RT_REG_BINARY, RRF_RT_REG_DWORD, RegGetValueW,
+    };
     let mut len = buf.len() as u32;
     let flags = RRF_RT_REG_BINARY | RRF_RT_REG_DWORD;
-    let r = unsafe { RegGetValueW(HKEY_CURRENT_USER, key, name, flags, None, Some(buf.as_mut_ptr().cast()), Some(&mut len)) };
+    let r = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key,
+            name,
+            flags,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut len),
+        )
+    };
     r.is_ok().then_some(len as usize)
 }
 
@@ -396,22 +461,41 @@ fn reg_value(key: PCWSTR, name: PCWSTR, buf: &mut [u8]) -> Option<usize> {
 pub fn system_colors() -> SystemColors {
     let mut colors = SystemColors::default();
     let mut dword = [0u8; 4];
-    if reg_value(w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"), w!("AppsUseLightTheme"), &mut dword) == Some(4) {
+    if reg_value(
+        w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+        w!("AppsUseLightTheme"),
+        &mut dword,
+    ) == Some(4)
+    {
         colors.light = u32::from_le_bytes(dword) != 0;
     }
     // 8 RGBA entries; the 8th isn't part of the ramp.
     let mut palette = [0u8; 32];
-    if reg_value(w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"), w!("AccentPalette"), &mut palette) == Some(32) {
+    if reg_value(
+        w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"),
+        w!("AccentPalette"),
+        &mut palette,
+    ) == Some(32)
+    {
         for (i, c) in colors.palette.iter_mut().enumerate() {
             *c = [palette[i * 4], palette[i * 4 + 1], palette[i * 4 + 2]];
         }
     }
     let mut prevalence = [0u8; 4];
-    let accent_start = reg_value(w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"), w!("ColorPrevalence"), &mut prevalence)
-        == Some(4)
+    let accent_start = reg_value(
+        w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+        w!("ColorPrevalence"),
+        &mut prevalence,
+    ) == Some(4)
         && u32::from_le_bytes(prevalence) != 0;
     let mut start = [0u8; 4];
-    if accent_start && reg_value(w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"), w!("StartColorMenu"), &mut start) == Some(4) {
+    if accent_start
+        && reg_value(
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"),
+            w!("StartColorMenu"),
+            &mut start,
+        ) == Some(4)
+    {
         // DWORD 0xAABBGGRR, little-endian: R, G, B, A.
         colors.start = Some([start[0], start[1], start[2]]);
     }
@@ -457,9 +541,16 @@ pub fn monitors() -> Vec<Monitor> {
         if unsafe { GetMonitorInfoW(m, &mut info as *mut _ as *mut MONITORINFO) }.as_bool() {
             let mut device_ids = Vec::new();
             for index in 0.. {
-                let mut dd = DISPLAY_DEVICEW { cb: size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+                let mut dd = DISPLAY_DEVICEW {
+                    cb: size_of::<DISPLAY_DEVICEW>() as u32,
+                    ..Default::default()
+                };
                 // EDD_GET_DEVICE_INTERFACE_NAME = 1
-                if !unsafe { EnumDisplayDevicesW(PCWSTR(info.szDevice.as_ptr()), index, &mut dd, 1) }.as_bool() {
+                if !unsafe {
+                    EnumDisplayDevicesW(PCWSTR(info.szDevice.as_ptr()), index, &mut dd, 1)
+                }
+                .as_bool()
+                {
                     break;
                 }
                 device_ids.push(wide_str(&dd.DeviceID));
@@ -488,6 +579,71 @@ pub fn monitor_of(raw: isize) -> Option<Monitor> {
     use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
     let handle = unsafe { MonitorFromWindow(hwnd(raw), MONITOR_DEFAULTTONEAREST) }.0 as isize;
     monitors().into_iter().find(|m| m.handle == handle)
+}
+
+/// Finds one of this process' windows by a Rust title string.
+pub fn find_own_window_title(title: &str) -> Option<isize> {
+    let title: Vec<u16> = title.encode_utf16().chain([0]).collect();
+    find_own_window(PCWSTR(title.as_ptr()))
+}
+
+/// Lets a transparent card draw its own single rounded edge without DWM adding
+/// a second, larger rounded frame behind it.
+pub fn set_window_rounded(raw: isize, rounded: bool) {
+    let corners = if rounded {
+        DWMWCP_ROUND
+    } else {
+        DWMWCP_DONOTROUND
+    };
+    unsafe { set_dwm_i32(hwnd(raw), DWMWA_WINDOW_CORNER_PREFERENCE, corners.0) };
+}
+
+/// Keeps a floating note's whole outer rect in the monitor work area, which is
+/// Windows' desktop minus the taskbar (wherever the taskbar is docked).
+fn clamp_to_work(rect: egui::Rect, pixels_per_point: f32, work: RECT) -> egui::Pos2 {
+    let scale = pixels_per_point.max(0.01);
+    let physical = rect * scale;
+    let x = physical.min.x.clamp(
+        work.left as f32,
+        (work.right as f32 - physical.width()).max(work.left as f32),
+    );
+    let y = physical.min.y.clamp(
+        work.top as f32,
+        (work.bottom as f32 - physical.height()).max(work.top as f32),
+    );
+    egui::pos2(x / scale, y / scale)
+}
+
+pub fn clamp_to_work_area(rect: egui::Rect, pixels_per_point: f32) -> egui::Pos2 {
+    let scale = pixels_per_point.max(0.01);
+    let physical = rect * scale;
+    unsafe {
+        let point = POINT {
+            x: physical.center().x.round() as i32,
+            y: physical.center().y.round() as i32,
+        };
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST), &mut info).as_bool()
+        {
+            return rect.min;
+        }
+        clamp_to_work(rect, scale, info.rcWork)
+    }
+}
+
+/// Clamps a floating window to the work area of its current monitor.
+pub fn clamp_to_work_area_on(
+    raw: isize,
+    rect: egui::Rect,
+    pixels_per_point: f32,
+) -> egui::Pos2 {
+    monitor_of(raw).map_or_else(
+        || clamp_to_work_area(rect, pixels_per_point),
+        |monitor| clamp_to_work(rect, pixels_per_point, monitor.work),
+    )
 }
 
 /// Cover the work area of a monitor (physical pixels, bypasses DPI conversions).
@@ -531,7 +687,14 @@ impl Drop for Placing {
 pub fn monitor_scale(m: &Monitor) -> f32 {
     use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
     let (mut x, mut y) = (0, 0);
-    match unsafe { GetDpiForMonitor(HMONITOR(m.handle as *mut c_void), MDT_EFFECTIVE_DPI, &mut x, &mut y) } {
+    match unsafe {
+        GetDpiForMonitor(
+            HMONITOR(m.handle as *mut c_void),
+            MDT_EFFECTIVE_DPI,
+            &mut x,
+            &mut y,
+        )
+    } {
         Ok(()) if x > 0 => x as f32 / 96.0,
         _ => 1.0,
     }
@@ -541,7 +704,10 @@ pub fn monitor_scale(m: &Monitor) -> f32 {
 /// work area, `gap` points away from it (the collapsed layer).
 pub fn place_edge_center(raw: isize, m: &Monitor, size: (f32, f32), gap: f32, top: bool) {
     let scale = monitor_scale(m);
-    let (w, h) = ((size.0 * scale).round() as i32, (size.1 * scale).round() as i32);
+    let (w, h) = (
+        (size.0 * scale).round() as i32,
+        (size.1 * scale).round() as i32,
+    );
     let r = m.work;
     let gap = (gap * scale).round() as i32;
     let x = r.left + ((r.right - r.left) - w) / 2;
@@ -563,14 +729,25 @@ pub fn center_near_cursor(raw: isize, width_px: i32, height_px: i32) {
     unsafe {
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
-        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
         if !GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mut info).as_bool() {
             return;
         }
         let r = info.rcWork;
         let x = r.left + ((r.right - r.left) - width_px) / 2;
         let y = r.top + ((r.bottom - r.top) - height_px) / 2;
-        let _ = SetWindowPos(hwnd(raw), None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        let _ = SetWindowPos(
+            hwnd(raw),
+            None,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
     }
 }
 
@@ -622,14 +799,20 @@ fn keep_bottom() -> bool {
 /// Milliseconds since the layer was lowered by activating another app.
 pub fn ms_since_auto_lowered() -> u64 {
     let at = LOWERED_AT.load(Ordering::Relaxed);
-    if at == 0 { u64::MAX } else { unsafe { windows::Win32::System::SystemInformation::GetTickCount64() }.saturating_sub(at) }
+    if at == 0 {
+        u64::MAX
+    } else {
+        unsafe { windows::Win32::System::SystemInformation::GetTickCount64() }.saturating_sub(at)
+    }
 }
 
 /// Shows the window if hidden, puts it above other windows and activates it.
 /// Shown directly rather than waiting for eframe's command, which lands ~100 ms
 /// later for a hidden root window (winit reads visibility back from the window).
 pub fn raise(raw: isize) {
-    use windows::Win32::UI::WindowsAndMessaging::{HWND_TOP, IsWindowVisible, SW_SHOWNA, SetForegroundWindow, ShowWindow};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_TOP, IsWindowVisible, SW_SHOWNA, SetForegroundWindow, ShowWindow,
+    };
     RAISED.store(true, Ordering::Relaxed);
     let h = hwnd(raw);
     unsafe {
@@ -646,13 +829,21 @@ pub fn raise(raw: isize) {
 pub fn lower(raw: isize) {
     use windows::Win32::System::Threading::GetCurrentProcessId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GW_HWNDNEXT, GetForegroundWindow, GetTopWindow, GetWindow, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-        SetForegroundWindow,
+        GW_HWNDNEXT, GetForegroundWindow, GetTopWindow, GetWindow, GetWindowThreadProcessId,
+        IsIconic, IsWindowVisible, SetForegroundWindow,
     };
     RAISED.store(false, Ordering::Relaxed);
     let h = hwnd(raw);
     unsafe {
-        let _ = SetWindowPos(h, Some(HWND_BOTTOM), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        let _ = SetWindowPos(
+            h,
+            Some(HWND_BOTTOM),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
         let fg = GetForegroundWindow();
         let mut pid = 0;
         GetWindowThreadProcessId(fg, Some(&mut pid));
@@ -683,6 +874,8 @@ pub fn lower(raw: isize) {
 pub const LAYER: usize = 1;
 /// Keeps WS_EX_LAYERED so the whole window (backdrop included) can fade; see [`fade`].
 pub const FADE: usize = 2;
+/// A transparent card draws all of its own chrome, including resize handles.
+pub const BORDERLESS: usize = 4;
 
 /// Whole-window opacity through the layered-window alpha, which DWM applies to the
 /// composed window including its acrylic backdrop (egui can only fade its own
@@ -700,7 +893,12 @@ static FADES: std::sync::Mutex<Vec<(isize, u64)>> = std::sync::Mutex::new(Vec::n
 static FADE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn current_fade(raw: isize) -> Option<u64> {
-    FADES.lock().unwrap().iter().find(|(h, _)| *h == raw).map(|(_, g)| *g)
+    FADES
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(h, _)| *h == raw)
+        .map(|(_, g)| *g)
 }
 
 /// Stops any fade on the window and sets its alpha right away (no thread).
@@ -716,11 +914,17 @@ pub fn set_alpha_now(raw: isize, alpha: u8) {
 /// Steps use a high-resolution waitable timer, not DwmFlush: DwmFlush blocks
 /// until the next present, and running it while a window presents its first
 /// frame delayed that window's appearance by ~170 ms.
-pub fn fade(raw: isize, from: u8, to: u8, duration: std::time::Duration, done: impl FnOnce() + Send + 'static) {
+pub fn fade(
+    raw: isize,
+    from: u8,
+    to: u8,
+    duration: std::time::Duration,
+    done: impl FnOnce() + Send + 'static,
+) {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
-        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, INFINITE, SetWaitableTimer, TIMER_ALL_ACCESS,
-        WaitForSingleObject,
+        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, INFINITE, SetWaitableTimer,
+        TIMER_ALL_ACCESS, WaitForSingleObject,
     };
     let generation = FADE_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
     {
@@ -732,7 +936,12 @@ pub fn fade(raw: isize, from: u8, to: u8, duration: std::time::Duration, done: i
     std::thread::spawn(move || {
         let start = std::time::Instant::now();
         let timer = unsafe {
-            CreateWaitableTimerExW(None, PCWSTR::null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0)
+            CreateWaitableTimerExW(
+                None,
+                PCWSTR::null(),
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                TIMER_ALL_ACCESS.0,
+            )
         }
         .ok();
         let step = || match timer {
@@ -790,16 +999,31 @@ unsafe extern "system" fn subclass_proc(
 ) -> LRESULT {
     unsafe {
         match msg {
+            // egui-winit enables its undecorated drop shadow by default. winit's
+            // WM_NCCALCSIZE handler then adds a one-pixel top inset; a floating
+            // card owns all of its chrome, so let the client area fill the window.
+            WM_NCCALCSIZE if flags & BORDERLESS != 0 && wparam.0 != 0 => {
+                return LRESULT(0);
+            }
             WM_STYLECHANGING => {
                 let s = &mut *(lparam.0 as *mut STYLESTRUCT);
                 if wparam.0 as i32 == GWL_STYLE.0 {
                     s.styleNew &= !WS_SYSMENU.0;
+                    if flags & BORDERLESS != 0 {
+                        s.styleNew &= !(WS_BORDER.0 | WS_DLGFRAME.0);
+                    }
                 } else if wparam.0 as i32 == GWL_EXSTYLE.0 {
                     if flags & LAYER != 0 {
                         s.styleNew = (s.styleNew | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0;
                     }
                     if flags & FADE != 0 {
                         s.styleNew |= WS_EX_LAYERED.0;
+                    }
+                    if flags & BORDERLESS != 0 {
+                        s.styleNew &= !(WS_EX_CLIENTEDGE.0
+                            | WS_EX_DLGMODALFRAME.0
+                            | WS_EX_STATICEDGE.0
+                            | WS_EX_WINDOWEDGE.0);
                     }
                 }
             }
@@ -815,10 +1039,23 @@ unsafe extern "system" fn subclass_proc(
                 }
             }
             // Another app got activated: a summoned layer goes back under the windows.
-            WM_ACTIVATEAPP if flags & LAYER != 0 && wparam.0 == 0 && RAISED.swap(false, Ordering::Relaxed) => {
-                LOWERED_AT.store(windows::Win32::System::SystemInformation::GetTickCount64(), Ordering::Relaxed);
+            WM_ACTIVATEAPP
+                if flags & LAYER != 0 && wparam.0 == 0 && RAISED.swap(false, Ordering::Relaxed) =>
+            {
+                LOWERED_AT.store(
+                    windows::Win32::System::SystemInformation::GetTickCount64(),
+                    Ordering::Relaxed,
+                );
                 if PIN_BOTTOM.load(Ordering::Relaxed) {
-                    let _ = SetWindowPos(hwnd, Some(HWND_BOTTOM), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        Some(HWND_BOTTOM),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    );
                 }
             }
             _ => {}
@@ -828,24 +1065,67 @@ unsafe extern "system" fn subclass_proc(
 }
 
 /// Installs [`subclass_proc`] (must run on the window's thread) and re-applies the
-/// styles through it. `flags` is 0 or [`LAYER`].
+/// styles through it.
 pub fn install_window_rules(raw: isize, flags: usize) {
     let h = hwnd(raw);
     unsafe {
         let _ = SetWindowSubclass(h, Some(subclass_proc), 1, flags);
-        for index in [GWL_STYLE, GWL_EXSTYLE] {
-            SetWindowLongPtrW(h, index, GetWindowLongPtrW(h, index));
+        let style = GetWindowLongPtrW(h, GWL_STYLE);
+        let style_mask = (WS_SYSMENU.0
+            | if flags & BORDERLESS != 0 {
+                WS_BORDER.0 | WS_DLGFRAME.0
+            } else {
+                0
+            }) as isize;
+        let style_new = style & !style_mask;
+
+        let exstyle = GetWindowLongPtrW(h, GWL_EXSTYLE);
+        let mut exstyle_new = exstyle;
+        if flags & LAYER != 0 {
+            exstyle_new =
+                (exstyle_new | WS_EX_TOOLWINDOW.0 as isize) & !(WS_EX_APPWINDOW.0 as isize);
         }
-        let _ = SetWindowPos(
-            h,
-            if flags & LAYER != 0 && keep_bottom() { Some(HWND_BOTTOM) } else { None },
-            0,
-            0,
-            0,
-            0,
-            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
-                | if flags & LAYER != 0 { SET_WINDOW_POS_FLAGS(0) } else { SWP_NOZORDER },
-        );
+        if flags & FADE != 0 {
+            exstyle_new |= WS_EX_LAYERED.0 as isize;
+        }
+        if flags & BORDERLESS != 0 {
+            exstyle_new &= !(WS_EX_CLIENTEDGE.0
+                | WS_EX_DLGMODALFRAME.0
+                | WS_EX_STATICEDGE.0
+                | WS_EX_WINDOWEDGE.0) as isize;
+        }
+
+        let style_changed = style_new != style;
+        let exstyle_changed = exstyle_new != exstyle;
+        if style_changed {
+            SetWindowLongPtrW(h, GWL_STYLE, style_new);
+        }
+        if exstyle_changed {
+            SetWindowLongPtrW(h, GWL_EXSTYLE, exstyle_new);
+        }
+        if style_changed || exstyle_changed {
+            let _ = SetWindowPos(
+                h,
+                if flags & LAYER != 0 && keep_bottom() {
+                    Some(HWND_BOTTOM)
+                } else {
+                    None
+                },
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED
+                    | SWP_NOMOVE
+                    | SWP_NOSIZE
+                    | SWP_NOACTIVATE
+                    | if flags & LAYER != 0 {
+                        SET_WINDOW_POS_FLAGS(0)
+                    } else {
+                        SWP_NOZORDER
+                    },
+            );
+        }
     }
 }
 
@@ -854,7 +1134,15 @@ pub fn set_pin_bottom(raw: isize, on: bool) {
     PIN_BOTTOM.store(on, Ordering::Relaxed);
     if keep_bottom() {
         unsafe {
-            let _ = SetWindowPos(hwnd(raw), Some(HWND_BOTTOM), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            let _ = SetWindowPos(
+                hwnd(raw),
+                Some(HWND_BOTTOM),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
         }
     }
 }
@@ -872,7 +1160,16 @@ pub fn open_url(url: &str) {
         return;
     }
     let wide: Vec<u16> = url.encode_utf16().chain([0]).collect();
-    unsafe { ShellExecuteW(None, w!("open"), PCWSTR(wide.as_ptr()), None, None, SW_SHOWNORMAL) };
+    unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            PCWSTR(wide.as_ptr()),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
 }
 
 /// Maps a file read-only for the rest of the process lifetime. The pages are
@@ -883,7 +1180,9 @@ pub fn map_file_static(path: &str) -> Option<&'static [u8]> {
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, GetFileSizeEx, OPEN_EXISTING,
     };
-    use windows::Win32::System::Memory::{CreateFileMappingW, FILE_MAP_READ, MapViewOfFile, PAGE_READONLY};
+    use windows::Win32::System::Memory::{
+        CreateFileMappingW, FILE_MAP_READ, MapViewOfFile, PAGE_READONLY,
+    };
 
     let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
     unsafe {
@@ -907,7 +1206,8 @@ pub fn map_file_static(path: &str) -> Option<&'static [u8]> {
         let view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
         // The view keeps the section alive; it is never unmapped.
         let _ = CloseHandle(mapping);
-        (!view.Value.is_null()).then(|| std::slice::from_raw_parts(view.Value as *const u8, size as usize))
+        (!view.Value.is_null())
+            .then(|| std::slice::from_raw_parts(view.Value as *const u8, size as usize))
     }
 }
 
@@ -956,8 +1256,12 @@ pub fn process_start_filetime() -> Option<u64> {
 /// Own session only, so no privileges are needed.
 pub fn logon_filetime() -> Option<u64> {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows::Win32::Security::Authentication::Identity::{LsaFreeReturnBuffer, LsaGetLogonSessionData};
-    use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_STATISTICS, TokenStatistics};
+    use windows::Win32::Security::Authentication::Identity::{
+        LsaFreeReturnBuffer, LsaGetLogonSessionData,
+    };
+    use windows::Win32::Security::{
+        GetTokenInformation, TOKEN_QUERY, TOKEN_STATISTICS, TokenStatistics,
+    };
     use windows::Win32::System::Threading::OpenProcessToken;
 
     unsafe {
@@ -988,27 +1292,41 @@ pub fn logon_filetime() -> Option<u64> {
 pub fn explorer_start_filetime() -> Option<u64> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
     };
     use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
-    use windows::Win32::System::Threading::{GetCurrentProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows::Win32::System::Threading::{
+        GetCurrentProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
 
     unsafe {
         let mut my_session = 0;
         ProcessIdToSessionId(GetCurrentProcessId(), &mut my_session).ok()?;
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
-        let mut entry = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
         let mut oldest: Option<u64> = None;
         let mut more = Process32FirstW(snap, &mut entry).is_ok();
         while more {
-            let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+            let len = entry
+                .szExeFile
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(entry.szExeFile.len());
             let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
             let mut session = 0;
             if name.eq_ignore_ascii_case("explorer.exe")
                 && ProcessIdToSessionId(entry.th32ProcessID, &mut session).is_ok()
                 && session == my_session
             {
-                if let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, entry.th32ProcessID) {
+                if let Ok(h) = OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION,
+                    false,
+                    entry.th32ProcessID,
+                ) {
                     if let Some(t) = process_creation(h) {
                         oldest = Some(oldest.map_or(t, |o| o.min(t)));
                     }
@@ -1026,7 +1344,15 @@ pub fn explorer_start_filetime() -> Option<u64> {
 pub fn cpu_ms() -> f64 {
     unsafe {
         let (mut creation, mut exit, mut kernel, mut user) = Default::default();
-        if GetProcessTimes(GetCurrentProcess(), &mut creation, &mut exit, &mut kernel, &mut user).is_err() {
+        if GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+        .is_err()
+        {
             return f64::NAN;
         }
         (filetime_u64(kernel) + filetime_u64(user)) as f64 / 10_000.0
@@ -1040,11 +1366,7 @@ pub fn memory_mib() -> (f64, f64) {
             cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
             ..Default::default()
         };
-        let ok = GetProcessMemoryInfo(
-            GetCurrentProcess(),
-            &mut c as *mut _ as *mut _,
-            c.cb,
-        );
+        let ok = GetProcessMemoryInfo(GetCurrentProcess(), &mut c as *mut _ as *mut _, c.cb);
         if ok.is_err() {
             return (f64::NAN, f64::NAN);
         }

@@ -8,19 +8,21 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use egui::{
-    Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Id, Key, Layout, Modifiers, Rect, RichText, Sense,
-    Stroke, StrokeKind, Ui, UiBuilder, Vec2, ViewportCommand, ViewportId, pos2, vec2,
+    Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Id, Key, Layout, Modifiers, Rect,
+    RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2, ViewportCommand, ViewportId, pos2,
+    vec2,
 };
 
 use crate::autostart;
 use crate::bar::{age, highlighted};
 use crate::card::{Card, Kind};
-use crate::search;
-use crate::rich_text;
 use crate::resurface::{self, DAY, days_word};
+use crate::rich_text;
+use crate::search;
 use crate::sticky::ImportGroup;
 use crate::store::{
-    Hit, ImportAction, ImportItem, ImportSnapshot, ReviewAction, ReviewSnapshot, STORE_FAILED, Scope, Store, TRASH_DAYS,
+    Hit, ImportAction, ImportItem, ImportSnapshot, ReviewAction, ReviewSnapshot, STORE_FAILED,
+    Scope, Store, TRASH_DAYS,
 };
 use crate::theme;
 use crate::win::{self, Backdrop};
@@ -212,7 +214,11 @@ impl LibraryState {
     }
 
     pub fn size(&self) -> Vec2 {
-        if self.settings_only { SETTINGS_SIZE } else { SIZE }
+        if self.settings_only {
+            SETTINGS_SIZE
+        } else {
+            SIZE
+        }
     }
 
     fn switch_tab(&mut self, tab: Tab) {
@@ -254,7 +260,9 @@ fn autostart_job(state: &Arc<Mutex<AutostartUi>>, ctx: &egui::Context, change: O
             Some(false) => autostart::disable(),
             None => Ok(()),
         };
-        let result = changed.and_then(|_| autostart::status()).map_err(|e| e.message());
+        let result = changed
+            .and_then(|_| autostart::status())
+            .map_err(|e| e.message());
         *state.lock().unwrap() = AutostartUi::Known(result);
         ctx.request_repaint();
     });
@@ -265,7 +273,8 @@ pub fn ui(ui: &mut Ui, state: &Mutex<LibraryState>) {
     if !st.open {
         return;
     }
-    let (close_requested, esc) = ui.input(|i| (i.viewport().close_requested(), i.key_pressed(Key::Escape)));
+    let (close_requested, esc) =
+        ui.input(|i| (i.viewport().close_requested(), i.key_pressed(Key::Escape)));
     let next_tab = !st.settings_only && ui.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Tab));
     if next_tab {
         let next = match st.tab {
@@ -280,10 +289,14 @@ pub fn ui(ui: &mut Ui, state: &Mutex<LibraryState>) {
 
     let full = ui.max_rect();
     // Square and unstroked: DWM rounds the window and draws its border (apply_backdrop).
-    ui.painter().rect_filled(full, CornerRadius::ZERO, theme::window_fill(170));
+    ui.painter()
+        .rect_filled(full, CornerRadius::ZERO, theme::window_fill(170));
 
     let mut close = header(ui, &mut st);
-    let body = Rect::from_min_max(pos2(full.left() + 20.0, full.top() + HEADER_H + 8.0), full.max - vec2(20.0, 16.0));
+    let body = Rect::from_min_max(
+        pos2(full.left() + 20.0, full.top() + HEADER_H + 8.0),
+        full.max - vec2(20.0, 16.0),
+    );
     ui.scope_builder(UiBuilder::new().max_rect(body), |ui| match st.tab {
         Tab::Archive | Tab::Trash => list_tab(ui, &mut st),
         Tab::Review => review_tab(ui, &mut st),
@@ -317,57 +330,89 @@ fn header(ui: &mut Ui, st: &mut LibraryState) -> bool {
     }
 
     let mut close = false;
-    ui.scope_builder(UiBuilder::new().max_rect(bar.shrink2(vec2(20.0, 10.0))).layout(Layout::left_to_right(Align::Center)), |ui| {
-        let title = match (st.settings_only, st.welcome) {
-            (false, _) => "Библиотека",
-            (true, false) => "Настройки Ebb",
-            (true, true) => "Добро пожаловать в Ebb",
-        };
-        ui.label(RichText::new(title).font(theme::semibold(17.0)).color(theme::text()));
-        ui.add_space(18.0);
-        let (_, archived, trashed) = st.counts;
-        let tabs = if st.settings_only {
-            Vec::new()
-        } else {
-            let mut tabs = vec![
-                (Tab::Archive, format!("Архив {archived}")),
-                (Tab::Trash, format!("Корзина {trashed}")),
-                (Tab::Review, "Обзор".to_owned()),
-            ];
-            if st.import_left > 0 || st.tab == Tab::Import {
-                tabs.push((Tab::Import, format!("Импорт {}", st.import_left)));
-            }
-            tabs.push((Tab::Settings, "Настройки".to_owned()));
-            tabs
-        };
-        for (tab, label) in tabs {
-            let on = st.tab == tab;
-            let galley = ui.painter().layout_no_wrap(label.clone(), FontId::proportional(14.0), theme::text());
-            let (r, resp) = ui.allocate_exact_size(galley.size() + vec2(20.0, 12.0), Sense::click());
-            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, on, &label));
-            let fill = if on {
-                theme::highlight(70)
-            } else if resp.hovered() {
-                theme::wash(14)
-            } else {
-                Color32::TRANSPARENT
+    ui.scope_builder(
+        UiBuilder::new()
+            .max_rect(bar.shrink2(vec2(20.0, 10.0)))
+            .layout(Layout::left_to_right(Align::Center)),
+        |ui| {
+            let title = match (st.settings_only, st.welcome) {
+                (false, _) => "Библиотека",
+                (true, false) => "Настройки Ebb",
+                (true, true) => "Добро пожаловать в Ebb",
             };
-            ui.painter().rect_filled(r, CornerRadius::same(8), fill);
-            ui.painter().galley(r.min + vec2(10.0, 6.0), galley, if on { theme::text() } else { theme::dim() });
-            if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() && !on {
-                st.switch_tab(tab);
+            ui.label(
+                RichText::new(title)
+                    .font(theme::semibold(17.0))
+                    .color(theme::text()),
+            );
+            ui.add_space(18.0);
+            let (_, archived, trashed) = st.counts;
+            let tabs = if st.settings_only {
+                Vec::new()
+            } else {
+                let mut tabs = vec![
+                    (Tab::Archive, format!("Архив {archived}")),
+                    (Tab::Trash, format!("Корзина {trashed}")),
+                    (Tab::Review, "Обзор".to_owned()),
+                ];
+                if st.import_left > 0 || st.tab == Tab::Import {
+                    tabs.push((Tab::Import, format!("Импорт {}", st.import_left)));
+                }
+                tabs.push((Tab::Settings, "Настройки".to_owned()));
+                tabs
+            };
+            for (tab, label) in tabs {
+                let on = st.tab == tab;
+                let galley = ui.painter().layout_no_wrap(
+                    label.clone(),
+                    FontId::proportional(14.0),
+                    theme::text(),
+                );
+                let (r, resp) =
+                    ui.allocate_exact_size(galley.size() + vec2(20.0, 12.0), Sense::click());
+                resp.widget_info(|| {
+                    egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, on, &label)
+                });
+                let fill = if on {
+                    theme::highlight(70)
+                } else if resp.hovered() {
+                    theme::wash(14)
+                } else {
+                    Color32::TRANSPARENT
+                };
+                ui.painter().rect_filled(r, CornerRadius::same(8), fill);
+                ui.painter().galley(
+                    r.min + vec2(10.0, 6.0),
+                    galley,
+                    if on { theme::text() } else { theme::dim() },
+                );
+                if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() && !on {
+                    st.switch_tab(tab);
+                }
             }
-        }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let (r, resp) = ui.allocate_exact_size(vec2(32.0, 28.0), Sense::click());
-            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Закрыть"));
-            if resp.hovered() {
-                ui.painter().rect_filled(r, CornerRadius::same(6), Color32::from_rgba_unmultiplied(232, 17, 35, 160));
-            }
-            ui.painter().text(r.center(), Align2::CENTER_CENTER, "\u{E8BB}", theme::icons(11.0), theme::text());
-            close = resp.on_hover_text("Закрыть (Esc)").clicked();
-        });
-    });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let (r, resp) = ui.allocate_exact_size(vec2(32.0, 28.0), Sense::click());
+                resp.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Закрыть")
+                });
+                if resp.hovered() {
+                    ui.painter().rect_filled(
+                        r,
+                        CornerRadius::same(6),
+                        Color32::from_rgba_unmultiplied(232, 17, 35, 160),
+                    );
+                }
+                ui.painter().text(
+                    r.center(),
+                    Align2::CENTER_CENTER,
+                    "\u{E8BB}",
+                    theme::icons(11.0),
+                    theme::text(),
+                );
+                close = resp.on_hover_text("Закрыть (Esc)").clicked();
+            });
+        },
+    );
     close
 }
 
@@ -390,16 +435,29 @@ fn refresh(st: &mut LibraryState) {
         st.notice = Some((STORE_FAILED.into(), Instant::now()));
         return;
     };
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
     st.parsed = search::parse_local(&st.query, now);
-    let scope = if st.tab == Tab::Trash { Scope::Trash } else { Scope::Archive };
+    let scope = if st.tab == Tab::Trash {
+        Scope::Trash
+    } else {
+        Scope::Archive
+    };
     let selected_id = st.hits.get(st.selected).map(|h| h.id);
     st.hits = store.search(&st.parsed, scope, RESULTS).unwrap_or_default();
     st.counts = store.counts().unwrap_or_default();
     st.import_left = store.import_left().unwrap_or(0);
-    let same_view = st.searched.as_ref().is_some_and(|(t, q)| *t == key.0 && *q == key.1);
+    let same_view = st
+        .searched
+        .as_ref()
+        .is_some_and(|(t, q)| *t == key.0 && *q == key.1);
     st.selected = match (same_view, selected_id) {
-        (true, Some(id)) => st.hits.iter().position(|h| h.id == id).unwrap_or(st.selected),
+        (true, Some(id)) => st
+            .hits
+            .iter()
+            .position(|h| h.id == id)
+            .unwrap_or(st.selected),
         _ => st.selected,
     }
     .min(st.hits.len().saturating_sub(1));
@@ -417,15 +475,33 @@ fn ensure_review(st: &mut LibraryState) {
     if st.store.is_none() {
         st.store = Store::open().ok();
     }
-    let cards = st.store.as_ref().and_then(|store| store.review_queue(resurface::unix_now(), REVIEW_CARDS).ok());
-    st.review = Review { loaded: true, cards: cards.unwrap_or_default(), ..Review::default() };
+    let cards = st
+        .store
+        .as_ref()
+        .and_then(|store| store.review_queue(resurface::unix_now(), REVIEW_CARDS).ok());
+    st.review = Review {
+        loaded: true,
+        cards: cards.unwrap_or_default(),
+        ..Review::default()
+    };
 }
 
 fn review_apply(st: &mut LibraryState, action: ReviewAction) {
-    let Some(store) = st.store.as_ref() else { return };
-    let Some(id) = st.review.cards.get(st.review.history.len()).map(|card| card.id) else { return };
+    let Some(store) = st.store.as_ref() else {
+        return;
+    };
+    let Some(id) = st
+        .review
+        .cards
+        .get(st.review.history.len())
+        .map(|card| card.id)
+    else {
+        return;
+    };
     let now = resurface::unix_now();
-    let Ok(snapshot) = store.review_action(id, action, now, search::local_offset_secs()) else { return };
+    let Ok(snapshot) = store.review_action(id, action, now, search::local_offset_secs()) else {
+        return;
+    };
     let review = &mut st.review;
     if review.id.is_none() {
         review.id = store.begin_review(now).ok();
@@ -444,8 +520,12 @@ fn review_apply(st: &mut LibraryState, action: ReviewAction) {
 }
 
 fn review_undo(st: &mut LibraryState) {
-    let Some(store) = st.store.as_ref() else { return };
-    let Some((snapshot, _)) = st.review.history.pop() else { return };
+    let Some(store) = st.store.as_ref() else {
+        return;
+    };
+    let Some((snapshot, _)) = st.review.history.pop() else {
+        return;
+    };
     if store.undo_review(&snapshot).is_err() {
         return;
     }
@@ -459,7 +539,11 @@ fn review_undo(st: &mut LibraryState) {
 fn review_message(ui: &mut Ui, title: &str, text: &str) {
     ui.vertical_centered(|ui| {
         ui.add_space(90.0);
-        ui.label(RichText::new(title).font(theme::semibold(20.0)).color(theme::text()));
+        ui.label(
+            RichText::new(title)
+                .font(theme::semibold(20.0))
+                .color(theme::text()),
+        );
         ui.add_space(8.0);
         ui.label(RichText::new(text).color(theme::muted()));
     });
@@ -476,7 +560,10 @@ fn review_tab(ui: &mut Ui, st: &mut LibraryState) {
         (Key::Delete, ReviewAction::Trash),
     ];
     let (pressed, undo) = ui.input_mut(|i| {
-        let pressed = KEYS.iter().find(|(k, _)| i.consume_key(Modifiers::NONE, *k)).map(|(_, a)| *a);
+        let pressed = KEYS
+            .iter()
+            .find(|(k, _)| i.consume_key(Modifiers::NONE, *k))
+            .map(|(_, a)| *a);
         (pressed, i.consume_key(Modifiers::COMMAND, Key::Z))
     });
     if undo {
@@ -487,7 +574,11 @@ fn review_tab(ui: &mut Ui, st: &mut LibraryState) {
 
     let (done, total) = (st.review.history.len(), st.review.cards.len());
     if total == 0 {
-        review_message(ui, "Для обзора пока нет карточек", "Старые и отложенные мысли появятся здесь позже.");
+        review_message(
+            ui,
+            "Для обзора пока нет карточек",
+            "Старые и отложенные мысли появятся здесь позже.",
+        );
         return;
     }
     if done == total {
@@ -502,7 +593,11 @@ fn review_tab(ui: &mut Ui, st: &mut LibraryState) {
         review_message(ui, "Обзор завершён", &summary);
         ui.vertical_centered(|ui| {
             ui.add_space(16.0);
-            ui.label(RichText::new("Ctrl+Z — вернуть последнюю карточку").size(12.0).color(theme::dim()));
+            ui.label(
+                RichText::new("Ctrl+Z — вернуть последнюю карточку")
+                    .size(12.0)
+                    .color(theme::dim()),
+            );
         });
         return;
     }
@@ -522,10 +617,22 @@ fn review_tab(ui: &mut Ui, st: &mut LibraryState) {
         n => format!("записано {n} {} назад", days_word(n)),
     };
     ui.horizontal(|ui| {
-        ui.label(RichText::new(card.kind.label()).size(12.5).color(theme::link()));
-        ui.label(RichText::new(format!("{why} · {age}")).size(12.5).color(theme::muted()));
+        ui.label(
+            RichText::new(card.kind.label())
+                .size(12.5)
+                .color(theme::link()),
+        );
+        ui.label(
+            RichText::new(format!("{why} · {age}"))
+                .size(12.5)
+                .color(theme::muted()),
+        );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(RichText::new(format!("{} из {total}", done + 1)).size(12.5).color(theme::muted()));
+            ui.label(
+                RichText::new(format!("{} из {total}", done + 1))
+                    .size(12.5)
+                    .color(theme::muted()),
+            );
         });
     });
     ui.add_space(8.0);
@@ -542,10 +649,19 @@ fn review_tab(ui: &mut Ui, st: &mut LibraryState) {
                 .max_height((ui.available_height() - 150.0).clamp(120.0, 340.0))
                 .show(ui, |ui| {
                     if !card.title.is_empty() {
-                        ui.label(RichText::new(rich_text::strip_markup(&card.title)).font(theme::semibold(19.0)).color(theme::text()));
+                        ui.label(
+                            RichText::new(rich_text::strip_markup(&card.title))
+                                .font(theme::semibold(19.0))
+                                .color(theme::text()),
+                        );
                         ui.add_space(6.0);
                     }
-                    ui.label(RichText::new(rich_text::strip_markup(&card.body)).size(16.0).color(theme::text()).line_height(Some(24.0)));
+                    ui.label(
+                        RichText::new(rich_text::strip_markup(&card.body))
+                            .size(16.0)
+                            .color(theme::text())
+                            .line_height(Some(24.0)),
+                    );
                 });
         });
     ui.add_space(16.0);
@@ -582,7 +698,9 @@ fn ensure_import(st: &mut LibraryState) {
         return;
     };
     let started = Instant::now();
-    st.import.items = store.import_review(resurface::unix_now()).unwrap_or_default();
+    st.import.items = store
+        .import_review(resurface::unix_now())
+        .unwrap_or_default();
     crate::app::append_timing_log(&format!(
         "import review: {} cards grouped in {:.1} ms\n",
         st.import.items.len(),
@@ -595,7 +713,9 @@ fn ensure_import(st: &mut LibraryState) {
 
 /// Applies `action` to `ids` and takes them out of the review; `done` names it for the notice.
 fn import_apply(st: &mut LibraryState, ids: Vec<i64>, action: ImportAction, done: String) {
-    let Some(store) = st.store.as_ref() else { return };
+    let Some(store) = st.store.as_ref() else {
+        return;
+    };
     if ids.is_empty() {
         return;
     }
@@ -610,12 +730,14 @@ fn import_apply(st: &mut LibraryState, ids: Vec<i64>, action: ImportAction, done
             if action == ImportAction::SetKind(Kind::Private) {
                 // The text is encrypted now; wipe the copies SQLite keeps in freed
                 // pages, the log and the search index. It rewrites the file.
-                let _ = std::thread::Builder::new().name("scrub-plaintext".into()).spawn(|| {
-                    crate::import_ui::background_priority();
-                    if let Err(e) = Store::open().and_then(|store| store.scrub_plaintext()) {
-                        eprintln!("scrub after import review failed: {e}");
-                    }
-                });
+                let _ = std::thread::Builder::new()
+                    .name("scrub-plaintext".into())
+                    .spawn(|| {
+                        crate::import_ui::background_priority();
+                        if let Err(e) = Store::open().and_then(|store| store.scrub_plaintext()) {
+                            eprintln!("scrub after import review failed: {e}");
+                        }
+                    });
             }
         }
         Err(_) => st.notice = Some(("Не получилось, ничего не изменено".into(), Instant::now())),
@@ -623,8 +745,12 @@ fn import_apply(st: &mut LibraryState, ids: Vec<i64>, action: ImportAction, done
 }
 
 fn import_undo(st: &mut LibraryState) {
-    let Some(store) = st.store.as_ref() else { return };
-    let Some(snapshots) = st.import.history.pop() else { return };
+    let Some(store) = st.store.as_ref() else {
+        return;
+    };
+    let Some(snapshots) = st.import.history.pop() else {
+        return;
+    };
     let notice = match store.undo_import_review(&snapshots) {
         Ok(()) => format!("Отменено: {}", notes_word(snapshots.len())),
         Err(_) => {
@@ -655,7 +781,11 @@ fn import_tab(ui: &mut Ui, st: &mut LibraryState) {
         ensure_import(st);
     }
 
-    let notice = st.notice.as_ref().filter(|(_, t)| t.elapsed() < Duration::from_millis(4000)).map(|(s, _)| s.clone());
+    let notice = st
+        .notice
+        .as_ref()
+        .filter(|(_, t)| t.elapsed() < Duration::from_millis(4000))
+        .map(|(s, _)| s.clone());
     if notice.is_some() {
         ui.ctx().request_repaint_after(Duration::from_millis(4000));
     }
@@ -679,7 +809,11 @@ fn import_tab(ui: &mut Ui, st: &mut LibraryState) {
     });
     ensure_import(st);
     if st.import.items.is_empty() {
-        review_message(ui, "Импорт разобран", "Все заметки из Sticky Notes на своих местах. Их найдёт поиск.");
+        review_message(
+            ui,
+            "Импорт разобран",
+            "Все заметки из Sticky Notes на своих местах. Их найдёт поиск.",
+        );
         return;
     }
     ui.add_space(6.0);
@@ -773,13 +907,17 @@ fn import_tab(ui: &mut Ui, st: &mut LibraryState) {
 }
 
 fn days_ago(ts: i64) -> i64 {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
     ((now - ts).max(0)) / 86_400
 }
 
 /// Primary: back to the layer / restore. Secondary: to the trash / delete forever.
 fn act(st: &mut LibraryState, primary: bool) {
-    let Some(hit) = st.hits.get(st.selected).cloned() else { return };
+    let Some(hit) = st.hits.get(st.selected).cloned() else {
+        return;
+    };
     let Some(store) = st.store.as_ref() else {
         st.notice = Some((STORE_FAILED.into(), Instant::now()));
         return;
@@ -799,7 +937,14 @@ fn act(st: &mut LibraryState, primary: bool) {
         }
         (Tab::Trash, true) => {
             let notice = match store.restore(hit.id) {
-                Ok(()) => format!("Восстановлено {}", if hit.archived { "в архив" } else { "на слой" }),
+                Ok(()) => format!(
+                    "Восстановлено {}",
+                    if hit.archived {
+                        "в архив"
+                    } else {
+                        "на слой"
+                    }
+                ),
                 Err(_) => "Не удалось восстановить".into(),
             };
             st.outbox.push(Request::Changed);
@@ -837,38 +982,68 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
     // Query row + trash controls.
     let top = Rect::from_min_size(area.min, vec2(area.width(), 36.0));
     let mut empty_clicked = false;
-    ui.scope_builder(UiBuilder::new().max_rect(top).layout(Layout::left_to_right(Align::Center)), |ui| {
-        ui.label(RichText::new("\u{E721}").font(theme::icons(14.0)).color(theme::dim()));
-        ui.add_space(6.0);
-        let hint = if trash { "Найти в корзине" } else { "Найти в архиве: текст, #тег, «ссылки прошлого года»" };
-        let edit = ui.add(
-            egui::TextEdit::singleline(&mut st.query)
-                .hint_text(hint)
-                .font(FontId::proportional(15.0))
-                .text_color(theme::text())
-                .frame(egui::Frame::NONE)
-                .desired_width(if trash { area.width() - 230.0 } else { area.width() - 40.0 }),
-        );
-        if std::mem::take(&mut st.request_focus) {
-            edit.request_focus();
-        }
-        if edit.changed() {
-            st.selected = 0;
-            st.scroll_offset = 0.0;
-            st.confirm = None;
-        }
-        if trash {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let label = if st.confirm == Some(Confirm::EmptyTrash) { "Точно очистить? Нажми ещё раз" } else { "Очистить корзину" };
-                empty_clicked = ui.add_enabled(st.counts.2 > 0, egui::Button::new(label)).clicked();
-            });
-        }
-    });
+    ui.scope_builder(
+        UiBuilder::new()
+            .max_rect(top)
+            .layout(Layout::left_to_right(Align::Center)),
+        |ui| {
+            ui.label(
+                RichText::new("\u{E721}")
+                    .font(theme::icons(14.0))
+                    .color(theme::dim()),
+            );
+            ui.add_space(6.0);
+            let hint = if trash {
+                "Найти в корзине"
+            } else {
+                "Найти в архиве: текст, #тег, «ссылки прошлого года»"
+            };
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut st.query)
+                    .hint_text(hint)
+                    .font(FontId::proportional(15.0))
+                    .text_color(theme::text())
+                    .frame(egui::Frame::NONE)
+                    .desired_width(if trash {
+                        area.width() - 230.0
+                    } else {
+                        area.width() - 40.0
+                    }),
+            );
+            if std::mem::take(&mut st.request_focus) {
+                edit.request_focus();
+            }
+            if edit.changed() {
+                st.selected = 0;
+                st.scroll_offset = 0.0;
+                st.confirm = None;
+            }
+            if trash {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let label = if st.confirm == Some(Confirm::EmptyTrash) {
+                        "Точно очистить? Нажми ещё раз"
+                    } else {
+                        "Очистить корзину"
+                    };
+                    empty_clicked = ui
+                        .add_enabled(st.counts.2 > 0, egui::Button::new(label))
+                        .clicked();
+                });
+            }
+        },
+    );
     if empty_clicked {
         if st.confirm == Some(Confirm::EmptyTrash) {
-            let emptied = st.store.as_ref().is_some_and(|store| store.empty_trash().is_ok());
+            let emptied = st
+                .store
+                .as_ref()
+                .is_some_and(|store| store.empty_trash().is_ok());
             st.confirm = None;
-            let notice = if emptied { "Корзина очищена" } else { "Не удалось очистить корзину" };
+            let notice = if emptied {
+                "Корзина очищена"
+            } else {
+                "Не удалось очистить корзину"
+            };
             st.notice = Some((notice.into(), Instant::now()));
             st.searched = None;
         } else {
@@ -896,28 +1071,58 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
     }
 
     // Info line.
-    let info = Rect::from_min_size(pos2(area.left(), top.bottom() + 2.0), vec2(area.width(), 20.0));
-    let notice = st.notice.as_ref().filter(|(_, t)| t.elapsed() < Duration::from_millis(2000)).map(|(s, _)| s.clone());
+    let info = Rect::from_min_size(
+        pos2(area.left(), top.bottom() + 2.0),
+        vec2(area.width(), 20.0),
+    );
+    let notice = st
+        .notice
+        .as_ref()
+        .filter(|(_, t)| t.elapsed() < Duration::from_millis(2000))
+        .map(|(s, _)| s.clone());
     if notice.is_some() {
         ui.ctx().request_repaint_after(Duration::from_millis(2000));
     }
     let chips = st.parsed.chips().join(" · ");
     let total = if trash { st.counts.2 } else { st.counts.1 };
     let found = if st.query.trim().is_empty() {
-        format!("{total} {}", if trash { "в корзине" } else { "в архиве" })
+        format!(
+            "{total} {}",
+            if trash {
+                "в корзине"
+            } else {
+                "в архиве"
+            }
+        )
     } else {
-        format!("найдено {n} из {total}{}", if chips.is_empty() { String::new() } else { format!(" · {chips}") })
+        format!(
+            "найдено {n} из {total}{}",
+            if chips.is_empty() {
+                String::new()
+            } else {
+                format!(" · {chips}")
+            }
+        )
     };
     let text = match notice {
         Some(n) => n,
         None if trash => format!("{found} · удалённое хранится {TRASH_DAYS} дней"),
         None => found,
     };
-    ui.painter().text(info.left_center(), Align2::LEFT_CENTER, text, FontId::proportional(12.0), theme::muted());
+    ui.painter().text(
+        info.left_center(),
+        Align2::LEFT_CENTER,
+        text,
+        FontId::proportional(12.0),
+        theme::muted(),
+    );
 
     // Rows.
     let footer_h = 20.0;
-    let list = Rect::from_min_max(pos2(area.left(), info.bottom() + 6.0), pos2(area.right(), area.bottom() - footer_h - 4.0));
+    let list = Rect::from_min_max(
+        pos2(area.left(), info.bottom() + 6.0),
+        pos2(area.right(), area.bottom() - footer_h - 4.0),
+    );
     let visible = ((list.height() / ROW_H).floor() as usize).max(1);
     if up || down {
         let first_row = (st.scroll_offset / ROW_H).floor() as usize;
@@ -934,7 +1139,13 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
             (false, true) => "В архиве пусто. Сюда уходят карточки со слоя и импорт.",
             _ => "Ничего не нашлось",
         };
-        ui.painter().text(list.center_top() + vec2(0.0, 60.0), Align2::CENTER_TOP, msg, FontId::proportional(14.0), theme::muted());
+        ui.painter().text(
+            list.center_top() + vec2(0.0, 60.0),
+            Align2::CENTER_TOP,
+            msg,
+            FontId::proportional(14.0),
+            theme::muted(),
+        );
     }
 
     let mut action = None;
@@ -947,7 +1158,10 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
             .show_rows(ui, ROW_H - 4.0, n, |ui, rows| {
                 for idx in rows {
                     let hit = st.hits[idx].clone();
-                    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H - 4.0), Sense::click());
+                    let (r, resp) = ui.allocate_exact_size(
+                        vec2(ui.available_width(), ROW_H - 4.0),
+                        Sense::click(),
+                    );
                     if resp.clicked() {
                         st.selected = idx;
                         st.confirm = None;
@@ -957,7 +1171,16 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
                         action = Some(true);
                     }
                     let selected = idx == st.selected;
-                    if let Some(primary) = row_ui(ui, r, &hit, &st.parsed, selected, resp.hovered(), trash, st.confirm == Some(Confirm::Purge(hit.id))) {
+                    if let Some(primary) = row_ui(
+                        ui,
+                        r,
+                        &hit,
+                        &st.parsed,
+                        selected,
+                        resp.hovered(),
+                        trash,
+                        st.confirm == Some(Confirm::Purge(hit.id)),
+                    ) {
                         st.selected = idx;
                         action = Some(primary);
                     }
@@ -974,30 +1197,69 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
     } else {
         "↑↓ выбор · Enter — на слой · Delete — в корзину · Ctrl+Tab — вкладка · Esc — закрыть"
     };
-    ui.painter().text(pos2(area.left(), area.bottom() - footer_h / 2.0), Align2::LEFT_CENTER, hint, FontId::proportional(11.5), theme::muted());
+    ui.painter().text(
+        pos2(area.left(), area.bottom() - footer_h / 2.0),
+        Align2::LEFT_CENTER,
+        hint,
+        FontId::proportional(11.5),
+        theme::muted(),
+    );
 }
 
 /// One result row; returns Some(primary?) when one of its buttons was clicked.
 #[allow(clippy::too_many_arguments)]
-fn row_ui(ui: &mut Ui, r: Rect, hit: &Hit, q: &search::Query, selected: bool, hovered: bool, trash: bool, confirm: bool) -> Option<bool> {
+fn row_ui(
+    ui: &mut Ui,
+    r: Rect,
+    hit: &Hit,
+    q: &search::Query,
+    selected: bool,
+    hovered: bool,
+    trash: bool,
+    confirm: bool,
+) -> Option<bool> {
     let painter = ui.painter().clone();
     if selected || hovered {
-        painter.rect_filled(r, CornerRadius::same(8), theme::wash(if selected { 20 } else { 9 }));
+        painter.rect_filled(
+            r,
+            CornerRadius::same(8),
+            theme::wash(if selected { 20 } else { 9 }),
+        );
     }
-    painter.text(r.left_top() + vec2(14.0, 12.0), Align2::LEFT_TOP, hit.kind.icon(), theme::icons(14.0), hit.kind.accent());
+    painter.text(
+        r.left_top() + vec2(14.0, 12.0),
+        Align2::LEFT_TOP,
+        hit.kind.icon(),
+        theme::icons(14.0),
+        hit.kind.accent(),
+    );
 
     // Buttons on the selected or hovered row, age otherwise.
     let mut clicked = None;
     let mut right = r.right() - 10.0;
     if selected || hovered {
         let labels = if trash {
-            [(false, if confirm { "Точно? Ещё раз" } else { "Удалить навсегда" }), (true, "Восстановить")]
+            [
+                (
+                    false,
+                    if confirm {
+                        "Точно? Ещё раз"
+                    } else {
+                        "Удалить навсегда"
+                    },
+                ),
+                (true, "Восстановить"),
+            ]
         } else {
             [(false, "В корзину"), (true, "На слой")]
         };
         for (primary, label) in labels {
-            let galley = painter.layout_no_wrap(label.to_owned(), FontId::proportional(12.5), theme::text());
-            let b = Rect::from_min_size(pos2(right - galley.size().x - 18.0, r.center().y - 13.0), vec2(galley.size().x + 18.0, 26.0));
+            let galley =
+                painter.layout_no_wrap(label.to_owned(), FontId::proportional(12.5), theme::text());
+            let b = Rect::from_min_size(
+                pos2(right - galley.size().x - 18.0, r.center().y - 13.0),
+                vec2(galley.size().x + 18.0, 26.0),
+            );
             let resp = ui.interact(b, Id::new(("library-btn", hit.id, primary)), Sense::click());
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
             let fill = match (primary, resp.hovered()) {
@@ -1008,7 +1270,11 @@ fn row_ui(ui: &mut Ui, r: Rect, hit: &Hit, q: &search::Query, selected: bool, ho
                 (false, false) => theme::wash(14),
             };
             painter.rect_filled(b, CornerRadius::same(7), fill);
-            painter.galley(b.min + vec2(9.0, 13.0 - galley.size().y / 2.0), galley, theme::text());
+            painter.galley(
+                b.min + vec2(9.0, 13.0 - galley.size().y / 2.0),
+                galley,
+                theme::text(),
+            );
             if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                 clicked = Some(primary);
             }
@@ -1017,17 +1283,35 @@ fn row_ui(ui: &mut Ui, r: Rect, hit: &Hit, q: &search::Query, selected: bool, ho
     } else {
         let label = if trash {
             let deleted = hit.deleted_at.map_or(0, days_ago);
-            format!("удалено {} · ещё {} дн", if deleted == 0 { "сегодня".into() } else { format!("{deleted} дн назад") }, (TRASH_DAYS - deleted).max(0))
+            format!(
+                "удалено {} · ещё {} дн",
+                if deleted == 0 {
+                    "сегодня".into()
+                } else {
+                    format!("{deleted} дн назад")
+                },
+                (TRASH_DAYS - deleted).max(0)
+            )
         } else {
             age(hit.updated_at)
         };
-        let g = painter.text(pos2(right, r.top() + 12.0), Align2::RIGHT_TOP, label, FontId::proportional(11.5), theme::muted());
+        let g = painter.text(
+            pos2(right, r.top() + 12.0),
+            Align2::RIGHT_TOP,
+            label,
+            FontId::proportional(11.5),
+            theme::muted(),
+        );
         right = g.left() - 8.0;
     }
 
     let left = r.left() + 40.0;
     let width = (right - left - 8.0).max(60.0);
-    let title = if hit.title.is_empty() { String::new() } else { search::snippet(&hit.title, q, 200) };
+    let title = if hit.title.is_empty() {
+        String::new()
+    } else {
+        search::snippet(&hit.title, q, 200)
+    };
     let private = hit.kind == Kind::Private;
     let (line1, line2) = match (title.is_empty(), private) {
         (false, true) => (title, "••••••••••".to_owned()),
@@ -1035,14 +1319,26 @@ fn row_ui(ui: &mut Ui, r: Rect, hit: &Hit, q: &search::Query, selected: bool, ho
         (false, false) => (title, hit.snippet.clone()),
         (true, false) => (hit.snippet.clone(), String::new()),
     };
-    painter.galley(pos2(left, r.top() + 8.0), painter.layout_job(highlighted(&line1, 14.0, theme::text(), width)), theme::text());
+    painter.galley(
+        pos2(left, r.top() + 8.0),
+        painter.layout_job(highlighted(&line1, 14.0, theme::text(), width)),
+        theme::text(),
+    );
     let second = if line2.is_empty() && trash {
-        if hit.archived { "был в архиве".to_owned() } else { "был на слое".to_owned() }
+        if hit.archived {
+            "был в архиве".to_owned()
+        } else {
+            "был на слое".to_owned()
+        }
     } else {
         line2
     };
     if !second.is_empty() {
-        painter.galley(pos2(left, r.top() + 30.0), painter.layout_job(highlighted(&second, 12.5, theme::dim(), width)), theme::dim());
+        painter.galley(
+            pos2(left, r.top() + 30.0),
+            painter.layout_job(highlighted(&second, 12.5, theme::dim(), width)),
+            theme::dim(),
+        );
     }
     clicked
 }
@@ -1053,7 +1349,11 @@ fn row_ui(ui: &mut Ui, r: Rect, hit: &Hit, q: &search::Query, selected: bool, ho
 
 fn section(ui: &mut Ui, title: &str) {
     ui.add_space(10.0);
-    ui.label(RichText::new(title).font(theme::semibold(14.5)).color(theme::text()));
+    ui.label(
+        RichText::new(title)
+            .font(theme::semibold(14.5))
+            .color(theme::text()),
+    );
     ui.add_space(2.0);
 }
 
@@ -1066,9 +1366,19 @@ fn note(ui: &mut Ui, text: &str) {
 fn monitor_map(ui: &mut Ui, monitors: &[win::Monitor], current: Option<&str>) -> Option<String> {
     let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), 150.0), Sense::hover());
     let first = monitors.first()?;
-    let (mut l, mut t, mut r, mut b) = (first.rect.left, first.rect.top, first.rect.right, first.rect.bottom);
+    let (mut l, mut t, mut r, mut b) = (
+        first.rect.left,
+        first.rect.top,
+        first.rect.right,
+        first.rect.bottom,
+    );
     for m in monitors {
-        (l, t, r, b) = (l.min(m.rect.left), t.min(m.rect.top), r.max(m.rect.right), b.max(m.rect.bottom));
+        (l, t, r, b) = (
+            l.min(m.rect.left),
+            t.min(m.rect.top),
+            r.max(m.rect.right),
+            b.max(m.rect.bottom),
+        );
     }
     let (w, h) = ((r - l).max(1) as f32, (b - t).max(1) as f32);
     let scale = ((area.width() - 8.0) / w).min((area.height() - 8.0) / h);
@@ -1083,20 +1393,51 @@ fn monitor_map(ui: &mut Ui, monitors: &[win::Monitor], current: Option<&str>) ->
         let name = format!("Монитор {}", i + 1);
         let on = current.is_some_and(|d| m.matches_device(d));
         let resp = ui.interact(rect, Id::new(("monitor", i)), Sense::click());
-        resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, &name));
+        resp.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, &name)
+        });
         let accent = theme::highlight(255);
         let fill = match (on, resp.hovered()) {
             (true, _) => accent.gamma_multiply(0.35),
             (false, true) => theme::wash(26),
             (false, false) => theme::wash(10),
         };
-        let stroke = if on { Stroke::new(2.0, accent) } else { Stroke::new(1.0, theme::glass_stroke()) };
+        let stroke = if on {
+            Stroke::new(2.0, accent)
+        } else {
+            Stroke::new(1.0, theme::glass_stroke())
+        };
         let painter = ui.painter();
-        painter.rect(rect, CornerRadius::same(6), fill, stroke, StrokeKind::Inside);
+        painter.rect(
+            rect,
+            CornerRadius::same(6),
+            fill,
+            stroke,
+            StrokeKind::Inside,
+        );
         let color = if on { theme::text() } else { theme::dim() };
-        painter.text(rect.center() - vec2(0.0, 8.0), Align2::CENTER_CENTER, (i + 1).to_string(), theme::semibold(20.0), color);
-        let detail = format!("{pw}×{ph}{}", if m.primary { " · основной" } else { "" });
-        painter.text(rect.center() + vec2(0.0, 13.0), Align2::CENTER_CENTER, detail, FontId::proportional(11.5), theme::muted());
+        painter.text(
+            rect.center() - vec2(0.0, 8.0),
+            Align2::CENTER_CENTER,
+            (i + 1).to_string(),
+            theme::semibold(20.0),
+            color,
+        );
+        let detail = format!(
+            "{pw}×{ph}{}",
+            if m.primary {
+                " · основной"
+            } else {
+                ""
+            }
+        );
+        painter.text(
+            rect.center() + vec2(0.0, 13.0),
+            Align2::CENTER_CENTER,
+            detail,
+            FontId::proportional(11.5),
+            theme::muted(),
+        );
         if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() && !on {
             chosen = m.device_ids.first().cloned();
         }
@@ -1123,10 +1464,22 @@ fn background_picker(ui: &mut Ui, background: &mut theme::CardBackground) {
                 for paper in theme::PAPER {
                     let (rect, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
                     let on = *rgb == paper;
-                    let stroke = if on { Stroke::new(2.0, theme::highlight(255)) } else { Stroke::new(1.0, theme::glass_stroke()) };
-                    ui.painter().rect(rect.shrink(2.0), CornerRadius::same(4), Color32::from_rgb(paper[0], paper[1], paper[2]), stroke, StrokeKind::Outside);
+                    let stroke = if on {
+                        Stroke::new(2.0, theme::highlight(255))
+                    } else {
+                        Stroke::new(1.0, theme::glass_stroke())
+                    };
+                    ui.painter().rect(
+                        rect.shrink(2.0),
+                        CornerRadius::same(4),
+                        Color32::from_rgb(paper[0], paper[1], paper[2]),
+                        stroke,
+                        StrokeKind::Outside,
+                    );
                     let name = format!("#{:02X}{:02X}{:02X}", paper[0], paper[1], paper[2]);
-                    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, &name));
+                    resp.widget_info(|| {
+                        egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, &name)
+                    });
                     if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                         *rgb = paper;
                     }
@@ -1134,9 +1487,15 @@ fn background_picker(ui: &mut Ui, background: &mut theme::CardBackground) {
                 ui.add_space(6.0);
                 egui::widgets::color_picker::color_edit_button_srgb(ui, rgb);
             });
-            note(ui, "Цвет текста подбирается сам: тёмный на светлом фоне, светлый на тёмном.");
+            note(
+                ui,
+                "Цвет текста подбирается сам: тёмный на светлом фоне, светлый на тёмном.",
+            );
         }
-        B::Taskbar => note(ui, "Берётся из «Параметры → Персонализация → Цвета» и меняется вместе с Windows."),
+        B::Taskbar => note(
+            ui,
+            "Берётся из «Параметры → Персонализация → Цвета» и меняется вместе с Windows.",
+        ),
         B::Theme => {}
     }
 }
@@ -1146,14 +1505,26 @@ fn background_picker(ui: &mut Ui, background: &mut theme::CardBackground) {
 fn preset_tile(ui: &mut Ui, preset: &crate::card::Preset, on: bool) -> egui::Response {
     use crate::card::Kind;
     let (rect, resp) = ui.allocate_exact_size(vec2(172.0, 112.0), Sense::click());
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, preset.name));
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, preset.name)
+    });
     let fill = match (on, resp.hovered()) {
         (true, _) => theme::highlight(40),
         (false, true) => theme::wash(20),
         (false, false) => theme::wash(8),
     };
-    let stroke = if on { Stroke::new(1.5, theme::highlight(255)) } else { Stroke::new(1.0, theme::glass_stroke()) };
-    ui.painter().rect(rect, CornerRadius::same(8), fill, stroke, StrokeKind::Inside);
+    let stroke = if on {
+        Stroke::new(1.5, theme::highlight(255))
+    } else {
+        Stroke::new(1.0, theme::glass_stroke())
+    };
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(8),
+        fill,
+        stroke,
+        StrokeKind::Inside,
+    );
 
     // Scaled down: corners and strips at half size so the look still reads.
     let mut style = preset.style;
@@ -1165,19 +1536,46 @@ fn preset_tile(ui: &mut Ui, preset: &crate::card::Preset, on: bool) -> egui::Res
         theme::CardBackground::Taskbar => Color32::from_rgb(32, 32, 32),
         theme::CardBackground::Custom([r, g, b]) => Color32::from_rgb(r, g, b),
     };
-    let base = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), (f32::from(style.opacity) * 2.55) as u8);
-    for (i, kind) in [Kind::Idea, Kind::Link, Kind::Private].into_iter().enumerate() {
-        let card = Rect::from_min_size(rect.min + vec2(10.0 + i as f32 * 52.0, 10.0), vec2(48.0, 58.0));
+    let base = Color32::from_rgba_unmultiplied(
+        base.r(),
+        base.g(),
+        base.b(),
+        (f32::from(style.opacity) * 2.55) as u8,
+    );
+    for (i, kind) in [Kind::Idea, Kind::Link, Kind::Private]
+        .into_iter()
+        .enumerate()
+    {
+        let card = Rect::from_min_size(
+            rect.min + vec2(10.0 + i as f32 * 52.0, 10.0),
+            vec2(48.0, 58.0),
+        );
         if style.shadow > 0 {
-            let shadow = egui::epaint::Shadow { offset: [0, 2], blur: (f32::from(style.shadow) / 8.0) as u8, spread: 0, color: Color32::from_black_alpha(style.shadow) };
-            ui.painter().add(shadow.as_shape(card, CornerRadius::same(style.radius)));
+            let shadow = egui::epaint::Shadow {
+                offset: [0, 2],
+                blur: (f32::from(style.shadow) / 8.0) as u8,
+                spread: 0,
+                color: Color32::from_black_alpha(style.shadow),
+            };
+            ui.painter()
+                .add(shadow.as_shape(card, CornerRadius::same(style.radius)));
         }
-        ui.painter().rect(card, CornerRadius::same(style.radius), base, Stroke::new(1.0, theme::glass_stroke()), StrokeKind::Inside);
+        ui.painter().rect(
+            card,
+            CornerRadius::same(style.radius),
+            base,
+            Stroke::new(1.0, theme::glass_stroke()),
+            StrokeKind::Inside,
+        );
         crate::app::paint_marker(ui, card, kind.tint(), style, false);
         for line in 0..3 {
             let y = card.top() + 18.0 + line as f32 * 8.0;
             let w = [30.0, 22.0, 26.0][line];
-            ui.painter().rect_filled(Rect::from_min_size(pos2(card.left() + 6.0, y), vec2(w, 3.0)), CornerRadius::same(1), theme::wash(60));
+            ui.painter().rect_filled(
+                Rect::from_min_size(pos2(card.left() + 6.0, y), vec2(w, 3.0)),
+                CornerRadius::same(1),
+                theme::wash(60),
+            );
         }
         // The kind's mark in the meta line: a dot and a name, or the glyph.
         let at = pos2(card.left() + 6.0, card.top() + 9.0);
@@ -1185,18 +1583,42 @@ fn preset_tile(ui: &mut Ui, preset: &crate::card::Preset, on: bool) -> egui::Res
             crate::card::IconSpot::Hover => {}
             crate::card::IconSpot::BottomRight => {
                 let size = if style.bold_icon { 10.0 } else { 8.0 };
-                ui.painter().text(at, Align2::LEFT_CENTER, kind.icon(), theme::icons(size), kind.accent());
+                ui.painter().text(
+                    at,
+                    Align2::LEFT_CENTER,
+                    kind.icon(),
+                    theme::icons(size),
+                    kind.accent(),
+                );
             }
             crate::card::IconSpot::TopLeft => {
-                ui.painter().circle_filled(at + vec2(2.5, 0.0), 2.5, kind.accent());
+                ui.painter()
+                    .circle_filled(at + vec2(2.5, 0.0), 2.5, kind.accent());
                 let name = Rect::from_min_size(at + vec2(8.0, -1.5), vec2(14.0, 3.0));
-                ui.painter().rect_filled(name, CornerRadius::same(1), kind.accent().gamma_multiply(0.7));
+                ui.painter().rect_filled(
+                    name,
+                    CornerRadius::same(1),
+                    kind.accent().gamma_multiply(0.7),
+                );
             }
         }
     }
-    ui.painter().text(pos2(rect.left() + 10.0, rect.bottom() - 34.0), Align2::LEFT_TOP, preset.name, theme::semibold(13.0), theme::text());
-    ui.painter().text(pos2(rect.left() + 10.0, rect.bottom() - 17.0), Align2::LEFT_TOP, preset.hint, FontId::proportional(10.5), theme::muted());
-    resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(preset.hint)
+    ui.painter().text(
+        pos2(rect.left() + 10.0, rect.bottom() - 34.0),
+        Align2::LEFT_TOP,
+        preset.name,
+        theme::semibold(13.0),
+        theme::text(),
+    );
+    ui.painter().text(
+        pos2(rect.left() + 10.0, rect.bottom() - 17.0),
+        Align2::LEFT_TOP,
+        preset.hint,
+        FontId::proportional(10.5),
+        theme::muted(),
+    );
+    resp.on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text(preset.hint)
 }
 
 fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
@@ -1227,12 +1649,12 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
         note(ui, "Кликните по монитору — слой переедет туда сразу.");
 
         section(ui, "Слой");
-        let mut pin = st.settings.pin_bottom;
-        if ui.checkbox(&mut pin, "Держать слой под окнами").changed() {
-            st.settings.pin_bottom = pin;
-            st.outbox.push(Request::SetPinBottom(pin));
+        let mut above = !st.settings.pin_bottom;
+        if ui.checkbox(&mut above, "Показывать заметки поверх окон").changed() {
+            st.settings.pin_bottom = !above;
+            st.outbox.push(Request::SetPinBottom(!above));
         }
-        note(ui, "Клик по значку в трее поднимает слой поверх всех окон; Esc, повторный клик или переход в другое окно возвращают его.");
+        note(ui, "Когда выключено, заметки лежат под окнами как обои. Включите, чтобы работать с ними прямо на экране.");
         ui.label(RichText::new("Esc и повторный клик в трее").size(13.0).color(theme::dim()));
         let mut hides = st.settings.dismiss_hides;
         let a = ui.radio_value(&mut hides, false, "Убрать слой на фон");

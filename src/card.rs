@@ -23,6 +23,7 @@ pub enum Placement {
     Today,
     Rediscover,
     Archive,
+    Desktop,
 }
 
 impl Placement {
@@ -33,6 +34,7 @@ impl Placement {
             Self::Today => "today",
             Self::Rediscover => "rediscover",
             Self::Archive => "archive",
+            Self::Desktop => "desktop",
         }
     }
 
@@ -42,6 +44,7 @@ impl Placement {
             "today" => Self::Today,
             "rediscover" => Self::Rediscover,
             "archive" => Self::Archive,
+            "desktop" => Self::Desktop,
             _ => Self::Manual,
         }
     }
@@ -73,7 +76,10 @@ impl Kind {
     }
 
     pub fn parse(s: &str) -> Kind {
-        Kind::ALL.into_iter().find(|k| k.as_str() == s).unwrap_or(Kind::Note)
+        Kind::ALL
+            .into_iter()
+            .find(|k| k.as_str() == s)
+            .unwrap_or(Kind::Note)
     }
 
     pub fn label(self) -> &'static str {
@@ -141,7 +147,12 @@ pub enum IdeaStatus {
 }
 
 impl IdeaStatus {
-    pub const ALL: [IdeaStatus; 4] = [IdeaStatus::Potential, IdeaStatus::Maybe, IdeaStatus::Explore, IdeaStatus::Important];
+    pub const ALL: [IdeaStatus; 4] = [
+        IdeaStatus::Potential,
+        IdeaStatus::Maybe,
+        IdeaStatus::Explore,
+        IdeaStatus::Important,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -195,8 +206,16 @@ pub enum Tint {
 }
 
 impl Tint {
-    pub const ALL: [Tint; 8] =
-        [Tint::Yellow, Tint::Orange, Tint::Pink, Tint::Purple, Tint::Blue, Tint::Teal, Tint::Green, Tint::Gray];
+    pub const ALL: [Tint; 8] = [
+        Tint::Yellow,
+        Tint::Orange,
+        Tint::Pink,
+        Tint::Purple,
+        Tint::Blue,
+        Tint::Teal,
+        Tint::Green,
+        Tint::Gray,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -435,19 +454,39 @@ impl CardStyle {
         let num = |v: &str| v.parse::<u32>().ok();
         for (key, value) in s.split_whitespace().filter_map(|p| p.split_once('=')) {
             match key {
-                "marker" => style.marker = Marker::ALL.into_iter().find(|m| m.key() == value).unwrap_or(style.marker),
-                "icon" => style.icon = IconSpot::ALL.into_iter().find(|i| i.key() == value).unwrap_or(style.icon),
-                "strength" => style.strength = num(value).map_or(style.strength, |n| n.min(100) as u8),
+                "marker" => {
+                    style.marker = Marker::ALL
+                        .into_iter()
+                        .find(|m| m.key() == value)
+                        .unwrap_or(style.marker)
+                }
+                "icon" => {
+                    style.icon = IconSpot::ALL
+                        .into_iter()
+                        .find(|i| i.key() == value)
+                        .unwrap_or(style.icon)
+                }
+                "strength" => {
+                    style.strength = num(value).map_or(style.strength, |n| n.min(100) as u8)
+                }
                 "bold" => style.bold_icon = value == "1",
                 "strip" => style.strip = num(value).map_or(style.strip, |n| n.clamp(1, 12) as u8),
                 "radius" => style.radius = num(value).map_or(style.radius, |n| n.min(20) as u8),
                 "shadow" => style.shadow = num(value).map_or(style.shadow, |n| n.min(100) as u8),
-                "opacity" => style.opacity = num(value).map_or(style.opacity, |n| n.clamp(30, 100) as u8),
+                "opacity" => {
+                    style.opacity = num(value).map_or(style.opacity, |n| n.clamp(30, 100) as u8)
+                }
                 "font" => {
-                    style.font = crate::theme::CardFont::ALL.into_iter().find(|f| f.key() == value).unwrap_or(style.font)
+                    style.font = crate::theme::CardFont::ALL
+                        .into_iter()
+                        .find(|f| f.key() == value)
+                        .unwrap_or(style.font)
                 }
                 "text" => style.text = num(value).map_or(style.text, |n| n.clamp(22, 40) as u8),
-                "background" => style.background = crate::theme::CardBackground::from_key(value).unwrap_or(style.background),
+                "background" => {
+                    style.background =
+                        crate::theme::CardBackground::from_key(value).unwrap_or(style.background)
+                }
                 _ => {}
             }
         }
@@ -477,7 +516,19 @@ const fn style(
     text: u8,
     background: crate::theme::CardBackground,
 ) -> CardStyle {
-    CardStyle { marker, icon, strength, bold_icon, strip, radius, shadow, opacity, font, text, background }
+    CardStyle {
+        marker,
+        icon,
+        strength,
+        bold_icon,
+        strip,
+        radius,
+        shadow,
+        opacity,
+        font,
+        text,
+        background,
+    }
 }
 
 use crate::theme::{CardBackground as B, CardFont as F};
@@ -486,42 +537,138 @@ pub const PRESETS: [Preset; 8] = [
     Preset {
         name: "Ebb",
         hint: "Стекло и свечение цвета",
-        style: style(Marker::Glow, IconSpot::TopLeft, 50, false, 5, 12, 50, 85, F::System, 29, B::Theme),
+        style: style(
+            Marker::Glow,
+            IconSpot::TopLeft,
+            50,
+            false,
+            5,
+            12,
+            50,
+            85,
+            F::System,
+            29,
+            B::Theme,
+        ),
     },
     Preset {
         name: "Sticky Notes",
         hint: "Цветная бумага, шапка при наведении",
-        style: style(Marker::Paper, IconSpot::Hover, 50, false, 8, 8, 35, 100, F::System, 29, B::Theme),
+        style: style(
+            Marker::Paper,
+            IconSpot::Hover,
+            50,
+            false,
+            8,
+            8,
+            35,
+            100,
+            F::System,
+            29,
+            B::Theme,
+        ),
     },
     Preset {
         name: "Google Keep",
         hint: "Пастель днём, ночные тона в темноте",
-        style: style(Marker::Fill, IconSpot::Hover, 50, false, 5, 8, 0, 100, F::System, 28, B::Theme),
+        style: style(
+            Marker::Fill,
+            IconSpot::Hover,
+            50,
+            false,
+            5,
+            8,
+            0,
+            100,
+            F::System,
+            28,
+            B::Theme,
+        ),
     },
     Preset {
         name: "Obsidian Canvas",
         hint: "Рамка и лёгкий тон",
-        style: style(Marker::Outline, IconSpot::TopLeft, 60, false, 5, 8, 0, 95, F::System, 28, B::Theme),
+        style: style(
+            Marker::Outline,
+            IconSpot::TopLeft,
+            60,
+            false,
+            5,
+            8,
+            0,
+            95,
+            F::System,
+            28,
+            B::Theme,
+        ),
     },
     Preset {
         name: "Trello",
         hint: "Цветная метка слева",
-        style: style(Marker::StripLeft, IconSpot::TopLeft, 80, false, 4, 6, 20, 100, F::System, 28, B::Theme),
+        style: style(
+            Marker::StripLeft,
+            IconSpot::TopLeft,
+            80,
+            false,
+            4,
+            6,
+            20,
+            100,
+            F::System,
+            28,
+            B::Theme,
+        ),
     },
     Preset {
         name: "Бумажный стикер",
         hint: "Заливка, тень, от руки",
-        style: style(Marker::Fill, IconSpot::Hover, 60, false, 5, 2, 70, 100, F::SegoePrint, 29, B::Theme),
+        style: style(
+            Marker::Fill,
+            IconSpot::Hover,
+            60,
+            false,
+            5,
+            2,
+            70,
+            100,
+            F::SegoePrint,
+            29,
+            B::Theme,
+        ),
     },
     Preset {
         name: "Минимализм",
         hint: "Только жирная иконка",
-        style: style(Marker::None, IconSpot::BottomRight, 50, true, 5, 12, 20, 85, F::System, 29, B::Theme),
+        style: style(
+            Marker::None,
+            IconSpot::BottomRight,
+            50,
+            true,
+            5,
+            12,
+            20,
+            85,
+            F::System,
+            29,
+            B::Theme,
+        ),
     },
     Preset {
         name: "Windows",
         hint: "Фон как у панели задач",
-        style: style(Marker::None, IconSpot::TopLeft, 50, false, 5, 8, 35, 96, F::System, 28, B::Taskbar),
+        style: style(
+            Marker::None,
+            IconSpot::TopLeft,
+            50,
+            false,
+            5,
+            8,
+            35,
+            96,
+            F::System,
+            28,
+            B::Taskbar,
+        ),
     },
 ];
 
@@ -559,17 +706,34 @@ impl Card {
     /// The mark color of [`Card::hue`].
     /// The size the card takes on the layer: one line while collapsed.
     pub fn shown_size(&self) -> Vec2 {
-        if self.collapsed { vec2(self.size.x, COLLAPSED_H) } else { self.size }
+        if self.collapsed {
+            vec2(self.size.x, COLLAPSED_H)
+        } else {
+            self.size
+        }
     }
 
     /// The line a collapsed card shows: the first line of its text as it reads;
     /// for a Private card, its label (the layer never holds the value).
     pub fn collapsed_line(&self) -> String {
         if self.kind == Kind::Private {
-            return if self.title.is_empty() { PRIVATE_PLACEHOLDER.to_owned() } else { self.title.clone() };
+            return if self.title.is_empty() {
+                PRIVATE_PLACEHOLDER.to_owned()
+            } else {
+                self.title.clone()
+            };
         }
-        let text = if self.title.is_empty() { self.body.clone() } else { format!("{}\n{}", self.title, self.body) };
-        crate::rich_text::strip_markup(&text).lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().to_owned()
+        let text = if self.title.is_empty() {
+            self.body.clone()
+        } else {
+            format!("{}\n{}", self.title, self.body)
+        };
+        crate::rich_text::strip_markup(&text)
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or_default()
+            .to_owned()
     }
 
     pub fn accent(&self) -> Color32 {
@@ -580,9 +744,14 @@ impl Card {
     /// layer whose reminder has come due (the Today part of spec 01).
     pub fn resurface_reason(&self, now: i64) -> Option<String> {
         if self.placement == Placement::Rediscover {
-            return Some(crate::resurface::reason(now, self.created_at, self.review_at));
+            return Some(crate::resurface::reason(
+                now,
+                self.created_at,
+                self.review_at,
+            ));
         }
-        self.due_reminder(now).map(|at| crate::resurface::reminder_reason(now, at))
+        self.due_reminder(now)
+            .map(|at| crate::resurface::reminder_reason(now, at))
     }
 
     /// When this card's reminder came due, if it has and nobody has seen it since.
@@ -592,9 +761,41 @@ impl Card {
 }
 
 const COMMANDS: &[&str] = &[
-    "ssh", "scp", "rsync", "git", "cd", "ls", "curl", "wget", "docker", "kubectl", "helm", "npm", "pnpm", "yarn",
-    "npx", "cargo", "pip", "python", "node", "ping", "sudo", "psql", "mysql", "redis-cli", "telnet", "winget",
-    "choco", "pwsh", "powershell", "systemctl", "journalctl", "tail", "cat", "export", "set",
+    "ssh",
+    "scp",
+    "rsync",
+    "git",
+    "cd",
+    "ls",
+    "curl",
+    "wget",
+    "docker",
+    "kubectl",
+    "helm",
+    "npm",
+    "pnpm",
+    "yarn",
+    "npx",
+    "cargo",
+    "pip",
+    "python",
+    "node",
+    "ping",
+    "sudo",
+    "psql",
+    "mysql",
+    "redis-cli",
+    "telnet",
+    "winget",
+    "choco",
+    "pwsh",
+    "powershell",
+    "systemctl",
+    "journalctl",
+    "tail",
+    "cat",
+    "export",
+    "set",
 ];
 
 /// A Reference line to set in monospace: a command, or a short line with a path,
@@ -602,11 +803,15 @@ const COMMANDS: &[&str] = &[
 pub fn looks_technical(line: &str) -> bool {
     let line = line.trim();
     let words: Vec<&str> = line.split_whitespace().collect();
-    let Some(first) = words.first() else { return false };
+    let Some(first) = words.first() else {
+        return false;
+    };
     if matches!(*first, "$" | ">") {
         return true;
     }
-    let technical = words.iter().any(|w| technical_word(w.trim_end_matches([',', ';', ')'])));
+    let technical = words
+        .iter()
+        .any(|w| technical_word(w.trim_end_matches([',', ';', ')'])));
     // "git push", "kubectl get pods -n prod"; not "ping Alex about the release".
     if COMMANDS.contains(&first.to_lowercase().as_str())
         && words.len() > 1
@@ -622,11 +827,20 @@ fn technical_word(w: &str) -> bool {
         return false;
     }
     let drive = w.as_bytes()[0].is_ascii_alphabetic() && w[1..].starts_with(":\\");
-    if w.contains("://") || w.starts_with('/') || w.starts_with("~/") || w.starts_with("./") || drive || w.contains('\\') {
+    if w.contains("://")
+        || w.starts_with('/')
+        || w.starts_with("~/")
+        || w.starts_with("./")
+        || drive
+        || w.contains('\\')
+    {
         return true;
     }
     // Keys, hashes, tokens: long runs of letters mixed with digits.
-    if w.len() >= 12 && w.bytes().any(|b| b.is_ascii_digit()) && w.bytes().any(|b| b.is_ascii_alphabetic()) {
+    if w.len() >= 12
+        && w.bytes().any(|b| b.is_ascii_digit())
+        && w.bytes().any(|b| b.is_ascii_alphabetic())
+    {
         return true;
     }
     // host, host:port, user@host, 10.0.4.12
@@ -636,27 +850,45 @@ fn technical_word(w: &str) -> bool {
         _ => host,
     };
     let labels: Vec<&str> = host.split('.').collect();
-    let ip = labels.len() == 4 && labels.iter().all(|l| !l.is_empty() && l.len() <= 3 && l.bytes().all(|b| b.is_ascii_digit()));
+    let ip = labels.len() == 4
+        && labels
+            .iter()
+            .all(|l| !l.is_empty() && l.len() <= 3 && l.bytes().all(|b| b.is_ascii_digit()));
     let name = labels.len() >= 2
-        && labels.iter().all(|l| !l.is_empty() && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
-        && labels.last().is_some_and(|l| l.len() >= 2 && l.bytes().all(|b| b.is_ascii_alphabetic()))
+        && labels
+            .iter()
+            .all(|l| !l.is_empty() && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+        && labels
+            .last()
+            .is_some_and(|l| l.len() >= 2 && l.bytes().all(|b| b.is_ascii_alphabetic()))
         && (labels.len() >= 3 || w.contains(['@', ':']));
     ip || name
 }
 
 /// Host of the first http(s) URL in the text, without "www.".
 pub fn link_domain(text: &str) -> Option<&str> {
-    let at = text.find("https://").map(|i| i + 8).or_else(|| text.find("http://").map(|i| i + 7))?;
+    let at = text
+        .find("https://")
+        .map(|i| i + 8)
+        .or_else(|| text.find("http://").map(|i| i + 7))?;
     let rest = &text[at..];
-    let end = rest.find(|c: char| c.is_whitespace() || matches!(c, '/' | '?' | '#' | ')' | ',' | '"')).unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| c.is_whitespace() || matches!(c, '/' | '?' | '#' | ')' | ',' | '"'))
+        .unwrap_or(rest.len());
     let host = rest[..end].rsplit('@').next().unwrap_or("");
-    let host = host.strip_prefix("www.").unwrap_or(host).trim_end_matches(['.', ':']);
+    let host = host
+        .strip_prefix("www.")
+        .unwrap_or(host)
+        .trim_end_matches(['.', ':']);
     (!host.is_empty()).then_some(host)
 }
 
 /// The first http(s) address in the text, without the punctuation after it.
 pub fn first_url(text: &str) -> Option<&str> {
-    let at = [text.find("https://"), text.find("http://")].into_iter().flatten().min()?;
+    let at = [text.find("https://"), text.find("http://")]
+        .into_iter()
+        .flatten()
+        .min()?;
     let rest = &text[at..];
     let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
     Some(rest[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '"', '\'']))
@@ -676,10 +908,13 @@ pub(crate) fn prompt_placeholders(text: &str) -> Vec<(std::ops::Range<usize>, &s
     let mut found = Vec::new();
     let mut from = 0;
     while let Some(open) = text[from..].find("{{").map(|i| from + i) {
-        let Some(close) = text[open + 2..].find("}}").map(|i| open + 2 + i) else { break };
+        let Some(close) = text[open + 2..].find("}}").map(|i| open + 2 + i) else {
+            break;
+        };
         let inner = &text[open + 2..close];
         let name = inner.trim();
-        let valid = !name.is_empty() && name.chars().count() <= 40 && !inner.contains(['{', '}', '\n']);
+        let valid =
+            !name.is_empty() && name.chars().count() <= 40 && !inner.contains(['{', '}', '\n']);
         if valid {
             found.push((open..close + 2, name));
             from = close + 2;
@@ -731,15 +966,24 @@ pub fn tags_of(plain: &str) -> Vec<String> {
 
 /// The tag a word stands for, if it's a `#tag`.
 fn tag_word(word: &str) -> Option<String> {
-    let tag = word.strip_prefix('#')?.trim_end_matches([',', '.', ';']).to_lowercase();
+    let tag = word
+        .strip_prefix('#')?
+        .trim_end_matches([',', '.', ';'])
+        .to_lowercase();
     (!tag.is_empty()).then_some(tag)
 }
 
 /// A tag typed into the tag field: without `#`, lowercased, words joined by `-`
 /// (a tag lives in the text as one word). None when nothing usable is left.
 pub fn normalize_tag(input: &str) -> Option<String> {
-    let words: Vec<&str> = input.split(|c: char| c.is_whitespace() || c == '#').filter(|w| !w.is_empty()).collect();
-    let tag = words.join("-").trim_end_matches([',', '.', ';']).to_lowercase();
+    let words: Vec<&str> = input
+        .split(|c: char| c.is_whitespace() || c == '#')
+        .filter(|w| !w.is_empty())
+        .collect();
+    let tag = words
+        .join("-")
+        .trim_end_matches([',', '.', ';'])
+        .to_lowercase();
     (!tag.is_empty() && tag.chars().count() <= 40).then_some(tag)
 }
 
@@ -754,8 +998,16 @@ pub fn with_tag(text: &str, tag: &str) -> String {
     if trimmed.is_empty() {
         return format!("#{tag}");
     }
-    let last_line_is_tags = plain.trim_end().lines().last().is_some_and(|l| l.split_whitespace().all(|w| tag_word(w).is_some()));
-    if last_line_is_tags { format!("{trimmed} #{tag}") } else { format!("{trimmed}\n#{tag}") }
+    let last_line_is_tags = plain
+        .trim_end()
+        .lines()
+        .last()
+        .is_some_and(|l| l.split_whitespace().all(|w| tag_word(w).is_some()));
+    if last_line_is_tags {
+        format!("{trimmed} #{tag}")
+    } else {
+        format!("{trimmed}\n#{tag}")
+    }
 }
 
 /// The text without its `#tag` words (styles of the rest kept). A space goes
@@ -801,14 +1053,24 @@ pub fn without_tag(text: &str, tag: &str) -> String {
         }
         line_start = end + 1;
     }
-    let (plain, styles): (String, Vec<crate::rich_text::Style>) =
-        chars.iter().zip(styles).zip(&keep).filter(|(_, k)| **k).map(|((c, s), _)| (*c, s)).unzip();
+    let (plain, styles): (String, Vec<crate::rich_text::Style>) = chars
+        .iter()
+        .zip(styles)
+        .zip(&keep)
+        .filter(|(_, k)| **k)
+        .map(|((c, s), _)| (*c, s))
+        .unzip();
     crate::rich_text::serialize(&plain, &styles)
 }
 
 /// Tags to offer while typing `typed`: the most used first, starting with what's
 /// typed, none the card has already.
-pub fn suggest_tags(counts: &[(String, i64)], typed: &str, have: &[String], limit: usize) -> Vec<String> {
+pub fn suggest_tags(
+    counts: &[(String, i64)],
+    typed: &str,
+    have: &[String],
+    limit: usize,
+) -> Vec<String> {
     let prefix = typed.trim().trim_start_matches('#').to_lowercase();
     counts
         .iter()
@@ -820,7 +1082,11 @@ pub fn suggest_tags(counts: &[(String, i64)], typed: &str, have: &[String], limi
 
 /// What copying a Prompt takes: its text without the name line.
 pub fn prompt_text(title: &str, body: &str) -> String {
-    let full = if title.is_empty() { body.to_owned() } else { format!("{title}\n{body}") };
+    let full = if title.is_empty() {
+        body.to_owned()
+    } else {
+        format!("{title}\n{body}")
+    };
     let full = crate::rich_text::strip_markup(&full);
     match prompt_name(&full) {
         Some((_, rest)) => rest.to_owned(),
@@ -864,7 +1130,10 @@ pub fn list_mark(line: &str) -> Option<(ListMark, usize)> {
         if let Some(rest) = l.strip_prefix(marker)
             && (rest.is_empty() || rest.starts_with(' '))
         {
-            return Some((mark, pad + marker.len() + usize::from(rest.starts_with(' '))));
+            return Some((
+                mark,
+                pad + marker.len() + usize::from(rest.starts_with(' ')),
+            ));
         }
     }
     for marker in ["- ", "* ", "\u{2022} "] {
@@ -935,14 +1204,34 @@ pub fn private_parts(title: &str, body: &str) -> (String, String) {
 /// nothing like a credential — no assignments, keys, long tokens or addresses.
 /// Errs on the side of hiding; a hidden label only costs the card its name.
 pub fn fits_label(line: &str) -> bool {
-    const SECRETS: &[&str] = &["pass", "парол", "token", "токен", "secret", "секрет", "key", "ключ", "begin", "root@", "ssh-"];
+    const SECRETS: &[&str] = &[
+        "pass",
+        "парол",
+        "token",
+        "токен",
+        "secret",
+        "секрет",
+        "key",
+        "ключ",
+        "begin",
+        "root@",
+        "ssh-",
+    ];
     let lower = line.to_lowercase();
     let token_like = |w: &str| {
-        w.chars().count() >= 16 && w.chars().any(|c| c.is_ascii_digit()) && w.chars().any(char::is_alphabetic)
+        w.chars().count() >= 16
+            && w.chars().any(|c| c.is_ascii_digit())
+            && w.chars().any(char::is_alphabetic)
     };
     let ip_like = |w: &str| {
-        let parts: Vec<&str> = w.trim_matches(|c: char| !c.is_ascii_digit()).split('.').collect();
-        parts.len() == 4 && parts.iter().all(|p| !p.is_empty() && p.len() <= 3 && p.chars().all(|c| c.is_ascii_digit()))
+        let parts: Vec<&str> = w
+            .trim_matches(|c: char| !c.is_ascii_digit())
+            .split('.')
+            .collect();
+        parts.len() == 4
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.len() <= 3 && p.chars().all(|c| c.is_ascii_digit()))
     };
     !line.is_empty()
         && line.chars().count() <= 60
@@ -988,15 +1277,39 @@ const PREFIXES: &[(&str, Kind)] = &[
 ];
 
 const REFERENCE_WORDS: &[&str] = &[
-    "vpn", "ssh", "host", "server", "сервер", "endpoint", "path", "ip", "port", "порт",
+    "vpn",
+    "ssh",
+    "host",
+    "server",
+    "сервер",
+    "endpoint",
+    "path",
+    "ip",
+    "port",
+    "порт",
 ];
 
 /// Looks like a credential: passwords, tokens, keys.
 pub fn looks_secret(text: &str) -> bool {
     let lower = text.to_lowercase();
     const LABELS: &[&str] = &[
-        "пароль", "password", "passwd", "pass", "pwd", "логин", "login", "token", "токен", "api key",
-        "api_key", "apikey", "secret", "секрет", "private key", "pin", "пин",
+        "пароль",
+        "password",
+        "passwd",
+        "pass",
+        "pwd",
+        "логин",
+        "login",
+        "token",
+        "токен",
+        "api key",
+        "api_key",
+        "apikey",
+        "secret",
+        "секрет",
+        "private key",
+        "pin",
+        "пин",
     ];
     for label in LABELS {
         for (start, _) in lower.match_indices(label) {
@@ -1010,7 +1323,8 @@ pub fn looks_secret(text: &str) -> bool {
             }
 
             let suffix = &lower[end..];
-            let explicit = suffix.trim_start().starts_with(':') || suffix.trim_start().starts_with('=');
+            let explicit =
+                suffix.trim_start().starts_with(':') || suffix.trim_start().starts_with('=');
             let value = suffix
                 .trim_start_matches(|c: char| c == ':' || c == '=' || c.is_whitespace())
                 .split_whitespace()
@@ -1028,7 +1342,11 @@ pub fn looks_secret(text: &str) -> bool {
     }
     // OpenAI-style keys: sk- followed by a long run of key characters.
     lower.match_indices("sk-").any(|(i, _)| {
-        lower[i + 3..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').count() >= 20
+        lower[i + 3..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .count()
+            >= 20
     })
 }
 
@@ -1093,12 +1411,25 @@ fn is_reminder(lower: &str) -> bool {
     if lower.starts_with("напомни") || lower.starts_with("remind") {
         return true;
     }
-    const UNITS: &[&str] = &["дн", "день", "недел", "месяц", "час", "day", "week", "month"];
+    const UNITS: &[&str] = &[
+        "дн",
+        "день",
+        "недел",
+        "месяц",
+        "час",
+        "day",
+        "week",
+        "month",
+    ];
     let after = lower
         .split("через ")
         .nth(1)
         .or_else(|| lower.split("in ").nth(1));
-    after.is_some_and(|a| a.split_whitespace().take(2).any(|w| UNITS.iter().any(|u| w.starts_with(u))))
+    after.is_some_and(|a| {
+        a.split_whitespace()
+            .take(2)
+            .any(|w| UNITS.iter().any(|u| w.starts_with(u)))
+    })
 }
 
 /// Place a new card at the first free slot of a coarse grid.
@@ -1165,7 +1496,12 @@ pub const SNAP_DISTANCE: f32 = 10.0;
 /// Cards at most this far apart (across the snapping axis) align their edges.
 const ALIGN_REACH: f32 = 64.0;
 /// Margins of the layer that edges stick to (the header takes the top).
-const LAYER_MARGIN: egui::Margin = egui::Margin { left: 32, right: 32, top: 72, bottom: 32 };
+const LAYER_MARGIN: egui::Margin = egui::Margin {
+    left: 32,
+    right: 32,
+    top: 72,
+    bottom: 32,
+};
 
 /// A card rect after snapping, with a guide line per axis that stuck.
 #[derive(Clone, Debug, PartialEq)]
@@ -1193,11 +1529,35 @@ fn span(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
 
 /// Candidates for moving edges; `edges` says which of left/right (or top/bottom)
 /// are free to move. `x` picks the axis.
-fn axis(rect: egui::Rect, others: &[egui::Rect], bounds: egui::Rect, x: bool, edges: (bool, bool)) -> Candidate {
+fn axis(
+    rect: egui::Rect,
+    others: &[egui::Rect],
+    bounds: egui::Rect,
+    x: bool,
+    edges: (bool, bool),
+) -> Candidate {
     // (low edge, high edge) along the axis, and the range across it.
-    let along = |r: egui::Rect| if x { (r.left(), r.right()) } else { (r.top(), r.bottom()) };
-    let across = |r: egui::Rect| if x { (r.top(), r.bottom()) } else { (r.left(), r.right()) };
-    let line = |at: f32, (a, b): (f32, f32)| if x { [pos2(at, a), pos2(at, b)] } else { [pos2(a, at), pos2(b, at)] };
+    let along = |r: egui::Rect| {
+        if x {
+            (r.left(), r.right())
+        } else {
+            (r.top(), r.bottom())
+        }
+    };
+    let across = |r: egui::Rect| {
+        if x {
+            (r.top(), r.bottom())
+        } else {
+            (r.left(), r.right())
+        }
+    };
+    let line = |at: f32, (a, b): (f32, f32)| {
+        if x {
+            [pos2(at, a), pos2(at, b)]
+        } else {
+            [pos2(a, at), pos2(b, at)]
+        }
+    };
     let (lo, hi) = along(rect);
     let cross = across(rect);
     let mut best = None;
@@ -1226,9 +1586,15 @@ fn axis(rect: egui::Rect, others: &[egui::Rect], bounds: egui::Rect, x: bool, ed
         }
     }
     let (blo, bhi) = if x {
-        (bounds.left() + LAYER_MARGIN.left as f32, bounds.right() - LAYER_MARGIN.right as f32)
+        (
+            bounds.left() + LAYER_MARGIN.left as f32,
+            bounds.right() - LAYER_MARGIN.right as f32,
+        )
     } else {
-        (bounds.top() + LAYER_MARGIN.top as f32, bounds.bottom() - LAYER_MARGIN.bottom as f32)
+        (
+            bounds.top() + LAYER_MARGIN.top as f32,
+            bounds.bottom() - LAYER_MARGIN.bottom as f32,
+        )
     };
     let whole = across(bounds);
     if edges.0 {
@@ -1252,7 +1618,12 @@ pub fn snap_move(rect: egui::Rect, others: &[egui::Rect], bounds: egui::Rect) ->
         .into_iter()
         .chain(dy.map(|(_, g)| g.map(|p| p + vec2(shift.x, 0.0))))
         .collect();
-    Snapped { rect: rect.translate(shift), guides, x: dx.is_some(), y: dy.is_some() }
+    Snapped {
+        rect: rect.translate(shift),
+        guides,
+        x: dx.is_some(),
+        y: dy.is_some(),
+    }
 }
 
 /// Which edges of a card a resize handle moves.
@@ -1270,16 +1641,20 @@ impl Sides {
     pub fn resize(self, start: egui::Rect, delta: Vec2, bounds: egui::Rect) -> egui::Rect {
         let mut r = start;
         if self.left {
-            r.min.x = (r.min.x + delta.x).max(bounds.left()).min(r.max.x - MIN_SIZE.x);
+            r.min.x = (r.min.x + delta.x)
+                .max(bounds.left())
+                .min(r.max.x - MIN_SIZE.x);
         }
         if self.right {
-            r.max.x = (r.max.x + delta.x).max(r.min.x + MIN_SIZE.x);
+            r.max.x = (r.max.x + delta.x).clamp(r.min.x + MIN_SIZE.x, bounds.right());
         }
         if self.top {
-            r.min.y = (r.min.y + delta.y).max(bounds.top()).min(r.max.y - MIN_SIZE.y);
+            r.min.y = (r.min.y + delta.y)
+                .max(bounds.top())
+                .min(r.max.y - MIN_SIZE.y);
         }
         if self.bottom {
-            r.max.y = (r.max.y + delta.y).max(r.min.y + MIN_SIZE.y);
+            r.max.y = (r.max.y + delta.y).clamp(r.min.y + MIN_SIZE.y, bounds.bottom());
         }
         r
     }
@@ -1293,23 +1668,72 @@ impl Sides {
             _ => ResizeNeSw,
         }
     }
+
+    pub fn resize_direction(self) -> egui::ResizeDirection {
+        use egui::ResizeDirection::*;
+        match (self.left, self.right, self.top, self.bottom) {
+            (true, false, true, false) => NorthWest,
+            (false, true, true, false) => NorthEast,
+            (true, false, false, true) => SouthWest,
+            (false, true, false, true) => SouthEast,
+            (true, false, false, false) => West,
+            (false, true, false, false) => East,
+            (false, false, true, false) => North,
+            (false, false, false, true) => South,
+            _ => unreachable!("resize handle must move at least one edge"),
+        }
+    }
 }
 
 /// Sticks the edges of a card being resized that the handle moves.
-pub fn snap_resize(rect: egui::Rect, others: &[egui::Rect], bounds: egui::Rect, sides: Sides) -> Snapped {
+pub fn snap_resize(
+    rect: egui::Rect,
+    others: &[egui::Rect],
+    bounds: egui::Rect,
+    sides: Sides,
+) -> Snapped {
     // Moving the low edge by d shrinks the rect by d; the high edge grows it.
-    let fits = |c: Candidate, low: bool, len: f32, min: f32| c.filter(|(d, _)| if low { len - d } else { len + d } >= min);
-    let dx = fits(axis(rect, others, bounds, true, (sides.left, sides.right)), sides.left, rect.width(), MIN_SIZE.x);
-    let dy = fits(axis(rect, others, bounds, false, (sides.top, sides.bottom)), sides.top, rect.height(), MIN_SIZE.y);
+    let fits = |c: Candidate, low: bool, len: f32, min: f32| {
+        c.filter(|(d, _)| if low { len - d } else { len + d } >= min)
+    };
+    let dx = fits(
+        axis(rect, others, bounds, true, (sides.left, sides.right)),
+        sides.left,
+        rect.width(),
+        MIN_SIZE.x,
+    );
+    let dy = fits(
+        axis(rect, others, bounds, false, (sides.top, sides.bottom)),
+        sides.top,
+        rect.height(),
+        MIN_SIZE.y,
+    );
     let mut out = rect;
     if let Some((d, _)) = dx {
-        if sides.left { out.min.x += d } else { out.max.x += d }
+        if sides.left {
+            out.min.x += d
+        } else {
+            out.max.x += d
+        }
     }
     if let Some((d, _)) = dy {
-        if sides.top { out.min.y += d } else { out.max.y += d }
+        if sides.top {
+            out.min.y += d
+        } else {
+            out.max.y += d
+        }
     }
-    let guides = dx.map(|(_, g)| g).into_iter().chain(dy.map(|(_, g)| g)).collect();
-    Snapped { rect: out, guides, x: dx.is_some(), y: dy.is_some() }
+    let guides = dx
+        .map(|(_, g)| g)
+        .into_iter()
+        .chain(dy.map(|(_, g)| g))
+        .collect();
+    Snapped {
+        rect: out,
+        guides,
+        x: dx.is_some(),
+        y: dy.is_some(),
+    }
 }
 
 #[cfg(test)]
@@ -1320,7 +1744,10 @@ mod tests {
         egui::Rect::from_min_size(pos2(x, y), vec2(w, h))
     }
 
-    const BOUNDS: egui::Rect = egui::Rect { min: pos2(0.0, 0.0), max: pos2(2000.0, 1200.0) };
+    const BOUNDS: egui::Rect = egui::Rect {
+        min: pos2(0.0, 0.0),
+        max: pos2(2000.0, 1200.0),
+    };
 
     #[test]
     fn snaps_beside_a_card_with_a_gap() {
@@ -1358,7 +1785,11 @@ mod tests {
 
     #[test]
     fn resize_snaps_only_the_moving_edges_and_keeps_min_size() {
-        let br = Sides { right: true, bottom: true, ..Default::default() };
+        let br = Sides {
+            right: true,
+            bottom: true,
+            ..Default::default()
+        };
         let other = r(700.0, 300.0, 280.0, 150.0);
         let s = snap_resize(r(400.0, 320.0, 290.0, 120.0), &[other], BOUNDS, br);
         assert_eq!(s.rect.min, pos2(400.0, 320.0));
@@ -1367,7 +1798,17 @@ mod tests {
         assert_eq!(s.rect.bottom(), 450.0);
 
         let tiny = r(400.0, 320.0, MIN_SIZE.x + 2.0, 120.0);
-        let s = snap_resize(tiny, &[r(400.0 + MIN_SIZE.x + 2.0 + SNAP_GAP - 8.0, 300.0, 100.0, 150.0)], BOUNDS, br);
+        let s = snap_resize(
+            tiny,
+            &[r(
+                400.0 + MIN_SIZE.x + 2.0 + SNAP_GAP - 8.0,
+                300.0,
+                100.0,
+                150.0,
+            )],
+            BOUNDS,
+            br,
+        );
         assert!(s.rect.width() >= MIN_SIZE.x);
     }
 
@@ -1399,7 +1840,11 @@ mod tests {
         assert_eq!(card.collapsed_line(), "Купить молоко");
         assert_eq!(card.shown_size(), vec2(DEFAULT_SIZE.x, COLLAPSED_H));
         // The slot under a collapsed card is free past its one row.
-        let below = free_slot_for(std::slice::from_ref(&card), vec2(DEFAULT_SIZE.x, 40.0), vec2(DEFAULT_SIZE.x + 64.0, 400.0));
+        let below = free_slot_for(
+            std::slice::from_ref(&card),
+            vec2(DEFAULT_SIZE.x, 40.0),
+            vec2(DEFAULT_SIZE.x + 64.0, 400.0),
+        );
         assert!(below.y < DEFAULT_SIZE.y, "{below:?}");
         card.kind = Kind::Private;
         card.title = "Wi-Fi офис".to_owned();
@@ -1421,24 +1866,46 @@ mod tests {
         ] {
             assert!(looks_technical(line), "{line}");
         }
-        for line in ["просто мысль", "т.е. позже", "e.g. later", "ping Alex about the release", "Wi-Fi офис", ""] {
+        for line in [
+            "просто мысль",
+            "т.е. позже",
+            "e.g. later",
+            "ping Alex about the release",
+            "Wi-Fi офис",
+            "",
+        ] {
             assert!(!looks_technical(line), "{line}");
         }
     }
 
     #[test]
     fn link_domains() {
-        assert_eq!(first_url("см. (https://egui.rs/x). и всё"), Some("https://egui.rs/x"));
+        assert_eq!(
+            first_url("см. (https://egui.rs/x). и всё"),
+            Some("https://egui.rs/x")
+        );
         assert_eq!(first_url("без ссылки"), None);
-        assert_eq!(link_domain("демо https://www.egui.rs/#demo"), Some("egui.rs"));
-        assert_eq!(link_domain("(http://user@host.dev:8080/x)"), Some("host.dev:8080"));
+        assert_eq!(
+            link_domain("демо https://www.egui.rs/#demo"),
+            Some("egui.rs")
+        );
+        assert_eq!(
+            link_domain("(http://user@host.dev:8080/x)"),
+            Some("host.dev:8080")
+        );
         assert_eq!(link_domain("без ссылки"), None);
     }
 
     #[test]
     fn tags_come_from_the_text_once_each() {
-        assert_eq!(tags_of("#Идея про #pricing, и снова #идея. # и #"), ["идея", "pricing"]);
-        assert_eq!(normalize_tag("  #Новый Тег, "), Some("новый-тег".to_owned()));
+        assert_eq!(
+            tags_of("#Идея про #pricing, и снова #идея. # и #"),
+            ["идея", "pricing"]
+        );
+        assert_eq!(
+            normalize_tag("  #Новый Тег, "),
+            Some("новый-тег".to_owned())
+        );
         assert_eq!(normalize_tag(" # "), None);
     }
 
@@ -1446,19 +1913,40 @@ mod tests {
     fn adding_a_tag_writes_it_into_the_text() {
         assert_eq!(with_tag("", "дом"), "#дом");
         assert_eq!(with_tag("Купить молоко\n", "дом"), "Купить молоко\n#дом");
-        assert_eq!(with_tag("Купить молоко\n#еда", "дом"), "Купить молоко\n#еда #дом");
+        assert_eq!(
+            with_tag("Купить молоко\n#еда", "дом"),
+            "Купить молоко\n#еда #дом"
+        );
         assert_eq!(with_tag("Купить #Дом молоко", "дом"), "Купить #Дом молоко");
         // After a styled end the tag is plain text.
-        assert_eq!(crate::rich_text::strip_markup(&with_tag("**важно**", "дом")), "важно\n#дом");
+        assert_eq!(
+            crate::rich_text::strip_markup(&with_tag("**важно**", "дом")),
+            "важно\n#дом"
+        );
     }
 
     #[test]
     fn removing_a_tag_takes_its_words_out_and_keeps_styles() {
-        assert_eq!(without_tag("Купить #дом молоко #Дом,", "дом"), "Купить молоко");
-        assert_eq!(without_tag("Купить молоко\n#дом\nпотом", "дом"), "Купить молоко\nпотом");
-        assert_eq!(without_tag("Купить молоко\n#еда #дом", "дом"), "Купить молоко\n#еда");
+        assert_eq!(
+            without_tag("Купить #дом молоко #Дом,", "дом"),
+            "Купить молоко"
+        );
+        assert_eq!(
+            without_tag("Купить молоко\n#дом\nпотом", "дом"),
+            "Купить молоко\nпотом"
+        );
+        assert_eq!(
+            without_tag("Купить молоко\n#еда #дом", "дом"),
+            "Купить молоко\n#еда"
+        );
         assert_eq!(without_tag("#дом", "дом"), "");
-        let styled = crate::rich_text::serialize("жирный #дом текст", &[crate::rich_text::Style { bold: true, ..Default::default() }; 17]);
+        let styled = crate::rich_text::serialize(
+            "жирный #дом текст",
+            &[crate::rich_text::Style {
+                bold: true,
+                ..Default::default()
+            }; 17],
+        );
         let out = without_tag(&styled, "дом");
         let (plain, styles) = crate::rich_text::parse(&out);
         assert_eq!(plain, "жирный текст");
@@ -1469,15 +1957,28 @@ mod tests {
 
     #[test]
     fn suggestions_follow_what_is_typed_by_use() {
-        let counts = [("работа".to_owned(), 9), ("рецепт".to_owned(), 4), ("дом".to_owned(), 7)];
-        assert_eq!(suggest_tags(&counts, "", &[], 5), ["работа", "рецепт", "дом"]);
+        let counts = [
+            ("работа".to_owned(), 9),
+            ("рецепт".to_owned(), 4),
+            ("дом".to_owned(), 7),
+        ];
+        assert_eq!(
+            suggest_tags(&counts, "", &[], 5),
+            ["работа", "рецепт", "дом"]
+        );
         assert_eq!(suggest_tags(&counts, "#Ре", &[], 5), ["рецепт"]);
-        assert_eq!(suggest_tags(&counts, "р", &["работа".to_owned()], 5), ["рецепт"]);
+        assert_eq!(
+            suggest_tags(&counts, "р", &["работа".to_owned()], 5),
+            ["рецепт"]
+        );
     }
 
     #[test]
     fn prompt_names() {
-        assert_eq!(prompt_name("Ревью кода\nПосмотри на {{diff}}"), Some(("Ревью кода", "Посмотри на {{diff}}")));
+        assert_eq!(
+            prompt_name("Ревью кода\nПосмотри на {{diff}}"),
+            Some(("Ревью кода", "Посмотри на {{diff}}"))
+        );
         assert_eq!(prompt_name("одна строка"), None);
     }
 
@@ -1485,12 +1986,21 @@ mod tests {
     fn prompt_variables_are_found_once_and_filled() {
         let text = "Напиши о {{topic}} в тоне {{ tone }}. Ещё раз: {{topic}}. {{}} и {{\nнет}} — не переменные.";
         assert_eq!(prompt_variables(text), ["topic", "tone"]);
-        let values = [("topic".to_owned(), "SQLite".to_owned()), ("tone".to_owned(), "сухом".to_owned())];
-        assert_eq!(fill_prompt(text, &values), "Напиши о SQLite в тоне сухом. Ещё раз: SQLite. {{}} и {{\nнет}} — не переменные.");
+        let values = [
+            ("topic".to_owned(), "SQLite".to_owned()),
+            ("tone".to_owned(), "сухом".to_owned()),
+        ];
+        assert_eq!(
+            fill_prompt(text, &values),
+            "Напиши о SQLite в тоне сухом. Ещё раз: SQLite. {{}} и {{\nнет}} — не переменные."
+        );
         // A variable without a value stays as written; extra braces around one are kept.
         assert_eq!(fill_prompt("{{a}} {{b}}", &values[..0]), "{{a}} {{b}}");
         assert_eq!(prompt_variables("{{{x}}}"), ["x"]);
-        assert_eq!(fill_prompt("{{{x}}}", &[("x".to_owned(), "1".to_owned())]), "{1}");
+        assert_eq!(
+            fill_prompt("{{{x}}}", &[("x".to_owned(), "1".to_owned())]),
+            "{1}"
+        );
         assert!(prompt_variables("{{ не закрыта").is_empty());
     }
 
@@ -1512,20 +2022,38 @@ mod tests {
 
     #[test]
     fn copying_a_prompt_leaves_out_its_name() {
-        assert_eq!(prompt_text("", "Ревью кода\nПосмотри на **{{diff}}**"), "Посмотри на {{diff}}");
+        assert_eq!(
+            prompt_text("", "Ревью кода\nПосмотри на **{{diff}}**"),
+            "Посмотри на {{diff}}"
+        );
         assert_eq!(prompt_text("", "Переведи {{text}}"), "Переведи {{text}}");
     }
 
     #[test]
     fn card_style_round_trips_and_survives_junk() {
-        let s = CardStyle { radius: 4, shadow: 10, opacity: 60, font: crate::theme::CardFont::Georgia, text: 32, background: crate::theme::CardBackground::Custom([255, 242, 171]), ..PRESETS[3].style };
+        let s = CardStyle {
+            radius: 4,
+            shadow: 10,
+            opacity: 60,
+            font: crate::theme::CardFont::Georgia,
+            text: 32,
+            background: crate::theme::CardBackground::Custom([255, 242, 171]),
+            ..PRESETS[3].style
+        };
         assert_eq!(CardStyle::from_setting(&s.to_setting()), s);
         let junk = CardStyle::from_setting("marker=what strength=999 color=red radius");
-        assert_eq!(junk, CardStyle { strength: 100, ..CardStyle::default() });
+        assert_eq!(
+            junk,
+            CardStyle {
+                strength: 100,
+                ..CardStyle::default()
+            }
+        );
     }
 
     #[test]
     fn kind_keys_and_tints_round_trip() {
+        assert_eq!(Placement::parse("desktop"), Placement::Desktop);
         assert_eq!(Kind::Note.key(), '1');
         assert_eq!(Kind::Private.key(), '8');
         for t in Tint::ALL {
@@ -1545,18 +2073,32 @@ mod tests {
     fn duplicate_goes_right_against_the_original_or_below() {
         let area = vec2(1920.0, 1080.0);
         let a = card_at(1, 400.0, 300.0);
-        assert_eq!(beside(&[a.clone()], &a, area), pos2(400.0 + DEFAULT_SIZE.x, 300.0));
+        assert_eq!(
+            beside(&[a.clone()], &a, area),
+            pos2(400.0 + DEFAULT_SIZE.x, 300.0)
+        );
         // Right is taken: below.
         let b = card_at(2, 400.0 + DEFAULT_SIZE.x, 300.0);
-        assert_eq!(beside(&[a.clone(), b], &a, area), pos2(400.0, 300.0 + DEFAULT_SIZE.y));
+        assert_eq!(
+            beside(&[a.clone(), b], &a, area),
+            pos2(400.0, 300.0 + DEFAULT_SIZE.y)
+        );
         // At the right edge of the layer: not off-screen.
         let edge = card_at(3, area.x - DEFAULT_SIZE.x, 300.0);
-        assert_eq!(beside(&[edge.clone()], &edge, area), pos2(edge.pos.x, 300.0 + DEFAULT_SIZE.y));
+        assert_eq!(
+            beside(&[edge.clone()], &edge, area),
+            pos2(edge.pos.x, 300.0 + DEFAULT_SIZE.y)
+        );
     }
 
     #[test]
     fn resize_from_the_left_and_top_moves_those_edges() {
-        let tl = Sides { left: true, top: true, ..Default::default() };
+        let tl = Sides {
+            left: true,
+            top: true,
+            ..Default::default()
+        };
+        assert_eq!(tl.resize_direction(), egui::ResizeDirection::NorthWest);
         let start = r(400.0, 400.0, 280.0, 150.0);
         let grown = tl.resize(start, vec2(-50.0, -30.0), BOUNDS);
         assert_eq!((grown.min, grown.max), (pos2(350.0, 370.0), start.max));
@@ -1566,17 +2108,48 @@ mod tests {
         assert_eq!(shrunk.max, start.max);
 
         // Left edge 6 pt from a neighbour's right edge sticks to it.
-        let left = Sides { left: true, ..Default::default() };
-        let s = snap_resize(r(286.0, 400.0, 300.0, 150.0), &[r(0.0, 380.0, 280.0, 150.0)], BOUNDS, left);
+        let left = Sides {
+            left: true,
+            ..Default::default()
+        };
+        assert_eq!(left.resize_direction(), egui::ResizeDirection::West);
+        let s = snap_resize(
+            r(286.0, 400.0, 300.0, 150.0),
+            &[r(0.0, 380.0, 280.0, 150.0)],
+            BOUNDS,
+            left,
+        );
         assert_eq!(s.rect.left(), 280.0);
         assert_eq!(s.rect.right(), 586.0);
     }
 
     #[test]
+    fn resize_does_not_pass_the_layer_edge() {
+        let bottom_right = Sides {
+            right: true,
+            bottom: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            bottom_right.resize(r(1700.0, 1000.0, 200.0, 100.0), vec2(500.0, 500.0), BOUNDS),
+            r(1700.0, 1000.0, 300.0, 200.0)
+        );
+    }
+
+    #[test]
     fn detects_kinds() {
-        assert_eq!(parse_capture("идея: добавить weekly recap").kind, Kind::Idea);
-        assert_eq!(parse_capture("идея: добавить weekly recap").body, "добавить weekly recap");
-        assert_eq!(parse_capture("vpn staging vpn.staging.internal").kind, Kind::Reference);
+        assert_eq!(
+            parse_capture("идея: добавить weekly recap").kind,
+            Kind::Idea
+        );
+        assert_eq!(
+            parse_capture("идея: добавить weekly recap").body,
+            "добавить weekly recap"
+        );
+        assert_eq!(
+            parse_capture("vpn staging vpn.staging.internal").kind,
+            Kind::Reference
+        );
         assert_eq!(
             parse_capture("через две недели проверить новую pricing модель").kind,
             Kind::Reminder
@@ -1585,16 +2158,28 @@ mod tests {
         assert_eq!(parse_capture("просто мысль").kind, Kind::Note);
         // A credential without a prefix is Private unless the user took the chip off.
         assert_eq!(parse_capture("wifi пароль qwerty123").kind, Kind::Private);
-        assert_eq!(parse_capture_with("wifi пароль qwerty123", false).kind, Kind::Note);
-        assert_eq!(parse_capture_with("секрет: qwerty123", false).kind, Kind::Private);
-        assert_eq!(parse_capture("идея: сменить пароль на роутере").kind, Kind::Idea);
+        assert_eq!(
+            parse_capture_with("wifi пароль qwerty123", false).kind,
+            Kind::Note
+        );
+        assert_eq!(
+            parse_capture_with("секрет: qwerty123", false).kind,
+            Kind::Private
+        );
+        assert_eq!(
+            parse_capture("идея: сменить пароль на роутере").kind,
+            Kind::Idea
+        );
         assert!(!looks_secret("идея: сменить пароль на роутере"));
         assert!(looks_secret("password: hunter2"));
     }
 
     #[test]
     fn private_label_never_shows_a_lone_line() {
-        assert_eq!(private_label("", "Wi-Fi офис\nguest / pass").as_deref(), Some("Wi-Fi офис"));
+        assert_eq!(
+            private_label("", "Wi-Fi офис\nguest / pass").as_deref(),
+            Some("Wi-Fi офис")
+        );
         assert_eq!(private_label("", "hunter2"), None);
         assert_eq!(private_label("Title", "x").as_deref(), Some("Title"));
     }
@@ -1625,7 +2210,12 @@ mod tests {
 
     #[test]
     fn labels_that_look_like_credentials_stay_hidden() {
-        for ok in ["Wi-Fi офис", "ALL MY SSH", "host: nl-home", "Домашнее задание на 3 декабря:"] {
+        for ok in [
+            "Wi-Fi офис",
+            "ALL MY SSH",
+            "host: nl-home",
+            "Домашнее задание на 3 декабря:",
+        ] {
             assert!(fits_label(ok), "{ok}");
         }
         for secret in [
@@ -1639,17 +2229,31 @@ mod tests {
         ] {
             assert!(!fits_label(secret), "{secret}");
         }
-        assert_eq!(private_parts("", "ssh root@10.0.0.1\npass").0, PRIVATE_PLACEHOLDER);
+        assert_eq!(
+            private_parts("", "ssh root@10.0.0.1\npass").0,
+            PRIVATE_PLACEHOLDER
+        );
         assert_eq!(private_label("", "token=abc\nmore"), None);
     }
 
     #[test]
     fn private_parts_round_trip_through_the_editor() {
-        for text in ["Wi-Fi офис\nguest / pass", "hunter2", "Private\nline one\nline two"] {
+        for text in [
+            "Wi-Fi офис\nguest / pass",
+            "hunter2",
+            "Private\nline one\nline two",
+        ] {
             let (label, secret) = private_parts("", text);
-            assert_eq!(private_parts("", &private_text(&label, &secret)), (label, secret), "{text}");
+            assert_eq!(
+                private_parts("", &private_text(&label, &secret)),
+                (label, secret),
+                "{text}"
+            );
         }
-        assert_eq!(private_parts("", "hunter2"), (PRIVATE_PLACEHOLDER.to_owned(), "hunter2".to_owned()));
+        assert_eq!(
+            private_parts("", "hunter2"),
+            (PRIVATE_PLACEHOLDER.to_owned(), "hunter2".to_owned())
+        );
         assert_eq!(private_text("Wi-Fi", "pass"), "Wi-Fi\npass");
     }
 
@@ -1657,7 +2261,10 @@ mod tests {
     fn extracts_tags_and_keeps_text_as_written() {
         let p = parse_capture("Pricing\nпопробовать annual plan #product #pricing.");
         assert_eq!(p.title, "");
-        assert_eq!(p.body, "Pricing\nпопробовать annual plan #product #pricing.");
+        assert_eq!(
+            p.body,
+            "Pricing\nпопробовать annual plan #product #pricing."
+        );
         assert_eq!(p.tags, vec!["product", "pricing"]);
     }
 }
