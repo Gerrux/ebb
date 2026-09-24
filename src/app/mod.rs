@@ -1293,7 +1293,14 @@ impl eframe::App for EbbApp {
             // max_rect, and the panels below place themselves by the window's edges.
             ui.scope_builder(UiBuilder::new().max_rect(moved), |ui| {
                 self.header(ui);
+                // Before the cards: widgets added later are on top, so a card
+                // under the pointer gets its own double-click.
+                let new_note_at = self.background_ui(ui);
                 self.cards_ui(ui);
+                // After them: a click on empty space has closed the editor by now.
+                if let Some(at) = new_note_at {
+                    self.new_note(at);
+                }
             });
             ui.scope_builder(UiBuilder::new().max_rect(moved), |ui| {
                 if self

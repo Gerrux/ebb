@@ -140,8 +140,16 @@ fn primary_action(card: &Card) -> Option<(&'static str, &'static str, Action)> {
     }
 }
 
-/// The rest of the actions: a copy of the card, and what takes it off the layer.
-fn more_menu(anchor: &egui::Response, popup: Id, locked: bool, out: &mut Vec<Action>) {
+/// The rest of the actions: pin, copy (when the kind's own action isn't copy),
+/// fold, a copy of the card, and delete. A pinned (`locked`) card can't be
+/// deleted from here, only unpinned.
+fn more_menu(
+    anchor: &egui::Response,
+    popup: Id,
+    locked: bool,
+    with_copy: bool,
+    out: &mut Vec<Action>,
+) {
     egui::Popup::menu(anchor)
         .id(popup)
         .align(egui::RectAlign::BOTTOM_END)
@@ -166,6 +174,18 @@ fn more_menu(anchor: &egui::Response, popup: Id, locked: bool, out: &mut Vec<Act
                 ui.add(egui::Button::new(job).min_size(vec2(ui.available_width(), 0.0)))
                     .clicked()
             };
+            let (glyph, label) = if locked {
+                ("\u{E77A}", "Открепить")
+            } else {
+                ("\u{E718}", "Закрепить на месте")
+            };
+            if item(ui, glyph, label, theme::dim()) {
+                out.push(Action::TogglePin);
+            }
+            if with_copy && item(ui, "\u{E77F}", "Копировать текст", theme::dim()) {
+                out.push(Action::Copy);
+            }
+            ui.separator();
             if item(ui, "\u{E70E}", "Свернуть в строку", theme::dim()) {
                 out.push(Action::ToggleCollapse);
             }
@@ -175,9 +195,7 @@ fn more_menu(anchor: &egui::Response, popup: Id, locked: bool, out: &mut Vec<Act
             if locked {
                 return;
             }
-            if item(ui, "\u{E7B8}", "В архив", theme::dim()) {
-                out.push(Action::Archive);
-            }
+            ui.separator();
             if item(ui, "\u{E74D}", "Удалить", theme::muted()) {
                 out.push(Action::Delete);
             }
@@ -694,22 +712,25 @@ pub(super) fn card_ui(
         || egui::Popup::is_id_open(ui.ctx(), snooze_popup)
         || egui::Popup::is_id_open(ui.ctx(), more_popup);
 
-    // Meta line, right: while hovered, a pill of actions, the kind's own first and
-    // in its color; what takes the card off the layer sits under "Ещё". At rest,
-    // the pin of a pinned card.
+    // Meta line, right: while hovered, a pill of actions: the kind's own first and
+    // in its color, then "Позже" and "В архив" (off the layer, back later), and
+    // the rest (pin, copy, fold, delete) under "Ещё". At rest, the pin of a
+    // pinned card.
     let mut pill_left = meta.right();
     if hovered {
         let primary = primary_action(card);
         let primary_is_copy = matches!(primary, Some((_, _, Action::Copy)));
+        // "Сделано" already archives a goal or reminder: no second archive button.
+        let primary_is_done = matches!(primary, Some((_, _, Action::Done)));
         // A collapsed card has one action: open.
         let n = if card.collapsed {
             1
         } else {
-            2 // pin, more
+            1 // more
                 + usize::from(primary.is_some())
-                + usize::from(!primary_is_copy)
                 + usize::from(card.kind == Kind::Private)
-                + usize::from(!locked)
+                + usize::from(!locked) // later
+                + usize::from(!locked && !primary_is_done) // archive
         };
         let width = n as f32 * 24.0 + (n as f32 - 1.0) * 2.0 + 8.0;
         let pill = Rect::from_min_max(
@@ -751,8 +772,13 @@ pub(super) fn card_ui(
                     return;
                 }
                 let more = icon_button(ui, "\u{E712}", "Ещё", theme::dim());
-                more_menu(&more, more_popup, locked, &mut out);
+                more_menu(&more, more_popup, locked, !primary_is_copy, &mut out);
                 if !locked {
+                    if !primary_is_done
+                        && icon_button(ui, "\u{E7B8}", "В архив", theme::dim()).clicked()
+                    {
+                        out.push(Action::Archive);
+                    }
                     let later = icon_button(ui, "\u{E708}", "Позже", theme::dim());
                     snooze_menu(&later, snooze_popup, &mut out);
                 }
@@ -761,50 +787,20 @@ pub(super) fn card_ui(
                 {
                     out.push(Action::Reveal);
                 }
-                // The check mark says the text is on the clipboard.
+                // The check mark on the kind's copy button says the text is on the
+                // clipboard (copy from "Ещё" has only the toast).
                 let copied_id = id.with("copied");
                 let copied = ui
                     .data(|d| d.get_temp::<Instant>(copied_id))
-                    .filter(|t| t.elapsed() < COPIED_FOR);
+                    .filter(|t| primary_is_copy && t.elapsed() < COPIED_FOR);
                 if let Some(t) = copied {
                     ui.ctx()
                         .request_repaint_after(COPIED_FOR.saturating_sub(t.elapsed()));
                 }
-                let copy_face =
-                    |glyph: &'static str, tip: &'static str, color: Color32| match copied {
-                        Some(_) => ("\u{E73E}", "Текст скопирован", theme::SUCCESS),
-                        None => (glyph, tip, color),
-                    };
-                if !primary_is_copy {
-                    let (glyph, tip, color) =
-                        copy_face("\u{E77F}", "Копировать текст", theme::dim());
-                    if icon_button(ui, glyph, tip, color).clicked() {
-                        out.push(Action::Copy);
-                    }
-                }
-                let (glyph, tip) = if card.pinned {
-                    ("\u{E77A}", "Открепить")
-                } else {
-                    ("\u{E718}", "Закрепить на месте")
-                };
-                if icon_button(
-                    ui,
-                    glyph,
-                    tip,
-                    if card.pinned {
-                        pill_accent
-                    } else {
-                        theme::dim()
-                    },
-                )
-                .clicked()
-                {
-                    out.push(Action::TogglePin);
-                }
                 if let Some((glyph, tip, action)) = primary {
                     let is_copy = matches!(action, Action::Copy);
-                    let (glyph, tip, color) = if is_copy {
-                        copy_face(glyph, tip, pill_accent)
+                    let (glyph, tip, color) = if is_copy && copied.is_some() {
+                        ("\u{E73E}", "Текст скопирован", theme::SUCCESS)
                     } else {
                         (glyph, tip, pill_accent)
                     };
@@ -911,8 +907,9 @@ pub(super) fn card_ui(
 
     // Footer while editing: the formatting toolbar in place of tags and age. Drawn
     // before the body, so a click applies in the same frame the editor reads it.
-    let toolbar_shown = editing.is_some();
-    if let Some(buf) = editing.as_deref_mut() {
+    // A Private card's editor is plain text (the secret is stored verbatim): no toolbar.
+    let toolbar_shown = editing.is_some() && card.kind != Kind::Private;
+    if let Some(buf) = editing.as_deref_mut().filter(|_| toolbar_shown) {
         let bar = footer;
         ui.scope_builder(
             UiBuilder::new()

@@ -1,5 +1,6 @@
 //! A card's text as shown (links, lists, a Reference's copy buttons, a
-//! Private card's bars) and its editor with the formatting toolbar.
+//! Private card's bars) and its editor with the formatting toolbar; a Private
+//! card is edited in two plain fields instead, its label and its secret.
 
 use std::time::Instant;
 
@@ -66,6 +67,10 @@ pub(super) fn card_body(
     // Where the last click in the text landed, in chars of the editor's text.
     let click_id = editor_id.with("click");
     if let Some(buf) = editing {
+        if card.kind == Kind::Private {
+            private_editor(ui, editor_id, click_id, buf, base);
+            return None;
+        }
         // The editor shows the text as it looks, no markup (like Sticky Notes):
         // plain text with a style per char, written back as markup each frame.
         let (mut plain, mut styles) = rich_text::parse(buf);
@@ -168,23 +173,37 @@ pub(super) fn card_body(
         ui.label(RichText::new(reason).size(11.5).color(theme::card_dim()));
         ui.add_space(3.0);
     }
-    let body = without_tags(if card.kind == Kind::Private && revealed { revealed_text.unwrap_or("") } else { &card.body });
-    if card.kind == Kind::Private && !revealed {
-        // The heading stays readable (see card::private_label); only the rest is barred.
-        let label = (!card.title.is_empty()).then(|| card.title.clone());
-        let rest = "••••••••••".to_owned();
-        let heading_at = label.as_ref().and_then(|label| {
-            let job = egui::text::LayoutJob::simple(label.clone(), theme::card_bold(base + 0.5), theme::card_text(), ui.available_width());
+    if card.kind == Kind::Private {
+        // The label stays readable; the placeholder isn't shown, the kind mark
+        // above already says "Private".
+        let label = (!card.title.is_empty() && card.title != card::PRIVATE_PLACEHOLDER).then_some(card.title.as_str());
+        let heading_at = label.and_then(|label| {
+            let job = egui::text::LayoutJob::simple(label.to_owned(), theme::card_bold(base + 0.5), theme::card_text(), ui.available_width());
             let (pos, galley, resp) = egui::Label::new(job).wrap().selectable(false).layout_in_ui(ui);
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, galley.text()));
             let at = char_at(ui, &galley, pos, resp.rect);
             ui.painter().galley(pos, galley, theme::card_text());
             at
         });
         let size = if label.is_none() { base } else { base - 1.0 };
-        let rest_at = redacted(ui, &rest, theme::card_font(size), theme::card_dim().gamma_multiply(0.45));
-        remember_click(ui, click_id, card, label.as_deref(), heading_at, &rest, rest_at);
+        let text_at = if revealed {
+            // The secret as stored: no markup, tags or links read into it.
+            let secret = revealed_text.unwrap_or("");
+            let color = if label.is_none() { theme::card_text() } else { theme::card_dim() };
+            let job = egui::text::LayoutJob::simple(secret.to_owned(), theme::card_font(size), color, ui.available_width());
+            let (pos, galley, resp) = egui::Label::new(job).wrap().selectable(false).layout_in_ui(ui);
+            let at = char_at(ui, &galley, pos, resp.rect);
+            galley_fading(ui, pos, galley, color);
+            at
+        } else {
+            // Only bars; a click on them puts the cursor at the secret's end.
+            redacted(ui, "••••••••••", theme::card_font(size), theme::card_dim().gamma_multiply(0.45));
+            None
+        };
+        remember_private_click(ui, click_id, label, heading_at, text_at);
         return None;
     }
+    let body = without_tags(&card.body);
     // A Prompt's first line is its name.
     let (heading, text) = match card.kind {
         Kind::Prompt if card.title.is_empty() => match card::prompt_name(&body) {
@@ -590,6 +609,103 @@ fn remember_click(
     // The editor shows the text without markup.
     let at = shown_to_source(&shown, at, &rich_text::strip_markup(&edit_text(card)));
     ui.data_mut(|d| d.insert_temp(click_id, at));
+}
+
+/// On a click in a Private card, keeps where it landed for the cursor of its
+/// editor, in chars of the editor's "label\nsecret" buffer (see
+/// [`card::private_edit_text`]). `label`: the heading shown, none for the
+/// placeholder (the label field opens empty then); `text_at`: a char in the
+/// revealed secret, shown as stored.
+fn remember_private_click(ui: &Ui, click_id: Id, label: Option<&str>, heading_at: Option<usize>, text_at: Option<usize>) {
+    if !ui.input(|i| i.pointer.primary_clicked()) {
+        return;
+    }
+    let label_len = label.map_or(0, |l| l.chars().count());
+    let at = match (heading_at, text_at) {
+        (Some(at), _) => at.min(label_len),
+        (None, Some(at)) => label_len + 1 + at,
+        (None, None) => return ui.data_mut(|d| d.remove::<usize>(click_id)),
+    };
+    ui.data_mut(|d| d.insert_temp(click_id, at));
+}
+
+/// The editor of a Private card: a field for the label, which stays in the
+/// open, and one for the secret, stored encrypted and verbatim (no markup).
+/// Both write into `buf` as "label\nsecret" (see [`card::private_edit_parts`]).
+fn private_editor(ui: &mut Ui, editor_id: Id, click_id: Id, buf: &mut String, base: f32) {
+    let (label, secret) = buf.split_once('\n').unwrap_or((buf.as_str(), ""));
+    let (mut label, mut secret) = (label.to_owned(), secret.to_owned());
+    let label_id = editor_id.with("label");
+    let secret_id = editor_id.with("secret");
+    // The field that keeps the focus while the editor is open.
+    let home_id = editor_id.with("home");
+    let pass = ui.ctx().cumulative_pass_nr();
+    let shown_id = editor_id.with("shown");
+    let opening = ui.data(|d| d.get_temp::<u64>(shown_id)).is_none_or(|last| last + 1 < pass);
+    ui.data_mut(|d| d.insert_temp(shown_id, pass));
+    let place = |ui: &Ui, id: Id, at: usize| {
+        let mut state = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(at))));
+        state.store(ui.ctx(), id);
+    };
+    let mut focus = None;
+    if opening {
+        // An empty label is asked for first; else the cursor goes where the
+        // card was clicked, or to the end of the secret.
+        let label_len = label.chars().count();
+        let (id, at) = match ui.data_mut(|d| d.remove_temp::<usize>(click_id)) {
+            _ if label.trim().is_empty() => (label_id, label_len),
+            Some(at) if at <= label_len => (label_id, at),
+            Some(at) => (secret_id, (at - label_len - 1).min(secret.chars().count())),
+            None => (secret_id, secret.chars().count()),
+        };
+        place(ui, id, at);
+        ui.data_mut(|d| d.insert_temp(home_id, id));
+        focus = Some(id);
+    }
+    let hint = |text: &str| RichText::new(text).color(theme::card_muted());
+    let label_resp = ui.add(
+        egui::TextEdit::singleline(&mut label)
+            .id(label_id)
+            .font(theme::card_bold(base + 0.5))
+            .text_color(theme::card_text())
+            .hint_text(hint("Метка — видна на карточке"))
+            .frame(egui::Frame::NONE)
+            .desired_width(f32::INFINITY),
+    );
+    ui.add_space(2.0);
+    let secret_resp = ui.add(
+        egui::TextEdit::multiline(&mut secret)
+            .id(secret_id)
+            .font(theme::card_font(base))
+            .text_color(theme::card_text())
+            .hint_text(hint("Секрет — хранится зашифрованным"))
+            .frame(egui::Frame::NONE)
+            .desired_width(f32::INFINITY)
+            .desired_rows(3),
+    );
+    // One line: a pasted line break must not move text into the secret.
+    if label.contains(['\n', '\r']) {
+        label = label.replace("\r\n", " ").replace(['\n', '\r'], " ");
+    }
+    *buf = format!("{label}\n{secret}");
+    if label_resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+        // Enter in the label goes on to the secret, cursor at its end.
+        place(ui, secret_id, secret.chars().count());
+        focus = Some(secret_id);
+    } else if label_resp.has_focus() {
+        ui.data_mut(|d| d.insert_temp(home_id, label_id));
+    } else if secret_resp.has_focus() {
+        ui.data_mut(|d| d.insert_temp(home_id, secret_id));
+    } else if focus.is_none() && !ui.input(|i| i.key_pressed(Key::Tab)) {
+        // Neither field has it (a click on the card, a toolbar button): back to
+        // the last one. Not while Tab moves it from one field to the other.
+        focus = Some(ui.data(|d| d.get_temp::<Id>(home_id)).unwrap_or(secret_id));
+    }
+    if let Some(id) = focus {
+        ui.data_mut(|d| d.insert_temp(home_id, id));
+        ui.memory_mut(|m| m.request_focus(id));
+    }
 }
 
 /// Where char `at` of `shown` sits in `source`. The shown text is the source with

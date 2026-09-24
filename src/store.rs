@@ -17,22 +17,17 @@ fn vault_error(error: windows::core::Error) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error.to_string())))
 }
 
-/// Encrypts Private cards still stored in the open, and hides labels that look
-/// like the secret itself (an early build kept any first line as the label).
+/// Encrypts Private cards still stored in the open (`secret IS NULL` with text in
+/// the body). Cards already encrypted are left alone: their label is the user's
+/// own, set in the editor, and must not be second-guessed on every start.
 fn migrate_private_cards(conn: &Connection) -> rusqlite::Result<()> {
-    let mut stmt =
-        conn.prepare("SELECT id, title, body, secret FROM cards WHERE kind='private'")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, title, body, secret FROM cards WHERE kind='private' AND secret IS NULL AND body <> ''",
+    )?;
     let rows: Vec<(i64, String, String, Option<Vec<u8>>)> = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
-    let rows: Vec<_> = rows
-        .into_iter()
-        .filter(|(_, title, _, secret)| {
-            secret.is_none()
-                || (title != crate::card::PRIVATE_PLACEHOLDER && !crate::card::fits_label(title))
-        })
-        .collect();
     if rows.is_empty() {
         return Ok(());
     }
@@ -1353,7 +1348,15 @@ impl Store {
 
     pub fn save(&self, c: &Card) -> rusqlite::Result<()> {
         if c.kind == Kind::Private {
-            let (title, secret) = private_parts(&c.title, &c.body);
+            // The label is what the editor's label field holds, as typed: no heuristic
+            // (that's for capture and import, see card::private_parts). The body, when
+            // present, is the secret and goes in encrypted.
+            let title = if c.title.trim().is_empty() {
+                crate::card::PRIVATE_PLACEHOLDER
+            } else {
+                c.title.as_str()
+            };
+            let secret = c.body.as_str();
             if !c.body.is_empty() {
                 let encrypted = crate::vault::protect(c.id, &secret).map_err(vault_error)?;
                 self.conn.execute(
@@ -1461,6 +1464,17 @@ impl Store {
             [id],
         )?;
         Ok(())
+    }
+
+    /// Deletes a card for good, not through the trash, only while it has no
+    /// text: a new note closed before anything was typed. A card with text
+    /// stays, whatever the caller thought. Whether it was deleted.
+    pub fn discard_empty(&self, id: i64) -> rusqlite::Result<bool> {
+        let deleted = self.conn.execute(
+            "DELETE FROM cards WHERE id=?1 AND title='' AND body='' AND secret IS NULL",
+            [id],
+        )?;
+        Ok(deleted > 0)
     }
 
     pub fn empty_trash(&self) -> rusqlite::Result<usize> {
@@ -1602,6 +1616,26 @@ mod tests {
         drop(store);
         let store = Store::open_at(dir.join("t.db")).unwrap();
         assert_eq!(find(&store, "онбординг").len(), 1);
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn discard_empty_keeps_cards_with_text() {
+        let (store, dir) = temp_store("discard");
+        let empty = Parsed {
+            kind: Kind::Note,
+            title: String::new(),
+            body: String::new(),
+            tags: vec![],
+        };
+        let blank = store.insert(&empty, egui::pos2(0.0, 0.0)).unwrap();
+        let written = add(&store, "уже с текстом");
+        assert!(store.discard_empty(blank.id).unwrap());
+        assert!(!store.discard_empty(written.id).unwrap());
+        assert!(store.card(blank.id).unwrap().is_none());
+        assert!(store.card(written.id).unwrap().is_some());
+        assert_eq!(store.counts().unwrap(), (1, 0, 0), "not in the trash either");
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2064,28 +2098,47 @@ secret",
     }
 
     #[test]
-    fn labels_that_look_like_secrets_are_hidden_on_open() {
+    fn labels_set_in_the_editor_survive_reopen() {
         let (store, dir) = temp_store("relabel");
         let card = add(&store, "note");
         let path = store.conn.path().unwrap().to_owned();
-        // As an early build left it: the credential line as the open label.
+        // The label is the user's own, even one the capture heuristic would hide:
+        // opening the database must not second-guess it (an earlier build did).
         let encrypted = crate::vault::protect(card.id, "rest").unwrap();
         store
             .conn
             .execute(
-                "UPDATE cards SET kind='private', title='API_KEY=abc123', body='', secret=?2 WHERE id=?1",
+                "UPDATE cards SET kind='private', title='Пароль от Wi-Fi', body='', secret=?2 WHERE id=?1",
                 params![card.id, encrypted],
             )
             .unwrap();
         drop(store);
         let store = Store::open_at(PathBuf::from(path)).unwrap();
-        let hidden = store.card(card.id).unwrap().unwrap();
-        assert_eq!(hidden.title, crate::card::PRIVATE_PLACEHOLDER);
-        assert_eq!(
-            store.secret(card.id).unwrap().as_deref(),
-            Some("API_KEY=abc123\nrest")
-        );
+        let kept = store.card(card.id).unwrap().unwrap();
+        assert_eq!(kept.title, "Пароль от Wi-Fi");
+        assert_eq!(store.secret(card.id).unwrap().as_deref(), Some("rest"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn saving_a_private_card_keeps_its_label_as_typed() {
+        let (store, dir) = temp_store("private-save");
+        let mut card = add(&store, "note");
+        card.kind = Kind::Private;
+        card.title = "API_KEY prod".to_owned();
+        card.body = "abc123\n*rest*".to_owned();
+        store.save(&card).unwrap();
+        let saved = store.card(card.id).unwrap().unwrap();
+        assert_eq!(saved.title, "API_KEY prod");
+        assert_eq!(saved.body, "");
+        assert_eq!(store.secret(card.id).unwrap().as_deref(), Some("abc123\n*rest*"));
         assert!(find(&store, "abc123").is_empty());
+        // A move saves the card without its secret in memory: the label stays.
+        card.body.clear();
+        card.pos.x += 8.0;
+        store.save(&card).unwrap();
+        assert_eq!(store.card(card.id).unwrap().unwrap().title, "API_KEY prod");
+        assert_eq!(store.secret(card.id).unwrap().as_deref(), Some("abc123\n*rest*"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

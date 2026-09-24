@@ -4,17 +4,19 @@
 use std::time::{Duration, Instant};
 
 use egui::{
-    Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Id, Layout, Rect, RichText, Sense,
-    Stroke, Ui, UiBuilder, Vec2, ViewportCommand, ViewportId, pos2, vec2,
+    Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Id, Layout, Pos2, Rect, RichText,
+    Sense, Stroke, Ui, UiBuilder, Vec2, ViewportCommand, ViewportId, pos2, vec2,
 };
 
 use std::sync::atomic::Ordering;
 
+use crate::card;
 use crate::library::Tab;
 use crate::shell::Event;
 use crate::theme;
 use crate::win::{self, Backdrop};
 
+use super::cards::note_pos_at;
 use super::paint::{glass_button, glass_panel, hover_t, panel_ease, paint_logo};
 use super::{EbbApp, LAYER_FADE_IN, SET_BACKDROP, SET_COLLAPSED, SET_CURTAIN, SET_MONITOR, SET_PIN_BOTTOM};
 
@@ -37,8 +39,15 @@ pub(super) fn place_tab(h: isize, m: &win::Monitor, top: bool) {
 /// (the taskbar does, on mouse down) counts as a click on the summoned layer.
 const TRAY_CLICK_AFTER_LOWER_MS: u64 = 500;
 
+/// Bands of the layer where a double-click makes no note: the header with the
+/// "+"/"⋯" buttons (and the top handle), the bottom handle, a toast over it.
+const HEADER_BAND: f32 = 64.0;
+const HANDLE_BAND: f32 = 40.0;
+const TOAST_BAND: f32 = 100.0;
+
 #[derive(Clone, Copy)]
 enum MenuItem {
+    NewNote,
     Capture,
     Search,
     Library,
@@ -87,10 +96,52 @@ impl EbbApp {
         );
     }
 
+    /// The layer's empty space: a double-click there makes a new note, its top
+    /// left under the pointer. Call before the cards are drawn, so they sit on
+    /// top of it. Where the note goes (layer coordinates), on a double-click.
+    pub(super) fn background_ui(&self, ui: &mut Ui) -> Option<Pos2> {
+        // Taken now: a card past the window's edge grows max_rect as it's drawn.
+        let full = ui.max_rect();
+        let resp = ui.interact(full, Id::new("layer-background"), Sense::click());
+        if !resp.double_clicked() {
+            return None;
+        }
+        let at = resp.interact_pointer_pos()?;
+        // A card that senses only drag lets the click through to here: the
+        // double-click is the card's (it edits), not a new note under it.
+        let on_card = self
+            .cards
+            .iter()
+            .any(|c| Rect::from_min_size(full.min + c.pos.to_vec2(), c.shown_size()).contains(at));
+        // Not over a popup, the header and "+"/"⋯" row, the bottom handle or the toast.
+        let over_popup = ui.ctx().layer_id_at(at).is_some_and(|l| l.order != egui::Order::Background);
+        let in_header = at.y < full.top() + HEADER_BAND;
+        let at_bottom = at.y > full.bottom() - if self.toast.is_some() { TOAST_BAND } else { HANDLE_BAND };
+        if on_card || over_popup || in_header || at_bottom {
+            return None;
+        }
+        Some(note_pos_at(at - full.min.to_vec2(), full.size()))
+    }
+
+    /// "+" left of "⋯" (`menu`, its rect): a new empty note, its editor open.
+    fn new_note_button(&mut self, ui: &mut Ui, menu: Rect) {
+        let rect = menu.translate(vec2(-(menu.width() + 8.0), 0.0));
+        let button = ui.interact(rect, Id::new("layer-new-note"), Sense::click());
+        button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Новая заметка"));
+        let t = hover_t(ui, button.id, button.hovered());
+        glass_button(ui, rect.expand(t * 1.5), 10.0, t);
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, "\u{E710}", theme::icons(16.0), theme::dim().lerp_to_gamma(theme::text(), t));
+        let button = button.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Новая заметка");
+        if button.clicked() {
+            self.new_note(card::free_slot(&self.cards, self.area(ui)));
+        }
+    }
+
     /// "⋯" in the top right corner of the layer: what the tray menu offers, without the tray.
     pub(super) fn menu_ui(&mut self, ui: &mut Ui) {
         let full = ui.max_rect();
         let rect = Rect::from_min_size(pos2(full.right() - 32.0 - 40.0, full.top() + 16.0), vec2(40.0, 36.0));
+        self.new_note_button(ui, rect);
         let button = ui.interact(rect, Id::new("layer-menu"), Sense::click());
         button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Меню"));
         let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&button));
@@ -115,6 +166,7 @@ impl EbbApp {
                         chosen = Some(event);
                     }
                 };
+                item(ui, "Новая заметка", "", MenuItem::NewNote);
                 item(ui, "Записать мысль", capture_key, MenuItem::Capture);
                 item(ui, "Найти", search_key, MenuItem::Search);
                 item(ui, "Архив и корзина", "Win+Alt+L", MenuItem::Library);
@@ -130,6 +182,10 @@ impl EbbApp {
 
         let Some(chosen) = chosen else { return };
         let event = match chosen {
+            MenuItem::NewNote => {
+                self.new_note(card::free_slot(&self.cards, self.area(ui)));
+                return;
+            }
             MenuItem::Capture => Event::Capture(Instant::now()),
             MenuItem::Search => Event::Search(Instant::now()),
             MenuItem::Library => Event::OpenLibrary(false),

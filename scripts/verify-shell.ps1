@@ -1,12 +1,22 @@
 ﻿# Checks the shell integration of a running release build without synthetic input:
 # window styles, z-order pinning, tray registration, single instance, hide/show,
 # capture while hidden, --quit. Talks to Ebb's own hidden shell window only.
-# The idle-CPU check fails if the Sticky Notes import offer scans during it (3 s after
-# start): run against a profile where the import was done or declined, or with
-# LOCALAPPDATA pointing at a test directory.
-param([string]$Exe = "$PSScriptRoot\..\target\release\ebb.exe")
+# Runs against its own profile (-Profile, default under %TEMP%), so the user's notes
+# stay out of it and the Sticky Notes import offer never scans during the idle-CPU
+# check (no plum.sqlite under a test LOCALAPPDATA). A fresh profile opens the
+# onboarding settings window on first start, so the first start is a warm-up:
+# start, wait for the layer, --quit, then the checks run on the second start.
+param(
+  [string]$Exe = "$PSScriptRoot\..\target\release\ebb.exe",
+  [string]$Profile = (Join-Path $env:TEMP 'ebb-verify-shell')
+)
 $ErrorActionPreference = 'Stop'
 $Exe = [IO.Path]::GetFullPath($Exe)
+$Profile = [IO.Path]::GetFullPath($Profile)
+New-Item -ItemType Directory -Force $Profile | Out-Null
+# Child processes inherit it; the shell's own value is restored at the end.
+$realLocalAppData = $env:LOCALAPPDATA
+$env:LOCALAPPDATA = $Profile
 
 Add-Type @"
 using System; using System.Text; using System.Runtime.InteropServices;
@@ -31,6 +41,15 @@ function Wait-Until($cond, $ms = 3000) { $sw = [Diagnostics.Stopwatch]::StartNew
 function Layer { $p = Get-Process ebb -ErrorAction SilentlyContinue | Select-Object -First 1; if (-not $p) { return [IntPtr]::Zero }; [W]::FindWindow([NullString]::Value, "Ebb") }
 
 if (Get-Process ebb -ErrorAction SilentlyContinue) { throw "close running Ebb instances first" }
+
+# Warm-up on a fresh profile: gets past onboarding (it opens the settings window once).
+if (-not (Test-Path (Join-Path $Profile 'Ebb\ebb.db'))) {
+  $warm = Start-Process $Exe -PassThru
+  Wait-Until { $w = [W]::FindWindow([NullString]::Value, "Ebb"); ($w -ne [IntPtr]::Zero) -and [W]::IsWindowVisible($w) } 5000 | Out-Null
+  Start-Sleep -Milliseconds 500
+  (Start-Process $Exe -ArgumentList "--quit" -PassThru).WaitForExit(10000) | Out-Null
+  if (-not $warm.WaitForExit(5000)) { $warm.Kill(); throw "warm-up instance did not quit" }
+}
 
 $p = Start-Process $Exe -PassThru
 $shell = [IntPtr]::Zero
@@ -106,6 +125,7 @@ Check "at bottom after show" ($below3.Count -le 2) ("visible below: " + ($below3
 $p3 = Start-Process $Exe -ArgumentList "--quit" -PassThru; $p3.WaitForExit(10000) | Out-Null
 Check "--quit exits the running instance" ($p.WaitForExit(5000)) ("exit code {0}" -f $p.ExitCode)
 
+$env:LOCALAPPDATA = $realLocalAppData
 $results | Format-Table -AutoSize -Wrap | Out-String -Width 220
 if ($results | Where-Object { -not $_.ok }) { exit 1 }
 

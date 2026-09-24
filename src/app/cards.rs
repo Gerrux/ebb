@@ -3,7 +3,9 @@
 
 use std::time::{Duration, Instant};
 
-use egui::{CornerRadius, Id, Key, Modifiers, Pos2, Rect, RichText, Stroke, StrokeKind, Ui, vec2};
+use egui::{
+    CornerRadius, Id, Key, Modifiers, Pos2, Rect, RichText, Stroke, StrokeKind, Ui, Vec2, vec2,
+};
 
 use crate::card::{self, Kind, Placement};
 use crate::resurface;
@@ -42,6 +44,23 @@ pub(super) struct PromptFill {
     opened_pass: u64,
 }
 
+/// The grid a note made by double-click lands on, so notes made by hand line up.
+const NOTE_GRID: f32 = 8.0;
+
+/// Where a note made by a double-click at `at` goes (both in layer coordinates):
+/// its top left there, on the grid, and the whole card on a layer of size `area`.
+pub(super) fn note_pos_at(at: Pos2, area: Vec2) -> Pos2 {
+    let axis = |v: f32, room: f32, size: f32| {
+        // The last grid line that still leaves room for the card; 0 on a layer too small.
+        let max = ((room - size) / NOTE_GRID).floor().max(0.0) * NOTE_GRID;
+        ((v / NOTE_GRID).round() * NOTE_GRID).clamp(0.0, max)
+    };
+    Pos2::new(
+        axis(at.x, area.x, card::DEFAULT_SIZE.x),
+        axis(at.y, area.y, card::DEFAULT_SIZE.y),
+    )
+}
+
 impl EbbApp {
     pub(super) fn commit_edit(&mut self) {
         let Some((id, buf)) = self.editing.take() else {
@@ -50,7 +69,46 @@ impl EbbApp {
         let Some(idx) = self.cards.iter().position(|c| c.id == id) else {
             return;
         };
+        if self.cards[idx].kind == Kind::Private {
+            // Two fields, no markup: the first line is the label, shown in the open
+            // as typed; the rest is the secret, stored verbatim and encrypted by save.
+            let (label, secret) = card::private_edit_parts(&buf);
+            let c = &mut self.cards[idx];
+            c.title = label;
+            // Tags from the label only: the tags column is plaintext.
+            c.tags = card::tags_of(&c.title);
+            c.body = secret;
+            self.tag_counts = None;
+            let empty = self.cards[idx].body.is_empty();
+            self.save(idx);
+            if empty {
+                // Emptied in the editor: the old value must not stay behind to show or copy.
+                let cleared = self.store.clear_secret(id);
+                self.report(cleared, "стереть секрет");
+            }
+            // On the layer only the label stays in memory.
+            self.cards[idx].body.clear();
+            return;
+        }
         let buf = rich_text::trim(&buf);
+        let c = &self.cards[idx];
+        // A note closed with nothing ever written in it (a new empty note) is
+        // no card at all: gone for good, not to the trash, without a toast.
+        if buf.is_empty() && c.title.is_empty() && c.body.is_empty() {
+            let discarded = self.store.discard_empty(id);
+            // Not deleted: the database has text this copy doesn't; left as it is there.
+            if self.report(discarded, "убрать пустую заметку") == Some(true) {
+                let card = self.cards.remove(idx);
+                self.leaving.push((card, Instant::now()));
+                self.appearing.retain(|(aid, _)| *aid != id);
+                if self.active == Some(id) {
+                    self.active = None;
+                }
+                self.library.lock().unwrap().invalidate();
+                self.bar.lock().unwrap().invalidate();
+            }
+            return;
+        }
         let c = &mut self.cards[idx];
         // Saved as written; an old separate title becomes the first line of the text.
         c.title.clear();
@@ -79,6 +137,49 @@ impl EbbApp {
         }
     }
 
+    /// `commit_edit_of` for the card at `idx`: where that card is afterwards, or
+    /// None if it was an empty note and is gone. Indices past it shift then.
+    fn commit_edit_of_at(&mut self, idx: usize) -> Option<usize> {
+        let id = self.cards[idx].id;
+        self.commit_edit_of(id);
+        self.index_of(id)
+    }
+
+    fn index_of(&self, id: i64) -> Option<usize> {
+        self.cards.iter().position(|c| c.id == id)
+    }
+
+    /// An empty note at `pos` (layer coordinates), its editor open: the "+"
+    /// button, the menu's "Новая заметка" and a double-click on the layer.
+    /// Closed with nothing typed, it's discarded (see `commit_edit`).
+    pub(super) fn new_note(&mut self, pos: Pos2) {
+        // Not onto a layer that's rolled away or rolling: nothing would show it.
+        if self.collapsed || self.curtain > 0.0 {
+            return;
+        }
+        self.commit_edit();
+        let parsed = card::Parsed {
+            kind: Kind::Note,
+            title: String::new(),
+            body: String::new(),
+            tags: vec![],
+        };
+        let inserted = self.store.insert(&parsed, pos);
+        let Some(c) = self.report(inserted, "создать заметку") else {
+            return;
+        };
+        // Inserted on top of the others (z), so it goes last here too.
+        let id = c.id;
+        self.appearing.push((id, Instant::now()));
+        self.cards.push(c);
+        self.active = Some(id);
+        self.editing = Some((id, String::new()));
+        self.revealed = None;
+        self.revealed_text = None;
+        self.library.lock().unwrap().invalidate();
+        self.bar.lock().unwrap().invalidate();
+    }
+
     /// Rewrites a card's text for a tag change; its tags follow from the text, as
     /// after editing. The title and text it had, if the change was saved.
     fn retag(
@@ -86,7 +187,7 @@ impl EbbApp {
         idx: usize,
         change: impl FnOnce(&str) -> String,
     ) -> Option<(String, String)> {
-        self.commit_edit_of(self.cards[idx].id);
+        let idx = self.commit_edit_of_at(idx)?;
         let c = &mut self.cards[idx];
         let old = (c.title.clone(), c.body.clone());
         let text = if c.title.is_empty() {
@@ -281,9 +382,9 @@ impl EbbApp {
         }
         // The editor's text is saved first, under the old kind; a card going
         // Private hides its text right away.
-        if self.editing.as_ref().is_some_and(|(eid, _)| *eid == id) {
-            self.commit_edit();
-        }
+        let Some(idx) = self.commit_edit_of_at(idx) else {
+            return;
+        };
         if self.revealed.is_some_and(|(rid, _)| rid == id) {
             self.revealed = None;
             self.revealed_text = None;
@@ -351,7 +452,9 @@ impl EbbApp {
             .collect();
         let magnet = self.snap.then_some(rects.as_slice());
         let style = self.card_style;
-        let mut actions: Vec<(usize, Action)> = Vec::new();
+        // By card id, not index: closing an empty note's editor removes that
+        // card, and the indices past it shift.
+        let mut actions: Vec<(i64, Action)> = Vec::new();
         for idx in 0..self.cards.len() {
             let id = self.cards[idx].id;
             let editing = self
@@ -396,7 +499,7 @@ impl EbbApp {
                 })
                 .inner;
             for a in produced {
-                actions.push((idx, a));
+                actions.push((id, a));
             }
         }
         for (card, at) in &mut self.leaving {
@@ -476,11 +579,14 @@ impl EbbApp {
         let mut to_front = None;
         let mut remove = None;
         let mut detach = None;
-        for (idx, action) in actions {
+        for (id, action) in actions {
+            let Some(idx) = self.index_of(id) else {
+                continue;
+            };
             let done = matches!(action, Action::Done);
             match action {
                 Action::Front => {
-                    to_front = Some(idx);
+                    to_front = Some(id);
                     self.active = Some(self.cards[idx].id);
                     let now = resurface::unix_now();
                     if self.cards[idx].placement == Placement::Rediscover {
@@ -559,11 +665,13 @@ impl EbbApp {
                     }
                 }
                 Action::Detach(pos) => {
-                    self.commit_edit_of(self.cards[idx].id);
+                    let Some(idx) = self.commit_edit_of_at(idx) else {
+                        continue;
+                    };
                     self.cards[idx].pos = desktop_origin + pos.to_vec2();
                     self.cards[idx].placement = Placement::Desktop;
                     if self.save(idx) {
-                        detach = Some(idx);
+                        detach = Some(id);
                     }
                 }
                 Action::Duplicate => {
@@ -596,7 +704,9 @@ impl EbbApp {
                 }
                 Action::Archive | Action::Done => {
                     // What's typed is saved before the card goes.
-                    self.commit_edit_of(self.cards[idx].id);
+                    let Some(idx) = self.commit_edit_of_at(idx) else {
+                        continue;
+                    };
                     let (placement, review_at) =
                         (self.cards[idx].placement, self.cards[idx].review_at);
                     // A reminder already due is dealt with; left set, Rediscover
@@ -623,11 +733,13 @@ impl EbbApp {
                     } else {
                         "Карточка в архиве"
                     };
-                    self.toast = Some(Toast::new(text, Some(Undo::Unarchive(self.cards[idx].id))));
-                    remove = Some(idx);
+                    self.toast = Some(Toast::new(text, Some(Undo::Unarchive(id))));
+                    remove = Some(id);
                 }
                 Action::Delete => {
-                    self.commit_edit_of(self.cards[idx].id);
+                    let Some(idx) = self.commit_edit_of_at(idx) else {
+                        continue;
+                    };
                     let deleted = self.store.delete(self.cards[idx].id);
                     if self.report(deleted, "убрать в корзину").is_none() {
                         continue;
@@ -636,18 +748,21 @@ impl EbbApp {
                         "Карточка в корзине, {} дней можно вернуть",
                         crate::store::TRASH_DAYS
                     );
-                    self.toast = Some(Toast::new(text, Some(Undo::Restore(self.cards[idx].id))));
-                    remove = Some(idx);
+                    self.toast = Some(Toast::new(text, Some(Undo::Restore(id))));
+                    remove = Some(id);
                 }
                 Action::StartEdit => {
                     self.commit_edit();
+                    let Some(idx) = self.index_of(id) else {
+                        continue;
+                    };
                     let c = &self.cards[idx];
                     let _ = self.store.touch(c.id);
                     let text = if c.kind == Kind::Private {
                         // Without its value the editor would save the label as the secret.
                         match self.store.secret(c.id) {
-                            Ok(Some(secret)) => card::private_text(&c.title, &secret),
-                            Ok(None) => card::private_text(&c.title, ""),
+                            Ok(Some(secret)) => card::private_edit_text(&c.title, &secret),
+                            Ok(None) => card::private_edit_text(&c.title, ""),
                             Err(_) => continue,
                         }
                     } else {
@@ -710,8 +825,9 @@ impl EbbApp {
                     }
                 }
                 Action::ToggleCollapse => {
-                    let id = self.cards[idx].id;
-                    self.commit_edit_of(id);
+                    let Some(idx) = self.commit_edit_of_at(idx) else {
+                        continue;
+                    };
                     let collapsed = !self.cards[idx].collapsed;
                     let set = self.store.set_collapsed(id, collapsed);
                     if self
@@ -733,8 +849,9 @@ impl EbbApp {
                     self.save(idx);
                 }
                 Action::Snooze(days) => {
-                    let id = self.cards[idx].id;
-                    self.commit_edit_of(id);
+                    if self.commit_edit_of_at(idx).is_none() {
+                        continue;
+                    }
                     let until = resurface::snooze_until(
                         resurface::unix_now(),
                         crate::search::local_offset_secs(),
@@ -747,11 +864,11 @@ impl EbbApp {
                     };
                     let text = format!("Вернётся {}", resurface::snooze_label(days));
                     self.toast = Some(Toast::new(text, Some(Undo::Snooze(snapshot))));
-                    remove = Some(idx);
+                    remove = Some(id);
                 }
             }
         }
-        if let Some(idx) = detach {
+        if let Some(idx) = detach.and_then(|id| self.index_of(id)) {
             self.floating.push(self.cards.remove(idx));
         }
         // While a value is shown, screenshots and recordings get no layer at all
@@ -770,12 +887,14 @@ impl EbbApp {
         }
         self.prompt_fill_ui(ui, origin);
         self.tag_input_ui(ui);
-        if let Some(idx) = remove {
-            let card = self.cards.remove(idx);
-            self.leaving.push((card, Instant::now()));
+        if let Some(id) = remove {
+            if let Some(idx) = self.index_of(id) {
+                let card = self.cards.remove(idx);
+                self.leaving.push((card, Instant::now()));
+            }
             self.library.lock().unwrap().invalidate();
             self.bar.lock().unwrap().invalidate();
-        } else if let Some(idx) = to_front
+        } else if let Some(idx) = to_front.and_then(|id| self.index_of(id))
             && idx + 1 != self.cards.len()
         {
             let c = self.cards.remove(idx);
@@ -784,5 +903,30 @@ impl EbbApp {
             }
             self.cards.push(c);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::pos2;
+
+    #[test]
+    fn note_pos_snaps_to_the_grid() {
+        let area = vec2(1920.0, 1080.0);
+        assert_eq!(note_pos_at(pos2(203.0, 77.0), area), pos2(200.0, 80.0));
+        assert_eq!(note_pos_at(pos2(204.0, 76.0), area), pos2(208.0, 80.0));
+    }
+
+    #[test]
+    fn note_pos_keeps_the_card_on_the_layer() {
+        let area = vec2(1920.0, 1080.0);
+        let p = note_pos_at(pos2(1900.0, 1070.0), area);
+        let far = p + card::DEFAULT_SIZE;
+        assert!(far.x <= area.x && far.y <= area.y, "{p:?}");
+        assert_eq!((p.x % NOTE_GRID, p.y % NOTE_GRID), (0.0, 0.0));
+        assert_eq!(note_pos_at(pos2(-5.0, -30.0), area), pos2(0.0, 0.0));
+        // A layer smaller than a card: at its top left.
+        assert_eq!(note_pos_at(pos2(100.0, 100.0), vec2(200.0, 100.0)), pos2(0.0, 0.0));
     }
 }

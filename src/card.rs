@@ -1183,6 +1183,11 @@ pub const PRIVATE_PLACEHOLDER: &str = "Private";
 /// Splits a Private note into the label that stays in the open and the value
 /// that is encrypted: the title, else the first line when more lines follow.
 /// A lone line may be the secret itself, so it's all value.
+///
+/// A guess (see [`fits_label`]), only for text that came without a label of
+/// its own: quick capture, the Sticky Notes import, turning a card of another
+/// kind into Private and the one-time migration. The card editor has an
+/// explicit label field and uses [`private_edit_parts`] instead.
 pub fn private_parts(title: &str, body: &str) -> (String, String) {
     let title = title.trim();
     if !title.is_empty() {
@@ -1203,6 +1208,8 @@ pub fn private_parts(title: &str, body: &str) -> (String, String) {
 /// Whether a line may stay in the open as a Private card's label: short, and
 /// nothing like a credential — no assignments, keys, long tokens or addresses.
 /// Errs on the side of hiding; a hidden label only costs the card its name.
+/// Only for guessing (see [`private_parts`]): a label typed into the editor's
+/// label field is kept as typed.
 pub fn fits_label(line: &str) -> bool {
     const SECRETS: &[&str] = &[
         "pass",
@@ -1240,8 +1247,9 @@ pub fn fits_label(line: &str) -> bool {
         && !line.split_whitespace().any(|w| token_like(w) || ip_like(w))
 }
 
-/// The note as written, back from its label and value: what the editor opens
-/// with, and what a card turned from Private into another kind keeps.
+/// The note as written, back from its label and value, for text that will go
+/// through [`private_parts`] again: what a card turned from Private into
+/// another kind keeps. The editor uses [`private_edit_text`].
 pub fn private_text(label: &str, secret: &str) -> String {
     // Without a label of its own, a multi-line value keeps the placeholder as
     // its first line, so saving it again doesn't lay that line open.
@@ -1250,6 +1258,27 @@ pub fn private_text(label: &str, secret: &str) -> String {
     } else {
         format!("{label}\n{secret}")
     }
+}
+
+/// A Private card's label and value from the editor's buffer, which always
+/// has the form "label\nsecret": the label field writes the first line, the
+/// secret field everything after the first '\n'. No guessing: the label is
+/// what was typed into its field (trimmed), whatever it says; an empty one is
+/// [`PRIVATE_PLACEHOLDER`]. The secret is kept verbatim, only the newline that
+/// separates it from the label is dropped. A buffer without a '\n' is a label
+/// alone, with an empty secret.
+pub fn private_edit_parts(buf: &str) -> (String, String) {
+    let (label, secret) = buf.split_once('\n').unwrap_or((buf, ""));
+    let label = label.trim();
+    let label = if label.is_empty() { PRIVATE_PLACEHOLDER } else { label };
+    (label.to_owned(), secret.to_owned())
+}
+
+/// What the editor of a Private card opens with; [`private_edit_parts`] gives
+/// the label and value back. The placeholder label opens as an empty field.
+pub fn private_edit_text(label: &str, secret: &str) -> String {
+    let label = if label == PRIVATE_PLACEHOLDER { "" } else { label };
+    format!("{label}\n{secret}")
 }
 
 pub const MIN_SIZE: Vec2 = vec2(200.0, 96.0);
@@ -2255,6 +2284,57 @@ mod tests {
             (PRIVATE_PLACEHOLDER.to_owned(), "hunter2".to_owned())
         );
         assert_eq!(private_text("Wi-Fi", "pass"), "Wi-Fi\npass");
+    }
+
+    #[test]
+    fn private_editor_keeps_the_label_as_typed() {
+        // No heuristic: a label that mentions a password stays the label.
+        assert_eq!(
+            private_edit_parts("Пароль от Wi-Fi\nhunter2"),
+            ("Пароль от Wi-Fi".to_owned(), "hunter2".to_owned())
+        );
+        assert_eq!(
+            private_edit_parts("  Wi-Fi офис \t\nguest / pass"),
+            ("Wi-Fi офис".to_owned(), "guest / pass".to_owned())
+        );
+        // The secret is kept verbatim, several lines and markup-like chars too.
+        assert_eq!(
+            private_edit_parts("VPN\n  line one\n\nline *two*\n"),
+            ("VPN".to_owned(), "  line one\n\nline *two*\n".to_owned())
+        );
+        // A lone line is a label with no secret.
+        assert_eq!(private_edit_parts("Wi-Fi"), ("Wi-Fi".to_owned(), String::new()));
+    }
+
+    #[test]
+    fn private_editor_placeholder_is_an_empty_label() {
+        assert_eq!(private_edit_text(PRIVATE_PLACEHOLDER, "hunter2"), "\nhunter2");
+        assert_eq!(
+            private_edit_parts("\nhunter2"),
+            (PRIVATE_PLACEHOLDER.to_owned(), "hunter2".to_owned())
+        );
+        assert_eq!(
+            private_edit_parts("   \nhunter2"),
+            (PRIVATE_PLACEHOLDER.to_owned(), "hunter2".to_owned())
+        );
+        assert_eq!(private_edit_parts(""), (PRIVATE_PLACEHOLDER.to_owned(), String::new()));
+    }
+
+    #[test]
+    fn private_editor_round_trips() {
+        for (label, secret) in [
+            ("Wi-Fi офис", "guest / pass"),
+            ("Пароль от роутера", "admin\nadmin"),
+            (PRIVATE_PLACEHOLDER, "line one\nline two"),
+            (PRIVATE_PLACEHOLDER, ""),
+            ("Ключи", "\n  -----BEGIN KEY-----\n"),
+        ] {
+            assert_eq!(
+                private_edit_parts(&private_edit_text(label, secret)),
+                (label.to_owned(), secret.to_owned()),
+                "{label}"
+            );
+        }
     }
 
     #[test]

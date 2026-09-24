@@ -1789,12 +1789,14 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
                 autostart_job(&st.autostart, ui.ctx(), None);
                 state = st.autostart.lock().unwrap();
             }
-            let (mut on, detail) = match &*state {
-                AutostartUi::Known(Ok(autostart::Status::On { current_exe, command })) => {
-                    (true, (!current_exe).then(|| format!("Запускается другая копия: {command}")))
-                }
-                AutostartUi::Known(Err(e)) => (false, Some(format!("Не удалось узнать: {e}"))),
-                _ => (false, None),
+            let (mut on, detail, stale) = match &*state {
+                AutostartUi::Known(Ok(autostart::Status::On { current_exe, command })) => (
+                    true,
+                    (!current_exe).then(|| format!("Запускается другая копия: {command}")),
+                    !current_exe,
+                ),
+                AutostartUi::Known(Err(e)) => (false, Some(format!("Не удалось узнать: {e}")), false),
+                _ => (false, None, false),
             };
             let busy = matches!(*state, AutostartUi::Busy | AutostartUi::Unknown);
             drop(state);
@@ -1803,7 +1805,13 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
             }
             note(ui, "Через Планировщик заданий: стартует сразу после входа, без задержки автозагрузки.");
             if let Some(detail) = detail {
-                note(ui, &detail);
+                ui.horizontal_wrapped(|ui| {
+                    note(ui, &detail);
+                    // The exe moved (or an old install is left): re-point the task at this one.
+                    if stale && ui.add_enabled(!busy, egui::Button::new("Исправить")).on_hover_text("Перенастроить задание на эту копию").clicked() {
+                        autostart_job(&st.autostart, ui.ctx(), Some(true));
+                    }
+                });
             }
         }
 
