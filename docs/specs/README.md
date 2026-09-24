@@ -112,10 +112,12 @@ cards(id, kind, title, body, tags /*csv*/, pinned, archived,
       z, collapsed, meta /*JSON: idea_status*/)
 cards_fts  -- FTS5 external content (title, body, tags), unicode61 remove_diacritics 2
 settings(key, value)          -- layer.*, sticky_import, rediscover_day, …
-imported(source_id, card_id, batch)
+imported(source_id, card_id, batch, reviewed)
 reviews(id, started_at, finished_at, kept, archived, snoozed, trashed, pinned)
 review_items(review_id, card_id, action, at)
 ```
+
+Версия схемы — `PRAGMA user_version`, миграции нумерованные: `src/store/migrations.rs` (см. 11, A3).
 
 Модули: `app` (слой: `mod` — события, `layer` — окно и шторка, `cards` — действия карточек,
 `card_ui`/`card_text` — отрисовка карточки, `toast`, `paint`), `bar` (захват/поиск), `library` (архив/корзина/настройки), `shell` (трей,

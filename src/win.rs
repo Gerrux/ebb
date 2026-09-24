@@ -27,10 +27,11 @@ use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindowLongPtrW, HWND_BOTTOM, MONITORINFOF_PRIMARY,
-    SET_WINDOW_POS_FLAGS, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WINDOWPOS, WM_ACTIVATEAPP, WM_NCCALCSIZE,
-    WM_STYLECHANGING, WM_WINDOWPOSCHANGING, WS_BORDER, WS_DLGFRAME, WS_EX_APPWINDOW,
+    GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindowLongPtrW, HWND_BOTTOM, IsWindowVisible,
+    MONITORINFOF_PRIMARY, SET_WINDOW_POS_FLAGS, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WINDOWPOS,
+    WM_ACTIVATEAPP, WM_NCCALCSIZE, WM_STYLECHANGING, WM_WINDOWPOSCHANGING, WS_BORDER, WS_DLGFRAME,
+    WS_EX_APPWINDOW,
     WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_LAYERED, WS_EX_STATICEDGE, WS_EX_TOOLWINDOW,
     WS_EX_WINDOWEDGE, WS_SYSMENU,
 };
@@ -234,6 +235,11 @@ pub fn find_capture_window() -> Option<isize> {
 
 pub fn find_library_window() -> Option<isize> {
     find_own_window(w!("Ebb Library"))
+}
+
+/// Whether a window is actually visible on screen (not just created/shown-pending).
+pub fn is_window_visible(raw: isize) -> bool {
+    unsafe { IsWindowVisible(hwnd(raw)) }.as_bool()
 }
 
 fn hwnd(raw: isize) -> HWND {

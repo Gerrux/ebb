@@ -1,4 +1,7 @@
-//! SQLite persistence.
+//! SQLite persistence. The schema and its numbered migrations live in
+//! `migrations` (`PRAGMA user_version`); this module is the queries.
+
+mod migrations;
 
 use std::path::{Path, PathBuf};
 
@@ -65,27 +68,6 @@ pub const TRASH_DAYS: i64 = 30;
 pub const REVIEW_PAUSE_DAYS: i64 = 56;
 /// "Later" in a weekly review.
 pub const REVIEW_LATER_DAYS: i64 = 14;
-/// Set once review dates planted by older builds are cleared (`clear_review_dates`).
-const SET_REVIEW_DATES_CLEARED: &str = "migrated.review_dates";
-
-/// Older builds recorded "don't ask for 8 weeks" (and "later") of the weekly
-/// review in `review_at`, which Rediscover reads as a reminder: such a card came
-/// back as "Напоминание на сегодня". Clears the dates that match a review
-/// decision to the minute; reminders set any other way stay.
-fn clear_review_dates(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute(
-        "UPDATE cards SET review_at=NULL WHERE review_at IS NOT NULL AND EXISTS (
-             SELECT 1 FROM review_items ri WHERE ri.card_id = cards.id AND abs(cards.review_at - ri.at
-                 - CASE ri.action WHEN 'snooze' THEN ?1 ELSE ?2 END) <= 60
-               AND ri.action IN ('keep', 'archive', 'snooze'))",
-        params![REVIEW_LATER_DAYS * DAY, REVIEW_PAUSE_DAYS * DAY],
-    )?;
-    conn.execute(
-        "INSERT INTO settings (key, value) VALUES (?1, '1') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        [SET_REVIEW_DATES_CLEARED],
-    )?;
-    Ok(())
-}
 
 /// Which cards a search covers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -311,7 +293,7 @@ impl Store {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
@@ -319,165 +301,11 @@ impl Store {
              -- another one waits for it instead of failing with SQLITE_BUSY.
              PRAGMA busy_timeout = 1000;
              -- Text a card turned Private leaves behind is zeroed where that's free.
-             PRAGMA secure_delete = FAST;
-             CREATE TABLE IF NOT EXISTS cards (
-                 id INTEGER PRIMARY KEY,
-                 kind TEXT NOT NULL,
-                 title TEXT NOT NULL DEFAULT '',
-                 body TEXT NOT NULL DEFAULT '',
-                 tags TEXT NOT NULL DEFAULT '',
-                 pinned INTEGER NOT NULL DEFAULT 0,
-                 archived INTEGER NOT NULL DEFAULT 0,
-                 x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,
-                 created_at INTEGER NOT NULL,
-                 updated_at INTEGER NOT NULL,
-                 last_viewed_at INTEGER NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-             -- One row per imported source note, so re-imports skip it and a batch can be undone.
-             CREATE TABLE IF NOT EXISTS imported (
-                 source_id TEXT PRIMARY KEY,
-                 card_id INTEGER NOT NULL,
-                 batch INTEGER NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS reviews (
-                 id INTEGER PRIMARY KEY,
-                 started_at INTEGER NOT NULL,
-                 finished_at INTEGER,
-                 kept INTEGER NOT NULL DEFAULT 0,
-                 archived INTEGER NOT NULL DEFAULT 0,
-                 snoozed INTEGER NOT NULL DEFAULT 0,
-                 trashed INTEGER NOT NULL DEFAULT 0,
-                 pinned INTEGER NOT NULL DEFAULT 0
-             );
-             CREATE TABLE IF NOT EXISTS review_items (
-                 review_id INTEGER NOT NULL,
-                 card_id INTEGER NOT NULL,
-                 action TEXT NOT NULL,
-                 at INTEGER NOT NULL,
-                 PRIMARY KEY (review_id, card_id)
-             );",
+             PRAGMA secure_delete = FAST;",
         )?;
-        let has_fts: bool = conn.query_row(
-            "SELECT count(*) FROM sqlite_master WHERE name='cards_fts'",
-            [],
-            |r| r.get(0),
-        )?;
-        conn.execute_batch(
-            "-- External-content index over cards. unicode61 folds case for Cyrillic too;
-             -- remove_diacritics folds ё→е. No `prefix=` option: on 10k notes it made
-             -- the file 20% larger (38 -> 46 MiB) without making any query faster.
-             CREATE VIRTUAL TABLE IF NOT EXISTS cards_fts USING fts5(
-                 title, body, tags,
-                 content='cards', content_rowid='id',
-                 tokenize='unicode61 remove_diacritics 2'
-             );
-             CREATE TRIGGER IF NOT EXISTS cards_fts_insert AFTER INSERT ON cards BEGIN
-                 INSERT INTO cards_fts(rowid, title, body, tags) VALUES (new.id, new.title, new.body, new.tags);
-             END;
-             CREATE TRIGGER IF NOT EXISTS cards_fts_delete AFTER DELETE ON cards BEGIN
-                 INSERT INTO cards_fts(cards_fts, rowid, title, body, tags)
-                 VALUES ('delete', old.id, old.title, old.body, old.tags);
-             END;
-             -- save() rewrites every column on each drag; reindex only when text changed.
-             CREATE TRIGGER IF NOT EXISTS cards_fts_update AFTER UPDATE ON cards
-             WHEN old.title IS NOT new.title OR old.body IS NOT new.body OR old.tags IS NOT new.tags BEGIN
-                 INSERT INTO cards_fts(cards_fts, rowid, title, body, tags)
-                 VALUES ('delete', old.id, old.title, old.body, old.tags);
-                 INSERT INTO cards_fts(rowid, title, body, tags) VALUES (new.id, new.title, new.body, new.tags);
-             END;",
-        )?;
-        if !has_fts {
-            // Column weights for `ORDER BY rank`: title, body, tags. Stored in the index.
-            conn.execute(
-                "INSERT INTO cards_fts(cards_fts, rank) VALUES ('rank', 'bm25(8.0, 1.0, 4.0)')",
-                [],
-            )?;
-            conn.execute("INSERT INTO cards_fts(cards_fts) VALUES ('rebuild')", [])?;
-        }
-        // Trash: deleted cards keep their row for TRASH_DAYS.
-        let has_deleted_at: bool = conn.query_row(
-            "SELECT count(*) FROM pragma_table_info('cards') WHERE name='deleted_at'",
-            [],
-            |r| r.get(0),
-        )?;
-        if !has_deleted_at {
-            conn.execute("ALTER TABLE cards ADD COLUMN deleted_at INTEGER", [])?;
-        }
-        // A color picked by hand (card::Tint); NULL takes the kind's.
-        let has_tint: bool = conn.query_row(
-            "SELECT count(*) FROM pragma_table_info('cards') WHERE name='tint'",
-            [],
-            |r| r.get(0),
-        )?;
-        if !has_tint {
-            conn.execute("ALTER TABLE cards ADD COLUMN tint TEXT", [])?;
-        }
-        let has_secret: bool = conn.query_row(
-            "SELECT count(*) FROM pragma_table_info('cards') WHERE name='secret'",
-            [],
-            |r| r.get(0),
-        )?;
-        if !has_secret {
-            conn.execute("ALTER TABLE cards ADD COLUMN secret BLOB", [])?;
-        }
+        // One PRAGMA read when the schema is current.
+        migrations::migrate(&mut conn)?;
         migrate_private_cards(&conn)?;
-        for (name, definition) in [
-            ("placement", "TEXT NOT NULL DEFAULT 'manual'"),
-            ("review_at", "INTEGER"),
-            ("last_resurfaced_at", "INTEGER"),
-            ("resurface_count", "INTEGER NOT NULL DEFAULT 0"),
-            ("ignored_count", "INTEGER NOT NULL DEFAULT 0"),
-            ("priority", "INTEGER NOT NULL DEFAULT 0"),
-            // Stacking order on the layer: higher is drawn above.
-            ("z", "INTEGER NOT NULL DEFAULT 0"),
-            // Folded to one line on the layer (card::Card::collapsed).
-            ("collapsed", "INTEGER NOT NULL DEFAULT 0"),
-            // Fields of a card's kind as JSON, read and written with SQLite's
-            // json functions: {"idea_status": "explore"}. Kept across kind changes.
-            ("meta", "TEXT NOT NULL DEFAULT '{}'"),
-        ] {
-            let exists: bool = conn.query_row(
-                "SELECT count(*) FROM pragma_table_info('cards') WHERE name=?1",
-                [name],
-                |r| r.get(0),
-            )?;
-            if !exists {
-                conn.execute(
-                    &format!("ALTER TABLE cards ADD COLUMN {name} {definition}"),
-                    [],
-                )?;
-            }
-        }
-        conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS cards_kind_created ON cards(kind, created_at);
-             CREATE INDEX IF NOT EXISTS cards_created ON cards(created_at);
-             CREATE INDEX IF NOT EXISTS cards_updated ON cards(updated_at);
-             CREATE INDEX IF NOT EXISTS cards_deleted ON cards(deleted_at) WHERE deleted_at IS NOT NULL;
-             CREATE INDEX IF NOT EXISTS cards_review ON cards(review_at) WHERE review_at IS NOT NULL;
-             CREATE INDEX IF NOT EXISTS review_items_card ON review_items(card_id, at);
-             CREATE INDEX IF NOT EXISTS imported_card ON imported(card_id);",
-        )?;
-        // Import review (spec 08): done with in the review, or not yet.
-        let has_reviewed: bool = conn.query_row(
-            "SELECT count(*) FROM pragma_table_info('imported') WHERE name='reviewed'",
-            [],
-            |r| r.get(0),
-        )?;
-        if !has_reviewed {
-            conn.execute(
-                "ALTER TABLE imported ADD COLUMN reviewed INTEGER NOT NULL DEFAULT 0",
-                [],
-            )?;
-        }
-        let cleared: bool = conn.query_row(
-            "SELECT count(*) FROM settings WHERE key=?1",
-            [SET_REVIEW_DATES_CLEARED],
-            |r| r.get(0),
-        )?;
-        if !cleared {
-            clear_review_dates(&conn)?;
-        }
         conn.execute(
             "DELETE FROM cards WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
             [now() - TRASH_DAYS * 86_400],
@@ -1611,8 +1439,16 @@ mod tests {
         assert!(store.search(&q, Scope::Trash, 20).unwrap().is_empty());
         assert!(store.card(edited.id).unwrap().is_none());
 
-        // Reopening an existing database without the index builds it.
-        store.conn.execute_batch("DROP TABLE cards_fts;").unwrap();
+        // Reopening a database of a build before the index (and before
+        // versioning) builds it.
+        store
+            .conn
+            .execute_batch(
+                "DROP TRIGGER cards_fts_insert; DROP TRIGGER cards_fts_delete;
+                 DROP TRIGGER cards_fts_update; DROP TABLE cards_fts;
+                 PRAGMA user_version = 0;",
+            )
+            .unwrap();
         drop(store);
         let store = Store::open_at(dir.join("t.db")).unwrap();
         assert_eq!(find(&store, "онбординг").len(), 1);
@@ -2582,13 +2418,15 @@ guest / pass"
                 )
                 .unwrap();
         }
+        // As an older build left it: before versioning, and not yet cleared.
         store
             .conn
             .execute(
                 "DELETE FROM settings WHERE key=?1",
-                [SET_REVIEW_DATES_CLEARED],
+                [migrations::SET_REVIEW_DATES_CLEARED],
             )
             .unwrap();
+        store.conn.pragma_update(None, "user_version", 0).unwrap();
         drop(store);
 
         let store = Store::open_at(dir.join("t.db")).unwrap();
@@ -2601,6 +2439,166 @@ guest / pass"
                 .review_at
                 .is_some()
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn schema_version(conn: &Connection) -> i64 {
+        conn.pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap()
+    }
+
+    fn columns(conn: &Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info(?1) ORDER BY cid")
+            .unwrap();
+        stmt.query_map([table], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    const CARD_COLUMNS: &[&str] = &[
+        "id", "kind", "title", "body", "tags", "pinned", "archived", "x", "y", "w", "h",
+        "created_at", "updated_at", "last_viewed_at", "deleted_at", "tint", "secret",
+        "placement", "review_at", "last_resurfaced_at", "resurface_count", "ignored_count",
+        "priority", "z", "collapsed", "meta",
+    ];
+
+    fn assert_latest_schema(conn: &Connection) {
+        assert_eq!(schema_version(conn), migrations::LATEST);
+        assert_eq!(columns(conn, "cards"), CARD_COLUMNS);
+        assert_eq!(
+            columns(conn, "imported"),
+            ["source_id", "card_id", "batch", "reviewed"]
+        );
+        for name in [
+            "settings",
+            "reviews",
+            "review_items",
+            "cards_fts",
+            "cards_fts_insert",
+            "cards_fts_delete",
+            "cards_fts_update",
+            "cards_kind_created",
+            "cards_created",
+            "cards_updated",
+            "cards_deleted",
+            "cards_review",
+            "review_items_card",
+            "imported_card",
+        ] {
+            let found: bool = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name=?1",
+                    [name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(found, "{name} missing");
+        }
+    }
+
+    #[test]
+    fn fresh_database_gets_the_latest_schema() {
+        let (store, dir) = temp_store("schema-fresh");
+        assert_latest_schema(&store.conn);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn databases_of_older_builds_migrate_and_keep_their_notes() {
+        let dir = std::env::temp_dir().join(format!("ebb-test-schema-old-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = "CREATE TABLE cards (
+                id INTEGER PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '', pinned INTEGER NOT NULL DEFAULT 0,
+                archived INTEGER NOT NULL DEFAULT 0, x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_viewed_at INTEGER NOT NULL
+            );";
+        // The first build had only `cards`; a later one had the trash, tints,
+        // settings, the import log (not yet reviewable) and the search index.
+        let middle = format!(
+            "{original}
+             ALTER TABLE cards ADD COLUMN deleted_at INTEGER;
+             ALTER TABLE cards ADD COLUMN tint TEXT;
+             ALTER TABLE cards ADD COLUMN secret BLOB;
+             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE imported (source_id TEXT PRIMARY KEY, card_id INTEGER NOT NULL, batch INTEGER NOT NULL);
+             INSERT INTO imported VALUES ('sticky-1', 1, 7);
+             INSERT INTO settings VALUES ('layer.monitor', '2');"
+        );
+        for (name, schema) in [("original", original.to_owned()), ("middle", middle)] {
+            let path = dir.join(format!("{name}.db"));
+            {
+                let conn = Connection::open(&path).unwrap();
+                conn.execute_batch(&schema).unwrap();
+                conn.execute_batch(
+                    "INSERT INTO cards (kind, title, body, tags, x, y, w, h, created_at, updated_at, last_viewed_at)
+                     VALUES ('note', 'Покупки', 'молоко и хлеб', 'дом', 10, 20, 280, 150, 1, 2, 3),
+                            ('idea', '', 'приложение для заметок', '', 0, 0, 280, 150, 4, 5, 6);",
+                )
+                .unwrap();
+                assert_eq!(schema_version(&conn), 0);
+            }
+            let store = Store::open_at(path.clone()).unwrap();
+            assert_latest_schema(&store.conn);
+            let first = store.card(1).unwrap().unwrap();
+            assert_eq!((first.title.as_str(), first.body.as_str()), ("Покупки", "молоко и хлеб"));
+            assert_eq!(first.tags, ["дом"]);
+            assert_eq!(first.pos, egui::pos2(10.0, 20.0));
+            assert_eq!(first.placement, Placement::Manual);
+            assert_eq!(store.card(2).unwrap().unwrap().kind, Kind::Idea);
+            // The index built from rows that predate it.
+            assert_eq!(find(&store, "молоко"), ["Покупки|молоко и хлеб"]);
+            if name == "middle" {
+                assert_eq!(store.setting("layer.monitor").as_deref(), Some("2"));
+                let reviewed: i64 = store
+                    .conn
+                    .query_row("SELECT reviewed FROM imported WHERE source_id='sticky-1'", [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(reviewed, 0);
+            }
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn database_of_a_newer_build_is_not_opened() {
+        let (store, dir) = temp_store("schema-newer");
+        add(&store, "из будущего");
+        store
+            .conn
+            .pragma_update(None, "user_version", migrations::LATEST + 1)
+            .unwrap();
+        drop(store);
+        let Err(error) = Store::open_at(dir.join("t.db")) else {
+            panic!("a newer schema must not open");
+        };
+        assert!(error.to_string().contains("более новой версией Ebb"), "{error}");
+        // Left as it was.
+        let conn = Connection::open(dir.join("t.db")).unwrap();
+        assert_eq!(schema_version(&conn), migrations::LATEST + 1);
+        let cards: i64 = conn
+            .query_row("SELECT count(*) FROM cards", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cards, 1);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reopening_a_current_database_changes_nothing() {
+        let (store, dir) = temp_store("schema-reopen");
+        let card = add(&store, "заметка");
+        drop(store);
+        for _ in 0..2 {
+            let store = Store::open_at(dir.join("t.db")).unwrap();
+            assert_latest_schema(&store.conn);
+            assert_eq!(store.card(card.id).unwrap().unwrap().body, card.body);
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 

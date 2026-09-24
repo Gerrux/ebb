@@ -26,7 +26,8 @@ foreach ($v in $parsed) { Run $v $warm }
 for ($i = 1; $i -le $Runs; $i++) { foreach ($v in $parsed) { Run $v $Out; Start-Sleep -Milliseconds 400 } }
 # The header comes from the first row ever written: list the newest build first when
 # comparing against older builds that write fewer columns.
-$cols = 'proc_ms','ws_first','priv_first','ws_idle','priv_idle','cpu_idle_ms','latency_ms','ws_capture','priv_capture','search_latency_ms','ws_search','priv_search'
+$cols = 'proc_ms','ws_first','priv_first','ws_idle','priv_idle','cpu_idle_ms','latency_ms','shown_ms','ws_capture','priv_capture','search_latency_ms','search_shown_ms','ws_search','priv_search'
+# (shown_ms / search_shown_ms are the last two CSV columns; listed next to their latencies here for reading.)
 Import-Csv $Out | Group-Object label | ForEach-Object {
     $o = [ordered]@{ variant = $_.Name; n = $_.Count }
     foreach ($col in $cols) {
