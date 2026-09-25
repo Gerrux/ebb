@@ -22,6 +22,9 @@ const FOOTER_H: f32 = 20.0;
 const META_H: f32 = 20.0;
 /// How long the copy button shows its check mark.
 pub(super) const COPIED_FOR: Duration = Duration::from_millis(1500);
+/// How far past the layer's edge the pointer carries a card before it leaves
+/// the layer (the card itself stops at the edge).
+const PULL_OUT: f32 = 24.0;
 /// "Позже" on a card: days until it comes back.
 const SNOOZE_DAYS: [i64; 4] = [1, 3, 7, 30];
 
@@ -32,7 +35,13 @@ pub(super) enum Action {
     Moved,
     TogglePin,
     Copy,
-    Detach(Pos2),
+    /// Being dragged with the pointer past the layer's edge: off the layer, into
+    /// its own window at `at` (layer coordinates), still held at `grab` from its
+    /// top left. Sent every frame while the pointer is out there.
+    Detach {
+        at: Pos2,
+        grab: Vec2,
+    },
     Duplicate,
     Archive,
     Delete,
@@ -571,7 +580,6 @@ pub(super) fn card_ui(
         _ => Vec::new(),
     };
     let mut snapped: Option<card::Snapped> = None;
-    let detach_id = id.with("detach");
     let resizing = resize
         .filter(|(_, h)| !window_drag && h.dragged())
         .map(|(s, h)| (*s, h.drag_delta()));
@@ -584,14 +592,18 @@ pub(super) fn card_ui(
         let raw = match resizing {
             None => {
                 let moved = start.translate(total);
-                let dragged_out = moved.min.x < 0.0
-                    || moved.min.y < 0.0
-                    || moved.max.x > area.x
-                    || moved.max.y > area.y;
-                if dragged_out {
-                    ui.data_mut(|d| d.insert_temp(detach_id, moved.min));
-                } else {
-                    ui.data_mut(|d| d.remove::<Pos2>(detach_id));
+                // The card stops at the layer's edge; the pointer carrying it well
+                // past that pulls it off the layer, into its own window, while the
+                // drag goes on. Pressed against an edge to line it up, it stays.
+                if let Some(p) = ui.input(|i| i.pointer.latest_pos()) {
+                    let p = p - origin.to_vec2();
+                    let layer = Rect::from_min_size(Pos2::ZERO, area).expand(PULL_OUT);
+                    if !layer.contains(p) {
+                        out.push(Action::Detach {
+                            at: moved.min,
+                            grab: p - moved.min,
+                        });
+                    }
                 }
                 let min = pos2(
                     moved.min.x.clamp(0.0, (area.x - moved.width()).max(0.0)),
@@ -615,9 +627,6 @@ pub(super) fn card_ui(
         card.size = s.rect.size();
         snapped = Some(s);
     }
-    let detached = (!window_drag && drag.drag_stopped())
-        .then(|| ui.data(|d| d.get_temp::<Pos2>(detach_id)))
-        .flatten();
     let stopped_resize = resize
         .filter(|(_, h)| !window_drag && h.drag_stopped())
         .map(|(s, _)| *s);
@@ -656,11 +665,7 @@ pub(super) fn card_ui(
         card.pos = rect.min;
         card.size = rect.size();
         ui.data_mut(|d| d.remove::<(Rect, Vec2)>(raw_id));
-        ui.data_mut(|d| d.remove::<Pos2>(detach_id));
         out.push(Action::Moved);
-    }
-    if let Some(pos) = detached {
-        out.push(Action::Detach(pos));
     }
     if !window_drag && drag.dragged() {
         ui.ctx().set_cursor_icon(CursorIcon::Grabbing);

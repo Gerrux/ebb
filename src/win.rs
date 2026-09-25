@@ -13,7 +13,7 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromPoint,
+    MonitorFromPoint, ScreenToClient,
 };
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardSequenceNumber, OpenClipboard,
@@ -28,9 +28,10 @@ use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindowLongPtrW, HWND_BOTTOM, IsWindowVisible,
-    MONITORINFOF_PRIMARY, SET_WINDOW_POS_FLAGS, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WINDOWPOS,
-    WM_ACTIVATEAPP, WM_NCCALCSIZE, WM_STYLECHANGING, WM_WINDOWPOSCHANGING, WS_BORDER, WS_DLGFRAME,
+    MONITORINFOF_PRIMARY, PostMessageW, SET_WINDOW_POS_FLAGS, STYLESTRUCT, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos,
+    WINDOWPOS, WM_ACTIVATEAPP, WM_EXITSIZEMOVE, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_STYLECHANGING,
+    WM_WINDOWPOSCHANGING, WS_BORDER, WS_DLGFRAME,
     WS_EX_APPWINDOW,
     WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_LAYERED, WS_EX_STATICEDGE, WS_EX_TOOLWINDOW,
     WS_EX_WINDOWEDGE, WS_SYSMENU,
@@ -587,6 +588,100 @@ pub fn monitor_of(raw: isize) -> Option<Monitor> {
     monitors().into_iter().find(|m| m.handle == handle)
 }
 
+/// The cursor is on a different monitor than the window: a card dragged there
+/// leaves the layer.
+pub fn cursor_on_other_monitor(raw: isize) -> bool {
+    use windows::Win32::Graphics::Gdi::MonitorFromWindow;
+    let mut pt = POINT::default();
+    unsafe {
+        if GetCursorPos(&mut pt).is_err() {
+            return false;
+        }
+        MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
+            != MonitorFromWindow(hwnd(raw), MONITOR_DEFAULTTONEAREST)
+    }
+}
+
+/// The primary (usually left) mouse button is held down right now.
+pub fn primary_button_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
+    // GetAsyncKeyState sees the physical buttons, not what they're mapped to.
+    let key = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 {
+        VK_RBUTTON
+    } else {
+        VK_LBUTTON
+    };
+    unsafe { GetAsyncKeyState(key.0 as i32) as u16 & 0x8000 != 0 }
+}
+
+/// Windows moved by [`begin_move`] whose move loop hasn't ended yet, and those
+/// whose loop has ended but nobody asked about it ([`take_move_done`]).
+static MOVES: std::sync::Mutex<Vec<(isize, bool)>> = std::sync::Mutex::new(Vec::new());
+
+/// Puts the window so that `grab` (physical pixels from its top left) is under
+/// the cursor; the cursor's position, if known.
+pub fn place_under_cursor(raw: isize, grab: (i32, i32)) -> Option<POINT> {
+    let mut pt = POINT::default();
+    unsafe {
+        GetCursorPos(&mut pt).ok()?;
+        let _ = SetWindowPos(
+            hwnd(raw),
+            None,
+            pt.x - grab.0,
+            pt.y - grab.1,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+    Some(pt)
+}
+
+/// Hands a held button over to the system's move loop for this window, as a
+/// press on a caption would: the window follows the cursor until the button is
+/// released. It's first put under the cursor (see [`place_under_cursor`]).
+/// Needs the BORDERLESS window rule, which notes the loop's end for
+/// [`take_move_done`].
+///
+/// Unlike winit's `drag_window`, this works for a window that never got the
+/// press (it was made mid-drag) and doesn't have the focus yet.
+pub fn begin_move(raw: isize, grab: (i32, i32)) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+    use windows::Win32::UI::WindowsAndMessaging::{HTCAPTION, WM_NCLBUTTONDOWN};
+    let Some(pt) = place_under_cursor(raw, grab) else {
+        return;
+    };
+    {
+        let mut moves = MOVES.lock().unwrap();
+        moves.retain(|(h, _)| *h != raw);
+        moves.push((raw, false));
+    }
+    unsafe {
+        // The window that got the press (the layer) holds the capture.
+        let _ = ReleaseCapture();
+        let points = (pt.x as u16 as u32 | (pt.y as u16 as u32) << 16) as isize;
+        let _ = PostMessageW(
+            Some(hwnd(raw)),
+            WM_NCLBUTTONDOWN,
+            WPARAM(HTCAPTION as usize),
+            LPARAM(points),
+        );
+    }
+}
+
+/// The move [`begin_move`] started for this window is over (true once): its
+/// loop has ended, or the button is up and the loop never started.
+pub fn take_move_done(raw: isize) -> bool {
+    let mut moves = MOVES.lock().unwrap();
+    let ended = moves.iter().any(|(h, done)| *h == raw && *done);
+    let done = ended || !primary_button_down();
+    if done {
+        moves.retain(|(h, _)| *h != raw);
+    }
+    done
+}
+
 /// Finds one of this process' windows by a Rust title string.
 pub fn find_own_window_title(title: &str) -> Option<isize> {
     let title: Vec<u16> = title.encode_utf16().chain([0]).collect();
@@ -1010,6 +1105,21 @@ unsafe extern "system" fn subclass_proc(
             // card owns all of its chrome, so let the client area fill the window.
             WM_NCCALCSIZE if flags & BORDERLESS != 0 && wparam.0 != 0 => {
                 return LRESULT(0);
+            }
+            // The end of a move loop begin_move started: winit didn't start it, so
+            // it reports nothing; a mouse move wakes egui to ask take_move_done.
+            WM_EXITSIZEMOVE if flags & BORDERLESS != 0 => {
+                let raw = hwnd.0 as isize;
+                let mut moves = MOVES.lock().unwrap();
+                if let Some(m) = moves.iter_mut().find(|(h, _)| *h == raw) {
+                    m.1 = true;
+                    drop(moves);
+                    let mut pt = POINT::default();
+                    if GetCursorPos(&mut pt).is_ok() && ScreenToClient(hwnd, &mut pt).as_bool() {
+                        let at = (pt.x as u16 as u32 | (pt.y as u16 as u32) << 16) as isize;
+                        let _ = PostMessageW(Some(hwnd), WM_MOUSEMOVE, WPARAM(0), LPARAM(at));
+                    }
+                }
             }
             WM_STYLECHANGING => {
                 let s = &mut *(lparam.0 as *mut STYLESTRUCT);

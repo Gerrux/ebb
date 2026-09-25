@@ -2,12 +2,14 @@
 //!
 //! `EbbApp` and its event loop are here; its parts live in the submodules:
 //! `layer` (window, curtain, menu), `cards` (the cards on the layer and what
-//! their actions do), `toast`, and the widgets they draw with (`card_ui`,
-//! `card_text`, `paint`).
+//! their actions do), `floating` (cards pulled off the layer into their own
+//! windows), `toast`, and the widgets they draw with (`card_ui`, `card_text`,
+//! `paint`).
 
 mod card_text;
 mod card_ui;
 mod cards;
+mod floating;
 mod layer;
 mod paint;
 mod toast;
@@ -16,7 +18,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use egui::{
-    CornerRadius, Id, Key, Modifiers, Pos2, Rect, Ui, UiBuilder, Vec2, ViewportBuilder,
+    CornerRadius, Key, Modifiers, Pos2, Rect, Ui, UiBuilder, Vec2, ViewportBuilder,
     ViewportCommand, ViewportId, pos2, vec2,
 };
 
@@ -34,7 +36,6 @@ use crate::win::{self, Backdrop};
 
 pub(crate) use paint::{PANEL_APPEAR, glass_panel, paint_marker, panel_ease};
 
-use card_ui::{Action as CardAction, card_ui};
 use cards::{PromptFill, TagInput};
 use layer::{CURTAIN_DROP, TAB_SIZE, place_tab};
 use toast::Toast;
@@ -122,8 +123,12 @@ pub struct EbbApp {
     leaving: Vec<(Card, Instant)>,
     /// Cards currently shown in their own desktop windows.
     floating: Vec<Card>,
-    /// Desktop-window events are delivered from their viewport callbacks.
-    floating_events: Arc<Mutex<Vec<FloatingEvent>>>,
+    /// Between the layer and those windows (see `floating`).
+    floating_shared: Arc<Mutex<floating::Shared>>,
+    /// A card just pulled off the layer, drawn on it until its window takes over.
+    pulled: Option<Card>,
+    /// The layer is owed the release of the button a card's window took over.
+    release_pointer: bool,
 
     sticky: StickyImport,
 
@@ -137,12 +142,6 @@ pub struct EbbApp {
     /// The pick running on its own thread: the cards it brought back, or None
     /// when there was nothing to do (already made today, or it failed).
     rediscover_job: Option<mpsc::Receiver<Option<Vec<i64>>>>,
-}
-
-enum FloatingEvent {
-    Dropped(i64, Pos2, bool),
-    Resized(i64, Pos2, Vec2),
-    Action(i64, CardAction),
 }
 
 impl EbbApp {
@@ -281,7 +280,9 @@ impl EbbApp {
             appearing: Vec::new(),
             leaving: Vec::new(),
             floating,
-            floating_events: Arc::default(),
+            floating_shared: Arc::default(),
+            pulled: None,
+            release_pointer: false,
             sticky: StickyImport::default(),
             show_debug: false,
             autostarted,
@@ -401,6 +402,12 @@ impl EbbApp {
     /// Whether the card's change reached the database.
     fn save(&mut self, idx: usize) -> bool {
         let saved = self.store.save(&self.cards[idx]);
+        self.report(saved, "сохранить изменения").is_some()
+    }
+
+    /// `save` for a card that isn't (or isn't only) on the layer.
+    fn save_card(&mut self, card: &Card) -> bool {
+        let saved = self.store.save(card);
         self.report(saved, "сохранить изменения").is_some()
     }
 
@@ -600,137 +607,6 @@ impl EbbApp {
         );
     }
 
-    fn floating_viewports(&self, ui: &Ui) {
-        let layer_rect = ui
-            .input(|i| i.viewport().outer_rect)
-            .map(|r| Rect::from_min_size(r.min, self.full_area));
-        let layer_accepts_drop = self.layer_visible && !self.collapsed;
-        let style = self.card_style;
-        for card in &self.floating {
-            let (card, events) = (card.clone(), self.floating_events.clone());
-            let title = format!("Ebb Note {}", card.id);
-            let created = win::find_own_window_title(&title).is_none();
-            let mut viewport = ViewportBuilder::default()
-                .with_title(title.clone())
-                .with_decorations(false)
-                .with_transparent(true)
-                .with_resizable(!card.pinned && !card.collapsed)
-                .with_min_inner_size(MIN_SIZE)
-                .with_taskbar(false);
-            if created {
-                viewport = viewport
-                    .with_inner_size(card.shown_size())
-                    .with_position(card.pos);
-            }
-            ui.ctx().show_viewport_deferred(
-                ViewportId::from_hash_of(("floating-card", card.id)),
-                viewport,
-                move |ui, _class| {
-                    let hwnd = win::find_own_window_title(&title);
-                    if let Some(h) = hwnd {
-                        win::set_window_rounded(h, false);
-                        win::install_window_rules(h, win::BORDERLESS);
-                    }
-                    let full = ui.max_rect();
-                    let original_size = card.size;
-                    let mut card = card.clone();
-                    card.pos = Pos2::ZERO;
-                    let viewport_rect = ui.input(|i| i.viewport().outer_rect);
-                    let scale = ui.input(|i| i.viewport().native_pixels_per_point);
-                    let native_resize_id = Id::new(("card", card.id)).with("window-resize");
-                    let native_resizing = ui
-                        .data(|data| data.get_temp::<bool>(native_resize_id))
-                        .unwrap_or(false);
-                    if native_resizing && !card.collapsed {
-                        card.size = full.size();
-                    }
-                    let hovered = ui
-                        .input(|i| i.pointer.hover_pos())
-                        .is_some_and(|p| full.contains(p));
-                    let actions = card_ui(
-                        ui,
-                        full.min,
-                        full.size(),
-                        &mut card,
-                        hovered,
-                        None,
-                        false,
-                        None,
-                        false,
-                        None,
-                        style,
-                        true,
-                    );
-                    let desired_size = card.shown_size();
-                    let native_size = ui
-                        .input(|i| i.viewport().inner_rect)
-                        .map(|rect| rect.size());
-                    let safe = viewport_rect.zip(scale).map(|(rect, scale)| {
-                        let desired = Rect::from_min_size(rect.min, desired_size);
-                        hwnd.map_or_else(
-                            || win::clamp_to_work_area(desired, scale),
-                            |h| win::clamp_to_work_area_on(h, desired, scale),
-                        )
-                    });
-                    if let (Some(rect), Some(safe)) = (viewport_rect, safe) {
-                        if safe != rect.min {
-                            ui.ctx()
-                                .send_viewport_cmd(ViewportCommand::OuterPosition(safe));
-                        }
-                    }
-                    if card.size != original_size {
-                        if !native_resizing && native_size != Some(desired_size) {
-                            ui.ctx()
-                                .send_viewport_cmd(ViewportCommand::InnerSize(desired_size));
-                        }
-                        if let Some(safe) = safe {
-                            events
-                                .lock()
-                                .unwrap()
-                                .push(FloatingEvent::Resized(card.id, safe, card.size));
-                            ui.ctx().request_repaint_of(ViewportId::ROOT);
-                        }
-                    }
-                    for action in actions {
-                        match action {
-                            CardAction::WindowDragStopped => {
-                                if let Some((rect, scale)) = ui.input(|i| {
-                                    i.viewport()
-                                        .outer_rect
-                                        .zip(i.viewport().native_pixels_per_point)
-                                }) {
-                                    let safe = win::clamp_to_work_area(
-                                        Rect::from_min_size(rect.min, card.shown_size()),
-                                        scale,
-                                    );
-                                    let over_layer = layer_accepts_drop
-                                        && layer_rect.is_some_and(|target| {
-                                            target.contains(
-                                                Rect::from_min_size(safe, card.shown_size())
-                                                    .center(),
-                                            )
-                                        });
-                                    events
-                                        .lock()
-                                        .unwrap()
-                                        .push(FloatingEvent::Dropped(card.id, safe, over_layer));
-                                    ui.ctx().request_repaint_of(ViewportId::ROOT);
-                                }
-                            }
-                            action => {
-                                events
-                                    .lock()
-                                    .unwrap()
-                                    .push(FloatingEvent::Action(card.id, action));
-                                ui.ctx().request_repaint_of(ViewportId::ROOT);
-                            }
-                        }
-                    }
-                },
-            );
-        }
-    }
-
     /// Shows a card on the layer: brings it to front, or restores it from the archive
     /// into a free slot. Counts as viewed.
     fn open_card(&mut self, ctx: &egui::Context, id: i64) {
@@ -812,181 +688,7 @@ impl EbbApp {
 
 impl eframe::App for EbbApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let mut events = self.floating_events.lock().unwrap();
-        for event in events.drain(..) {
-            match event {
-                FloatingEvent::Resized(id, pos, size) => {
-                    if let Some(card) = self.floating.iter_mut().find(|c| c.id == id) {
-                        card.pos = pos;
-                        card.size = size;
-                        let _ = self.store.save(card);
-                    }
-                }
-                FloatingEvent::Dropped(id, pos, over_layer) => {
-                    if over_layer {
-                        if let Some(idx) = self.floating.iter().position(|c| c.id == id) {
-                            let mut card = self.floating.remove(idx);
-                            let origin = ctx
-                                .input(|i| i.viewport().outer_rect.map_or(Pos2::ZERO, |r| r.min));
-                            let max = self.full_area - card.size;
-                            card.pos = pos2(
-                                (pos.x - origin.x).clamp(0.0, max.x.max(0.0)),
-                                (pos.y - origin.y).clamp(0.0, max.y.max(0.0)),
-                            );
-                            card.placement = Placement::Manual;
-                            let _ = self.store.save(&card);
-                            self.cards.push(card);
-                        }
-                    } else if let Some(card) = self.floating.iter_mut().find(|c| c.id == id) {
-                        card.pos = pos;
-                        let _ = self.store.save(card);
-                    }
-                }
-                FloatingEvent::Action(id, action) => {
-                    let Some(idx) = self.floating.iter().position(|c| c.id == id) else {
-                        continue;
-                    };
-                    match action {
-                        CardAction::Front | CardAction::Moved | CardAction::WindowDragStopped => {
-                            let _ = self.store.touch(id);
-                        }
-                        CardAction::Copy => {
-                            let c = &self.floating[idx];
-                            if c.kind == card::Kind::Private {
-                                if let Ok(Some(secret)) = self.store.secret(id) {
-                                    let _ = win::copy_private(&secret);
-                                }
-                            } else {
-                                let text = if c.title.is_empty() {
-                                    c.body.clone()
-                                } else {
-                                    format!("{}\n{}", c.title, c.body)
-                                };
-                                ctx.copy_text(crate::rich_text::strip_markup(&text));
-                            }
-                            let _ = self.store.touch(id);
-                        }
-                        CardAction::Duplicate => {
-                            let src = self.floating[idx].clone();
-                            let body = if src.kind == card::Kind::Private {
-                                match self.store.secret(src.id) {
-                                    Ok(Some(secret)) => secret,
-                                    _ => continue,
-                                }
-                            } else {
-                                src.body.clone()
-                            };
-                            let parsed = card::Parsed {
-                                kind: src.kind,
-                                title: src.title.clone(),
-                                body,
-                                tags: src.tags.clone(),
-                            };
-                            if let Ok(mut copy) = self.store.insert(&parsed, Pos2::ZERO) {
-                                copy.size = src.size;
-                                copy.tint = src.tint;
-                                copy.pos = src.pos + vec2(24.0, 24.0);
-                                copy.placement = Placement::Desktop;
-                                if self.store.save(&copy).is_ok() {
-                                    self.floating.push(copy);
-                                }
-                            }
-                        }
-                        CardAction::TogglePin => {
-                            let c = &mut self.floating[idx];
-                            c.pinned = !c.pinned;
-                            let _ = self.store.save(c);
-                        }
-                        CardAction::SetTint(tint) => {
-                            self.floating[idx].tint = tint;
-                            let c = &self.floating[idx];
-                            let _ = self.store.save(c);
-                        }
-                        CardAction::SetKind(kind) => {
-                            if self.store.set_kind(id, kind).is_ok()
-                                && let Ok(Some(stored)) = self.store.card(id)
-                            {
-                                self.floating[idx].kind = stored.kind;
-                                self.floating[idx].title = stored.title;
-                                self.floating[idx].body = stored.body;
-                            }
-                        }
-                        CardAction::ToggleCollapse => {
-                            let collapsed = !self.floating[idx].collapsed;
-                            if self.store.set_collapsed(id, collapsed).is_ok() {
-                                self.floating[idx].collapsed = collapsed;
-                            }
-                        }
-                        CardAction::SetIdeaStatus(status) => {
-                            if self.store.set_idea_status(id, status).is_ok() {
-                                self.floating[idx].idea_status = status;
-                            }
-                        }
-                        CardAction::ToggleCheck(line) => {
-                            let text = card::toggle_check(&self.floating[idx].body, line);
-                            self.floating[idx].body = text;
-                            let c = &self.floating[idx];
-                            let _ = self.store.save(c);
-                        }
-                        CardAction::RemoveTag(tag) => {
-                            self.floating[idx].body =
-                                card::without_tag(&self.floating[idx].body, &tag);
-                            self.floating[idx].tags = card::tags_of(
-                                &crate::rich_text::strip_markup(&self.floating[idx].body),
-                            );
-                            let c = &self.floating[idx];
-                            let _ = self.store.save(c);
-                        }
-                        CardAction::OpenLink => {
-                            if let Some(url) = card::first_url(&self.floating[idx].body) {
-                                win::open_url(url);
-                            }
-                        }
-                        CardAction::Archive | CardAction::Done => {
-                            let c = &mut self.floating[idx];
-                            c.archived = true;
-                            c.placement = Placement::Archive;
-                            if self.store.save(c).is_ok() {
-                                self.floating.remove(idx);
-                            }
-                        }
-                        CardAction::Delete => {
-                            if self.store.delete(id).is_ok() {
-                                self.floating.remove(idx);
-                            }
-                        }
-                        CardAction::Snooze(days) => {
-                            if self
-                                .store
-                                .snooze(
-                                    id,
-                                    resurface::snooze_until(
-                                        resurface::unix_now(),
-                                        crate::search::local_offset_secs(),
-                                        days,
-                                    ),
-                                )
-                                .is_ok()
-                            {
-                                self.floating.remove(idx);
-                            }
-                        }
-                        CardAction::Keep => {
-                            let mut card = self.floating.remove(idx);
-                            card.placement = Placement::Manual;
-                            card.pos = card::free_slot_for(&self.cards, card.size, self.full_area);
-                            let _ = self.store.save(&card);
-                            self.cards.push(card);
-                        }
-                        CardAction::Detach(_)
-                        | CardAction::StartEdit
-                        | CardAction::Reveal
-                        | CardAction::AddTag(_) => {}
-                    }
-                }
-            }
-        }
-        drop(events);
+        self.floating_events(ctx);
         // Runs even while the layer is hidden, so tray and hotkey events work then too.
         let mut pressed = None;
         for event in self.shell.take_events() {
@@ -1336,6 +1038,23 @@ impl eframe::App for EbbApp {
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0; 4]
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // A card's window took over the button pressed on the layer; its release
+        // went to that window's move loop.
+        if raw_input.viewport_id == ViewportId::ROOT && std::mem::take(&mut self.release_pointer) {
+            let pos = ctx
+                .input_for(ViewportId::ROOT, |i| i.pointer.latest_pos())
+                .unwrap_or_default();
+            raw_input.events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            });
+            raw_input.events.push(egui::Event::PointerGone);
+        }
     }
 }
 

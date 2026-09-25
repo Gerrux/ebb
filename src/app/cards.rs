@@ -7,7 +7,7 @@ use egui::{
     CornerRadius, Id, Key, Modifiers, Pos2, Rect, RichText, Stroke, StrokeKind, Ui, Vec2, vec2,
 };
 
-use crate::card::{self, Kind, Placement};
+use crate::card::{self, Card, Kind, Placement};
 use crate::resurface;
 use crate::rich_text;
 use crate::theme;
@@ -16,9 +16,10 @@ use crate::win;
 use super::EbbApp;
 use super::card_text::edit_text;
 use super::card_ui::{Action, HEADER_H, card_ui, mark_copied};
+use super::floating::Handoff;
 use super::toast::{Toast, Undo};
 
-const REVEAL_FOR: Duration = Duration::from_secs(5);
+pub(super) const REVEAL_FOR: Duration = Duration::from_secs(5);
 const HIGHLIGHT_FOR: Duration = Duration::from_millis(2500);
 const CARD_APPEAR: Duration = Duration::from_millis(220);
 const CARD_LEAVE: Duration = Duration::from_millis(160);
@@ -31,6 +32,91 @@ pub(super) struct TagInput {
     text: String,
     focused: bool,
     opened_pass: u64,
+}
+
+impl TagInput {
+    /// Opened in the pass `opened_pass` of the viewport it's drawn in.
+    pub(super) fn new(card: i64, at: Pos2, opened_pass: u64) -> Self {
+        Self {
+            card,
+            at,
+            text: String::new(),
+            focused: false,
+            opened_pass,
+        }
+    }
+
+    pub(super) fn card(&self) -> i64 {
+        self.card
+    }
+
+    pub(super) fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+pub(super) enum TagOutcome {
+    Open,
+    Chosen(String),
+    Cancelled,
+}
+
+/// The field under a card's "+" chip: type a tag and Enter, or pick one of
+/// `suggestions`; Esc or a click elsewhere closes it.
+pub(super) fn tag_field(ui: &mut Ui, input: &mut TagInput, suggestions: &[String]) -> TagOutcome {
+    let (mut chosen, mut cancel) = (None, false);
+    // Kept inside the viewport: in a card's own window, the room under the chip
+    // may be too little.
+    let area = egui::Area::new(Id::new("tag-input"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(input.at + vec2(0.0, 4.0))
+        .constrain(true)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style())
+                .inner_margin(8)
+                .show(ui, |ui| {
+                    ui.set_width(200.0);
+                    let field = egui::TextEdit::singleline(&mut input.text)
+                        .id(Id::new("tag-input-field"))
+                        .hint_text("новый тег")
+                        .desired_width(f32::INFINITY);
+                    let resp = ui.add(field);
+                    if !input.focused {
+                        resp.request_focus();
+                        input.focused = true;
+                    }
+                    if resp.lost_focus()
+                        && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter))
+                    {
+                        chosen = card::normalize_tag(&input.text);
+                        cancel = chosen.is_none();
+                    }
+                    if !suggestions.is_empty() {
+                        ui.add_space(4.0);
+                    }
+                    for tag in suggestions {
+                        let button = egui::Button::new(RichText::new(format!("#{tag}")).size(13.5))
+                            .min_size(vec2(ui.available_width(), 0.0));
+                        if ui.add(button).clicked() {
+                            chosen = Some(tag.clone());
+                        }
+                    }
+                });
+        });
+    let cancelled = cancel
+        || ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        || (ui.ctx().cumulative_pass_nr() > input.opened_pass
+            && ui.input(|i| {
+                i.pointer.any_pressed()
+                    && i.pointer
+                        .interact_pos()
+                        .is_some_and(|p| !area.response.rect.contains(p))
+            }));
+    match chosen {
+        Some(tag) => TagOutcome::Chosen(tag),
+        None if cancelled => TagOutcome::Cancelled,
+        None => TagOutcome::Open,
+    }
 }
 
 pub(super) struct PromptFill {
@@ -62,71 +148,82 @@ pub(super) fn note_pos_at(at: Pos2, area: Vec2) -> Pos2 {
 }
 
 impl EbbApp {
+    /// Closes the editor, on the layer or in a card's own window, saving what was typed.
     pub(super) fn commit_edit(&mut self) {
+        self.commit_floating_edit();
         let Some((id, buf)) = self.editing.take() else {
             return;
         };
         let Some(idx) = self.cards.iter().position(|c| c.id == id) else {
             return;
         };
-        if self.cards[idx].kind == Kind::Private {
+        let mut c = self.cards[idx].clone();
+        if self.write_edit(&mut c, &buf) {
+            self.cards[idx] = c;
+            return;
+        }
+        let card = self.cards.remove(idx);
+        self.leaving.push((card, Instant::now()));
+        self.appearing.retain(|(aid, _)| *aid != id);
+        if self.active == Some(id) {
+            self.active = None;
+        }
+        self.library.lock().unwrap().invalidate();
+        self.bar.lock().unwrap().invalidate();
+    }
+
+    /// Puts the editor's text into the card and saves it. False when the card is
+    /// gone: a note closed with nothing ever written in it.
+    pub(super) fn write_edit(&mut self, c: &mut Card, buf: &str) -> bool {
+        let id = c.id;
+        if c.kind == Kind::Private {
             // Two fields, no markup: the first line is the label, shown in the open
             // as typed; the rest is the secret, stored verbatim and encrypted by save.
-            let (label, secret) = card::private_edit_parts(&buf);
-            let c = &mut self.cards[idx];
+            let (label, secret) = card::private_edit_parts(buf);
             c.title = label;
             // Tags from the label only: the tags column is plaintext.
             c.tags = card::tags_of(&c.title);
             c.body = secret;
             self.tag_counts = None;
-            let empty = self.cards[idx].body.is_empty();
-            self.save(idx);
+            let empty = c.body.is_empty();
+            self.save_card(c);
             if empty {
                 // Emptied in the editor: the old value must not stay behind to show or copy.
                 let cleared = self.store.clear_secret(id);
                 self.report(cleared, "стереть секрет");
             }
-            // On the layer only the label stays in memory.
-            self.cards[idx].body.clear();
-            return;
+            // Out of the database only the label stays in memory.
+            c.body.clear();
+            return true;
         }
-        let buf = rich_text::trim(&buf);
-        let c = &self.cards[idx];
+        let buf = rich_text::trim(buf);
         // A note closed with nothing ever written in it (a new empty note) is
         // no card at all: gone for good, not to the trash, without a toast.
         if buf.is_empty() && c.title.is_empty() && c.body.is_empty() {
             let discarded = self.store.discard_empty(id);
             // Not deleted: the database has text this copy doesn't; left as it is there.
-            if self.report(discarded, "убрать пустую заметку") == Some(true) {
-                let card = self.cards.remove(idx);
-                self.leaving.push((card, Instant::now()));
-                self.appearing.retain(|(aid, _)| *aid != id);
-                if self.active == Some(id) {
-                    self.active = None;
-                }
-                self.library.lock().unwrap().invalidate();
-                self.bar.lock().unwrap().invalidate();
-            }
-            return;
+            return self.report(discarded, "убрать пустую заметку") != Some(true);
         }
-        let c = &mut self.cards[idx];
         // Saved as written; an old separate title becomes the first line of the text.
         c.title.clear();
         // Tags come from the visible text: "**#idea**" is the tag "idea".
         c.tags = card::tags_of(&rich_text::strip_markup(&buf));
         self.tag_counts = None;
         c.body = buf;
-        self.save(idx);
-        if self.cards[idx].kind == Kind::Private && self.cards[idx].body.is_empty() {
-            // Emptied in the editor: the old value must not stay behind to show or copy.
-            let cleared = self.store.clear_secret(id);
-            self.report(cleared, "стереть секрет");
+        self.save_card(c);
+        true
+    }
+
+    /// The text a card's editor opens with; None if a Private value can't be read.
+    pub(super) fn edit_text_of(&self, c: &Card) -> Option<String> {
+        if c.kind != Kind::Private {
+            return Some(edit_text(c));
         }
-        if self.cards[idx].kind == Kind::Private {
-            // Encrypted by save; on the layer only the label stays in the open.
-            let c = &mut self.cards[idx];
-            c.title = card::private_parts(&c.title, &c.body).0;
-            c.body.clear();
+        // Without its value the editor would save the label as the secret.
+        match self.store.secret(c.id) {
+            Ok(Some(secret)) => Some(card::private_edit_text(&c.title, &secret)),
+            Ok(None) => Some(card::private_edit_text(&c.title, "")),
+            Err(_) => None,
         }
     }
 
@@ -188,7 +285,18 @@ impl EbbApp {
         change: impl FnOnce(&str) -> String,
     ) -> Option<(String, String)> {
         let idx = self.commit_edit_of_at(idx)?;
-        let c = &mut self.cards[idx];
+        let mut c = self.cards[idx].clone();
+        let old = self.retext(&mut c, change);
+        self.cards[idx] = c;
+        old
+    }
+
+    /// `retag` for any card, the editor already closed.
+    pub(super) fn retext(
+        &mut self,
+        c: &mut Card,
+        change: impl FnOnce(&str) -> String,
+    ) -> Option<(String, String)> {
         let old = (c.title.clone(), c.body.clone());
         let text = if c.title.is_empty() {
             c.body.clone()
@@ -198,8 +306,7 @@ impl EbbApp {
         c.title.clear();
         c.body = change(&text);
         c.tags = card::tags_of(&rich_text::strip_markup(&c.body));
-        if !self.save(idx) {
-            let c = &mut self.cards[idx];
+        if !self.save_card(c) {
             (c.title, c.body) = old;
             c.tags = card::tags_of(&rich_text::strip_markup(&text));
             return None;
@@ -210,8 +317,7 @@ impl EbbApp {
         Some(old)
     }
 
-    /// The field under a card's "+" chip: type a tag and Enter, or pick one of
-    /// the most used; Esc or a click elsewhere closes it.
+    /// The tag field for a card on the layer; see [`tag_field`].
     fn tag_input_ui(&mut self, ui: &mut Ui) {
         let Some(input) = &mut self.tag_input else {
             return;
@@ -229,57 +335,13 @@ impl EbbApp {
             &self.cards[idx].tags,
             6,
         );
-        let (mut chosen, mut cancel) = (None, false);
-        let area = egui::Area::new(Id::new("tag-input"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(input.at + vec2(0.0, 4.0))
-            .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style())
-                    .inner_margin(8)
-                    .show(ui, |ui| {
-                        ui.set_width(200.0);
-                        let field = egui::TextEdit::singleline(&mut input.text)
-                            .id(Id::new("tag-input-field"))
-                            .hint_text("новый тег")
-                            .desired_width(f32::INFINITY);
-                        let resp = ui.add(field);
-                        if !input.focused {
-                            resp.request_focus();
-                            input.focused = true;
-                        }
-                        if resp.lost_focus()
-                            && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter))
-                        {
-                            chosen = card::normalize_tag(&input.text);
-                            cancel = chosen.is_none();
-                        }
-                        if !suggestions.is_empty() {
-                            ui.add_space(4.0);
-                        }
-                        for tag in &suggestions {
-                            let button =
-                                egui::Button::new(RichText::new(format!("#{tag}")).size(13.5))
-                                    .min_size(vec2(ui.available_width(), 0.0));
-                            if ui.add(button).clicked() {
-                                chosen = Some(tag.clone());
-                            }
-                        }
-                    });
-            });
-        let cancelled = cancel
-            || ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
-            || (ui.ctx().cumulative_pass_nr() > input.opened_pass
-                && ui.input(|i| {
-                    i.pointer.any_pressed()
-                        && i.pointer
-                            .interact_pos()
-                            .is_some_and(|p| !area.response.rect.contains(p))
-                }));
-        if let Some(tag) = chosen {
-            self.tag_input = None;
-            self.retag(idx, |text| card::with_tag(text, &tag));
-        } else if cancelled {
-            self.tag_input = None;
+        match tag_field(ui, input, &suggestions) {
+            TagOutcome::Open => {}
+            TagOutcome::Chosen(tag) => {
+                self.tag_input = None;
+                self.retag(idx, |text| card::with_tag(text, &tag));
+            }
+            TagOutcome::Cancelled => self.tag_input = None,
         }
     }
 
@@ -524,6 +586,22 @@ impl EbbApp {
             });
         }
 
+        // A card just pulled off the layer stays here, at the edge under the
+        // pointer, until its own window is up and has taken the drag over.
+        if let Some(stand_in) = &mut self.pulled {
+            if self.floating_shared.lock().unwrap().handoff_waiting(stand_in.id) {
+                let _ = card_ui(
+                    ui, origin, area, stand_in, true, None, false, None, true, None, style, false,
+                );
+            } else {
+                self.pulled = None;
+                // The system's move loop took the button's release: the layer
+                // never saw it, and would go on thinking the button is down.
+                self.release_pointer = true;
+                ui.ctx().request_repaint();
+            }
+        }
+
         if let Some((hid, t)) = self.highlighted {
             match self.cards.iter().find(|c| c.id == hid) {
                 Some(c) if t.elapsed() < HIGHLIGHT_FOR => {
@@ -664,14 +742,22 @@ impl EbbApp {
                         mark_copied(ui, c.id);
                     }
                 }
-                Action::Detach(pos) => {
+                Action::Detach { at, grab } => {
+                    // Only onto another monitor: over the layer, a card that left
+                    // it would be dropped straight back onto it.
+                    if detach.is_some() || !self.hwnd.is_some_and(win::cursor_on_other_monitor) {
+                        continue;
+                    }
                     let Some(idx) = self.commit_edit_of_at(idx) else {
                         continue;
                     };
-                    self.cards[idx].pos = desktop_origin + pos.to_vec2();
+                    let stand_in = self.cards[idx].clone();
+                    self.cards[idx].pos = desktop_origin + at.to_vec2();
                     self.cards[idx].placement = Placement::Desktop;
                     if self.save(idx) {
                         detach = Some(id);
+                        self.pulled = Some(stand_in);
+                        self.floating_shared.lock().unwrap().handoff = Some(Handoff::new(id, grab));
                     }
                 }
                 Action::Duplicate => {
@@ -756,19 +842,11 @@ impl EbbApp {
                     let Some(idx) = self.index_of(id) else {
                         continue;
                     };
-                    let c = &self.cards[idx];
-                    let _ = self.store.touch(c.id);
-                    let text = if c.kind == Kind::Private {
-                        // Without its value the editor would save the label as the secret.
-                        match self.store.secret(c.id) {
-                            Ok(Some(secret)) => card::private_edit_text(&c.title, &secret),
-                            Ok(None) => card::private_edit_text(&c.title, ""),
-                            Err(_) => continue,
-                        }
-                    } else {
-                        edit_text(c)
+                    let _ = self.store.touch(id);
+                    let Some(text) = self.edit_text_of(&self.cards[idx]) else {
+                        continue;
                     };
-                    self.editing = Some((c.id, text));
+                    self.editing = Some((id, text));
                     self.revealed = None;
                     self.revealed_text = None;
                 }
