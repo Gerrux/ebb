@@ -262,7 +262,20 @@ impl StickyImport {
                     ui.horizontal(|ui| {
                         if ui.button("Импортировать").clicked() {
                             let layer_monitor = layer.and_then(crate::win::monitor_of);
-                            let screen = sticky::Screen { layer: layer_monitor.as_ref(), pixels_per_point, area };
+                            // Once, on the click: each note is sized by its own monitor's DPI.
+                            let monitors: Vec<_> = crate::win::monitors()
+                                .into_iter()
+                                .map(|m| {
+                                    let scale = crate::win::monitor_scale(&m);
+                                    (m, scale)
+                                })
+                                .collect();
+                            let screen = sticky::Screen {
+                                layer: layer_monitor.as_ref(),
+                                pixels_per_point,
+                                area,
+                                monitors: &monitors,
+                            };
                             next = Some(Self::apply(offer, store, cards, &screen));
                         }
                         if ui.button("Не сейчас").clicked() {

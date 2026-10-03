@@ -147,6 +147,104 @@ pub(super) fn note_pos_at(at: Pos2, area: Vec2) -> Pos2 {
     )
 }
 
+/// A card of `size` (as shown) at `pos` on a layer of size `area`, after the
+/// layer shrank: brought fully inside, onto the grid, only along the axes where
+/// it sticks out (a card that fits is returned untouched). A side longer than
+/// the area is cut to it, but not below the minimum card size.
+pub(super) fn fit_in_area(pos: Pos2, size: Vec2, area: Vec2) -> (Pos2, Vec2) {
+    // Rounding in the window's size is no reason to move a card.
+    const SLACK: f32 = 0.5;
+    let axis = |v: f32, size: f32, room: f32, min: f32| {
+        let size = if size > room + SLACK { room.max(min) } else { size };
+        if v >= 0.0 && v + size <= room + SLACK {
+            return (v, size);
+        }
+        // The last grid line that still leaves room for the card; 0 if there is none.
+        let max = ((room - size) / NOTE_GRID).floor().max(0.0) * NOTE_GRID;
+        (((v / NOTE_GRID).round() * NOTE_GRID).clamp(0.0, max), size)
+    };
+    let (x, w) = axis(pos.x, size.x, area.x, card::MIN_SIZE.x);
+    let (y, h) = axis(pos.y, size.y, area.y, card::MIN_SIZE.y);
+    (Pos2::new(x, y), Vec2::new(w, h))
+}
+
+/// A card's stored position and size.
+pub(super) type Placed = (Pos2, Vec2);
+
+/// What fitting a card into a smaller layer displaced, so it can go back when the
+/// layer is big again (a passing small display mode must not squash cards for good).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Displaced {
+    pub(super) id: i64,
+    /// Where the card was before the fit.
+    pub(super) original: Placed,
+    /// Where the fit put it; if the card is still there, the user hasn't touched it.
+    pub(super) fitted: Placed,
+}
+
+/// A card on the layer as `refit` needs it.
+pub(super) struct FitCard {
+    pub(super) id: i64,
+    pub(super) pos: Pos2,
+    pub(super) size: Vec2,
+    pub(super) collapsed: bool,
+}
+
+/// Puts back what an earlier fit displaced where the user hasn't moved the card
+/// since, then fits every card into `area`. Returns each card's new stored
+/// position and size (in the order given) and the displaced list now. A card
+/// that was displaced and is displaced again keeps its first original.
+pub(super) fn refit(cards: &[FitCard], entries: &[Displaced], area: Vec2) -> (Vec<Placed>, Vec<Displaced>) {
+    let mut out = Vec::with_capacity(cards.len());
+    let mut displaced = Vec::new();
+    for c in cards {
+        let mut start = (c.pos, c.size);
+        if let Some(e) = entries.iter().find(|e| e.id == c.id)
+            && e.fitted == start
+        {
+            start = e.original;
+        }
+        // A collapsed card shows a header-high strip whatever its size says.
+        let shown = if c.collapsed { vec2(start.1.x, card::COLLAPSED_H) } else { start.1 };
+        let (pos, fitted) = fit_in_area(start.0, shown, area);
+        let size = vec2(fitted.x, if c.collapsed { start.1.y } else { fitted.y });
+        if (pos, size) != start {
+            displaced.push(Displaced { id: c.id, original: start, fitted: (pos, size) });
+        }
+        out.push((pos, size));
+    }
+    (out, displaced)
+}
+
+/// `id:x,y,w,h>x,y,w,h;…` (original, then fitted), the form kept in the
+/// `layer.displaced` setting.
+pub(super) fn encode_displaced(entries: &[Displaced]) -> String {
+    let rect = |(p, s): Placed| format!("{},{},{},{}", p.x, p.y, s.x, s.y);
+    entries
+        .iter()
+        .map(|e| format!("{}:{}>{}", e.id, rect(e.original), rect(e.fitted)))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// The inverse of [`encode_displaced`]; anything malformed reads as no entries.
+pub(super) fn decode_displaced(text: &str) -> Vec<Displaced> {
+    fn rect(s: &str) -> Option<Placed> {
+        let v: Vec<f32> = s.split(',').map(|n| n.parse().ok().filter(|f: &f32| f.is_finite())).collect::<Option<_>>()?;
+        let [x, y, w, h] = v[..] else { return None };
+        Some((Pos2::new(x, y), Vec2::new(w, h)))
+    }
+    fn entry(s: &str) -> Option<Displaced> {
+        let (id, rects) = s.split_once(':')?;
+        let (original, fitted) = rects.split_once('>')?;
+        Some(Displaced { id: id.parse().ok()?, original: rect(original)?, fitted: rect(fitted)? })
+    }
+    if text.is_empty() {
+        return Vec::new();
+    }
+    text.split(';').map(entry).collect::<Option<_>>().unwrap_or_default()
+}
+
 impl EbbApp {
     /// Closes the editor, on the layer or in a card's own window, saving what was typed.
     pub(super) fn commit_edit(&mut self) {
@@ -1006,5 +1104,124 @@ mod tests {
         assert_eq!(note_pos_at(pos2(-5.0, -30.0), area), pos2(0.0, 0.0));
         // A layer smaller than a card: at its top left.
         assert_eq!(note_pos_at(pos2(100.0, 100.0), vec2(200.0, 100.0)), pos2(0.0, 0.0));
+    }
+
+    #[test]
+    fn card_that_fits_is_left_alone() {
+        let area = vec2(1000.0, 600.0);
+        let (pos, size) = (pos2(13.0, 21.0), vec2(280.0, 150.0));
+        assert_eq!(fit_in_area(pos, size, area), (pos, size));
+        // Touching the edge, give or take rounding.
+        let at_edge = pos2(720.2, 450.0);
+        assert_eq!(fit_in_area(at_edge, size, area), (at_edge, size));
+    }
+
+    #[test]
+    fn card_past_the_edge_comes_back_onto_the_grid() {
+        let area = vec2(1000.0, 600.0);
+        let size = vec2(280.0, 150.0);
+        // Sticks out to the right only: y stays as it was, off the grid.
+        let (pos, same) = fit_in_area(pos2(900.0, 21.0), size, area);
+        assert_eq!(same, size);
+        assert_eq!(pos, pos2(720.0, 21.0));
+        assert_eq!(pos.x % NOTE_GRID, 0.0);
+        assert!(pos.x + size.x <= area.x);
+        // Left of / above the layer: at its top left.
+        assert_eq!(fit_in_area(pos2(-40.0, -3.0), size, area).0, pos2(0.0, 0.0));
+        // Below: the last grid line that leaves room.
+        let (pos, _) = fit_in_area(pos2(100.0, 590.0), size, area);
+        assert_eq!(pos, pos2(100.0, 448.0));
+    }
+
+    fn fc(id: i64, p: Pos2, s: Vec2) -> FitCard {
+        FitCard { id, pos: p, size: s, collapsed: false }
+    }
+
+    const BIG: Vec2 = vec2(1920.0, 1080.0);
+    const SIZE: Vec2 = vec2(280.0, 150.0);
+
+    /// Cards as `refit` returned them, fed back in as the stored ones.
+    fn stored(cards: &[FitCard], placed: &[Placed]) -> Vec<FitCard> {
+        cards.iter().zip(placed).map(|(c, (p, s))| fc(c.id, *p, *s)).collect()
+    }
+
+    #[test]
+    fn nothing_sticking_out_leaves_no_trace() {
+        let cards = [fc(1, pos2(24.0, 80.0), SIZE), fc(2, pos2(400.0, 300.0), SIZE)];
+        let (placed, entries) = refit(&cards, &[], BIG);
+        assert!(entries.is_empty());
+        assert_eq!(placed, [(cards[0].pos, SIZE), (cards[1].pos, SIZE)]);
+    }
+
+    #[test]
+    fn squashed_cards_return_with_the_area() {
+        let cards = [fc(1, pos2(1500.0, 900.0), SIZE), fc(2, pos2(24.0, 80.0), SIZE)];
+        let (placed, entries) = refit(&cards, &[], vec2(1024.0, 768.0));
+        assert_eq!(entries.len(), 1);
+        assert_ne!(placed[0].0, cards[0].pos);
+        assert_eq!(placed[1], (cards[1].pos, SIZE));
+        let (back, entries) = refit(&stored(&cards, &placed), &entries, BIG);
+        assert!(entries.is_empty());
+        assert_eq!(back, [(cards[0].pos, SIZE), (cards[1].pos, SIZE)]);
+    }
+
+    #[test]
+    fn card_the_user_moved_stays_put() {
+        let cards = [fc(1, pos2(1500.0, 900.0), SIZE), fc(2, pos2(1600.0, 100.0), SIZE)];
+        let (placed, entries) = refit(&cards, &[], vec2(1024.0, 768.0));
+        assert_eq!(entries.len(), 2);
+        let mut now = stored(&cards, &placed);
+        now[0].pos = pos2(40.0, 40.0);
+        let (back, entries) = refit(&now, &entries, BIG);
+        assert_eq!(back[0], (pos2(40.0, 40.0), SIZE));
+        assert_eq!(back[1], (cards[1].pos, SIZE));
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn a_smaller_area_keeps_the_first_original() {
+        let cards = [fc(1, pos2(1500.0, 900.0), SIZE)];
+        let (first, e1) = refit(&cards, &[], vec2(1024.0, 768.0));
+        let (second, e2) = refit(&stored(&cards, &first), &e1, vec2(800.0, 600.0));
+        assert_eq!(e2.len(), 1);
+        assert_eq!(e2[0].original, (cards[0].pos, SIZE));
+        assert_eq!(e2[0].fitted, second[0]);
+        let (back, e3) = refit(&stored(&cards, &second), &e2, BIG);
+        assert_eq!(back[0], (cards[0].pos, SIZE));
+        assert!(e3.is_empty());
+    }
+
+    #[test]
+    fn entry_of_a_card_that_left_is_dropped() {
+        let cards = [fc(1, pos2(1500.0, 900.0), SIZE), fc(2, pos2(1500.0, 100.0), SIZE)];
+        let (placed, entries) = refit(&cards, &[], vec2(1024.0, 768.0));
+        let rest = stored(&cards, &placed).into_iter().skip(1).collect::<Vec<_>>();
+        let (_, entries) = refit(&rest, &entries, vec2(1024.0, 768.0));
+        assert_eq!(entries.iter().map(|e| e.id).collect::<Vec<_>>(), [2]);
+        let (_, entries) = refit(&[], &entries, BIG);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn displaced_list_round_trips_and_survives_garbage() {
+        let entries = vec![
+            Displaced { id: 7, original: (pos2(1500.5, 900.0), vec2(280.0, 150.0)), fitted: (pos2(736.0, 608.0), vec2(280.0, 150.0)) },
+            Displaced { id: 12, original: (pos2(-3.25, 0.1), vec2(1200.0, 90.0)), fitted: (pos2(0.0, 0.0), vec2(1000.0, 90.0)) },
+        ];
+        assert_eq!(decode_displaced(&encode_displaced(&entries)), entries);
+        assert_eq!(encode_displaced(&[]), "");
+        assert!(decode_displaced("").is_empty());
+        for bad in ["x", "1:1,2,3>4,5,6,7", "1:1,2,3,4", "a:1,2,3,4>5,6,7,8", "1:1,2,3,4>5,6,7,NaN", ";;", &format!("{};junk", encode_displaced(&entries))] {
+            assert!(decode_displaced(bad).is_empty(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn card_bigger_than_the_layer_is_cut_to_it() {
+        let (pos, size) = fit_in_area(pos2(50.0, 40.0), vec2(1200.0, 150.0), vec2(1000.0, 600.0));
+        assert_eq!((pos.x, size.x), (0.0, 1000.0));
+        // Never below the minimum card size.
+        let (pos, size) = fit_in_area(pos2(10.0, 0.0), vec2(280.0, 150.0), vec2(120.0, 600.0));
+        assert_eq!((pos.x, size.x), (0.0, card::MIN_SIZE.x));
     }
 }

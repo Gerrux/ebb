@@ -17,9 +17,9 @@ use crate::shell::Event;
 use crate::theme;
 use crate::win::{self, Backdrop};
 
-use super::cards::note_pos_at;
+use super::cards::{FitCard, encode_displaced, note_pos_at, refit};
 use super::paint::{glass_button, glass_panel, hover_t, panel_ease, paint_logo};
-use super::{EbbApp, LAYER_FADE_IN, SET_BACKDROP, SET_COLLAPSED, SET_CURTAIN, SET_MONITOR, SET_PIN_BOTTOM};
+use super::{EbbApp, LAYER_FADE_IN, SET_BACKDROP, SET_COLLAPSED, SET_CURTAIN, SET_DISPLACED, SET_MONITOR, SET_PIN_BOTTOM};
 
 const LAYER_FADE_OUT: Duration = Duration::from_millis(160);
 /// The curtain: the layer slides down and fades before it shrinks to the tab.
@@ -34,6 +34,34 @@ const TAB_GAP: f32 = 10.0;
 
 pub(super) fn place_tab(h: isize, m: &win::Monitor, top: bool) {
     win::place_edge_center(h, m, TAB_SIZE, if top { 0.0 } else { TAB_GAP }, top);
+}
+
+/// The monitor the layer belongs on: the saved one if it's connected, else the
+/// first one (`win::monitors` lists secondary monitors first).
+pub(super) fn pick_monitor<'a>(saved: Option<&str>, monitors: &'a [win::Monitor]) -> Option<&'a win::Monitor> {
+    saved
+        .and_then(|d| monitors.iter().find(|m| m.matches_device(d)))
+        .or(monitors.first())
+}
+
+/// Puts the layer window on its monitor (the whole work area, or the tab while
+/// collapsed). Returns the size of the full layer in points. The one rule for
+/// startup and for display changes.
+pub(super) fn place_layer(
+    h: isize,
+    saved: Option<&str>,
+    monitors: &[win::Monitor],
+    collapsed: bool,
+    curtain_top: bool,
+) -> Option<Vec2> {
+    let m = pick_monitor(saved, monitors)?;
+    let (r, s) = (m.work, win::monitor_scale(m));
+    if collapsed {
+        place_tab(h, m, curtain_top);
+    } else {
+        win::place_on(h, m);
+    }
+    Some(vec2((r.right - r.left) as f32 / s, (r.bottom - r.top) as f32 / s))
 }
 
 /// A tray click this soon after another app took the focus from a summoned layer
@@ -456,6 +484,72 @@ impl EbbApp {
         }
     }
 
+    /// A monitor came or went, or a resolution, scale or work area changed:
+    /// the layer goes where its monitor is now, the cards' windows are put back
+    /// inside the screen, and the settings' monitor map is redrawn.
+    pub(super) fn display_changed(&mut self, ctx: &egui::Context) {
+        let monitors = win::monitors();
+        if let Some(h) = self.hwnd {
+            // The saved monitor stays as it is while it's away, so the layer goes
+            // back to it with the next change after it returns.
+            let saved = self.store.setting(SET_MONITOR);
+            if let Some(area) = place_layer(h, saved.as_deref(), &monitors, self.collapsed, self.curtain_top) {
+                self.full_area = area;
+                // The cards are fitted once the window has the new size (see
+                // `fit_cards_to_layer`).
+                self.fit_area = Some(area);
+            }
+        }
+        self.reclamp_floating(ctx);
+        let mut lib = self.library.lock().unwrap();
+        if lib.open {
+            // Enumerates the monitors again: only when there's a map to redraw.
+            let device = self.hwnd.and_then(win::monitor_of).and_then(|m| m.device_ids.first().cloned());
+            lib.refresh_monitors(monitors, device);
+            ctx.request_repaint_of(crate::library::viewport_id());
+        }
+        drop(lib);
+        ctx.request_repaint();
+    }
+
+    /// After a display change, once the layer window is `area` big: cards that
+    /// stick out of it come back inside. Waits while a card is being dragged or
+    /// resized, or one is being pulled off the layer, and goes on afterwards.
+    pub(super) fn fit_cards_to_layer(&mut self, ctx: &egui::Context, area: Vec2) {
+        let Some(target) = self.fit_area else { return };
+        // The window may still be at its old size for a frame after being placed.
+        if (area - target).abs().max_elem() > 2.0 {
+            return;
+        }
+        if ctx.dragged_id().is_some() || self.pulled.is_some() {
+            return;
+        }
+        self.fit_area = None;
+        let cards: Vec<FitCard> = self
+            .cards
+            .iter()
+            .map(|c| FitCard { id: c.id, pos: c.pos, size: c.size, collapsed: c.collapsed })
+            .collect();
+        let (placed, displaced) = refit(&cards, &self.displaced, area);
+        for (idx, (pos, size)) in placed.into_iter().enumerate() {
+            let c = &mut self.cards[idx];
+            if (c.pos, c.size) == (pos, size) {
+                continue;
+            }
+            (c.pos, c.size) = (pos, size);
+            self.save(idx);
+        }
+        // Only a change is written; the usual case is no row at all.
+        if displaced != self.displaced {
+            let _ = if displaced.is_empty() {
+                self.store.delete_setting(SET_DISPLACED)
+            } else {
+                self.store.set_setting(SET_DISPLACED, &encode_displaced(&displaced))
+            };
+            self.displaced = displaced;
+        }
+    }
+
     pub(super) fn set_curtain_top(&mut self, top: bool) {
         self.curtain_top = top;
         let _ = self.store.set_setting(SET_CURTAIN, if top { "top" } else { "bottom" });
@@ -514,5 +608,37 @@ impl EbbApp {
 
     pub(super) fn cycle_backdrop(&mut self) {
         self.set_backdrop(self.backdrop.next());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn monitor(handle: isize, primary: bool, device: &str) -> win::Monitor {
+        win::Monitor {
+            handle,
+            rect: Default::default(),
+            work: Default::default(),
+            primary,
+            device_ids: vec![device.to_owned()],
+        }
+    }
+
+    #[test]
+    fn layer_goes_to_the_saved_monitor_if_connected() {
+        // `win::monitors` lists the secondary monitor first.
+        let monitors = [monitor(1, false, r"\\?\DISPLAY#AAA#1&0#{guid}"), monitor(2, true, r"\\?\DISPLAY#BBB#2&0#{guid}")];
+        let saved = Some(r"\\?\display#bbb#2&0#{other-guid}");
+        assert_eq!(pick_monitor(saved, &monitors).map(|m| m.handle), Some(2));
+    }
+
+    #[test]
+    fn layer_falls_back_to_the_first_monitor() {
+        let monitors = [monitor(1, false, r"\\?\DISPLAY#AAA#1&0#{guid}"), monitor(2, true, r"\\?\DISPLAY#BBB#2&0#{guid}")];
+        // Gone, or never saved.
+        assert_eq!(pick_monitor(Some(r"\\?\DISPLAY#CCC#3&0#{guid}"), &monitors).map(|m| m.handle), Some(1));
+        assert_eq!(pick_monitor(None, &monitors).map(|m| m.handle), Some(1));
+        assert!(pick_monitor(None, &[]).is_none());
     }
 }

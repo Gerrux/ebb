@@ -291,6 +291,12 @@ impl LibraryState {
         }
     }
 
+    /// A monitor came or went: the settings' monitor map shows the new layout.
+    pub fn refresh_monitors(&mut self, monitors: Vec<win::Monitor>, layer_device: Option<String>) {
+        self.monitors = monitors;
+        self.settings.monitor_device = layer_device;
+    }
+
     pub fn open(&mut self, tab: Tab) {
         self.stop_recording();
         if !self.open {

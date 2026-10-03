@@ -47,6 +47,12 @@ impl Shared {
     fn forget_revealed_unless(&mut self, floating: impl Fn(i64) -> bool) {
         self.revealed.take_if(|(id, _, _)| !floating(*id));
     }
+
+    /// Drops a hand-off whose card has left `floating` before its window took
+    /// the drag; nothing else would ever end it. Whether one was dropped.
+    fn forget_handoff_unless(&mut self, floating: impl Fn(i64) -> bool) -> bool {
+        self.handoff.take_if(|h| !floating(h.card)).is_some()
+    }
 }
 
 pub(super) struct Handoff {
@@ -81,6 +87,10 @@ fn viewport_id(card: i64) -> ViewportId {
     ViewportId::from_hash_of(("floating-card", card))
 }
 
+fn window_title(card: i64) -> String {
+    format!("Ebb Note {card}")
+}
+
 /// Where the window is let go of, and whether that's over the layer.
 fn dropped(ui: &Ui, card: &Card, layer: Option<Rect>) -> Option<Event> {
     let (rect, scale) = ui.input(|i| {
@@ -105,7 +115,7 @@ impl EbbApp {
         let (style, hide_from_capture) = (self.card_style, self.hide_from_capture);
         for card in &self.floating {
             let (card, shared) = (card.clone(), self.floating_shared.clone());
-            let title = format!("Ebb Note {}", card.id);
+            let title = window_title(card.id);
             let created = win::find_own_window_title(&title).is_none();
             let mut viewport = ViewportBuilder::default()
                 .with_title(title.clone())
@@ -173,10 +183,41 @@ impl EbbApp {
                 Event::Action(id, action) => self.floating_action(ctx, id, action),
             }
         }
-        self.floating_shared
-            .lock()
-            .unwrap()
-            .forget_revealed_unless(|id| self.floating.iter().any(|c| c.id == id));
+        let is_floating = |id| self.floating.iter().any(|c| c.id == id);
+        {
+            let mut shared = self.floating_shared.lock().unwrap();
+            shared.forget_revealed_unless(is_floating);
+            shared.forget_handoff_unless(is_floating);
+        }
+        // The stand-in on the layer goes with its hand-off (and the button's
+        // release it was owed, as when the window takes the drag).
+        if self.pulled.take_if(|c| !is_floating(c.id)).is_some() {
+            self.release_pointer = true;
+            ctx.request_repaint();
+        }
+    }
+
+    /// After a display change: each card's window goes to where the card was
+    /// left, brought inside the work area of the nearest monitor. The card's own
+    /// position (the user's intent) is not touched, so a monitor that comes back
+    /// gets the card back where it was. Only a drop or a resize by the user
+    /// saves a position (see `Event`), and this move is neither.
+    pub(super) fn reclamp_floating(&self, ctx: &egui::Context) {
+        let handoff = self.floating_shared.lock().unwrap().handoff.as_ref().map(|h| h.card);
+        for card in &self.floating {
+            // The pointer places a window being pulled off the layer.
+            if handoff == Some(card.id) {
+                continue;
+            }
+            // Not up yet: it is created at the card's position and clamps itself.
+            let Some(h) = win::find_own_window_title(&window_title(card.id)) else {
+                continue;
+            };
+            let at = win::clamp_to_work_area(Rect::from_min_size(card.pos, card.shown_size()), win::dpi_scale(h));
+            let id = viewport_id(card.id);
+            ctx.send_viewport_cmd_to(id, ViewportCommand::OuterPosition(at));
+            ctx.request_repaint_of(id);
+        }
     }
 
     fn floating_action(&mut self, ctx: &egui::Context, id: i64, action: Action) {
@@ -614,5 +655,20 @@ mod tests {
         // Its card was archived, or dropped back onto the layer.
         shared.forget_revealed_unless(|id| id == 8);
         assert!(shared.revealed.is_none());
+    }
+
+    #[test]
+    fn handoff_ends_with_its_card() {
+        let mut shared = Shared {
+            handoff: Some(Handoff::new(7, vec2(10.0, 5.0))),
+            ..Shared::default()
+        };
+        // Its card is still in a window: the window takes the drag in its own time.
+        assert!(!shared.forget_handoff_unless(|id| id == 7));
+        assert!(shared.handoff_waiting(7));
+        // The card left before its window's first frame.
+        assert!(shared.forget_handoff_unless(|id| id == 8));
+        assert!(shared.handoff.is_none());
+        assert!(!shared.forget_handoff_unless(|_| false));
     }
 }

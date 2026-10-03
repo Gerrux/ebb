@@ -524,6 +524,21 @@ pub struct Screen<'a> {
     pub pixels_per_point: f32,
     /// Layer size in points.
     pub area: egui::Vec2,
+    /// The connected monitors with their DPI scales (1.0 at 96 DPI): notes are
+    /// sized in the pixels of the monitor they were on.
+    pub monitors: &'a [(crate::win::Monitor, f32)],
+}
+
+impl Screen<'_> {
+    /// Physical pixels per point on the monitor `device` names; the layer's when
+    /// that monitor isn't connected (or isn't known).
+    fn scale_of(&self, device: &str) -> f32 {
+        self.monitors
+            .iter()
+            .find(|(m, _)| m.matches_device(device))
+            .map_or(self.pixels_per_point, |(_, scale)| *scale)
+            .max(0.5)
+    }
 }
 
 const HEADER_CLEAR: f32 = 64.0;
@@ -593,9 +608,9 @@ pub fn layout(notes: &[Planned], screen: &Screen, occupied: &[egui::Rect]) -> Ve
         }
         let size = match &n.window {
             Some(w) => {
-                // Scale by the source monitor's DPI? Positions are stored in that
-                // monitor's pixels; without its DPI, the layer's is the best guess.
-                fit(egui::vec2(w.size.0 as f32, w.size.1 as f32) / ppp)
+                // Sizes are in the pixels of the monitor the note was on, so that
+                // monitor's scale applies; the layer's if it's gone.
+                fit(egui::vec2(w.size.0 as f32, w.size.1 as f32) / screen.scale_of(&w.device))
             }
             None => DEFAULT_SIZE,
         };
@@ -782,8 +797,7 @@ mod tests {
             primary: true,
             device_ids: vec![r"\\?\DISPLAY#BBB#1&2&UID2#{guid}".into()],
         };
-        let _ = main;
-        let screen = Screen { layer: Some(&second), pixels_per_point: 1.0, area: egui::vec2(1920.0, 1032.0) };
+        let screen = Screen { layer: Some(&second), pixels_per_point: 1.0, area: egui::vec2(1920.0, 1032.0), monitors: &[] };
         let planned = |id: &str, device: &str, pos, size| Planned {
             source_id: id.into(),
             kind: Kind::Note,
@@ -810,6 +824,21 @@ mod tests {
         assert!(!main_rect.intersects(rects[0].unwrap()) && !main_rect.intersects(rects[2].unwrap()));
         // Clamped into the layer.
         assert_eq!(rects[2].unwrap().max, egui::pos2(1920.0, 1032.0));
+
+        // The main monitor runs at 150%: its note is 1.5 times smaller in layer
+        // points (the layer's monitor is at 100%). The note from the layer's own
+        // monitor is unaffected; one from an unknown monitor takes the layer's scale.
+        let known = [(main, 1.5)];
+        let screen = Screen { monitors: &known, ..screen };
+        let notes = [
+            planned("here", r"\\?\DISPLAY#AAA#1&2&UID1#{other-guid}", (1263, 170), (317, 285)),
+            planned("main", r"\\?\DISPLAY#BBB#1&2&UID2#{guid}", (2207, 102), (360, 405)),
+            planned("gone", r"\\?\DISPLAY#CCC#9&9&UID9#{guid}", (0, 0), (360, 405)),
+        ];
+        let rects = layout(&notes, &screen, &[]);
+        assert_eq!(rects[0].unwrap().size(), egui::vec2(317.0, 285.0));
+        assert_eq!(rects[1].unwrap().size(), egui::vec2(240.0, 270.0));
+        assert_eq!(rects[2].unwrap().size(), egui::vec2(360.0, 405.0));
     }
 
     #[test]

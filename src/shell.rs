@@ -31,6 +31,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, AppendMenuW, GetWindowThreadProcessId, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW,
     FindWindowW, GetMessageW, HICON, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW,
+    WM_DISPLAYCHANGE,
     RegisterClassExW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_NONOTIFY,
     TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_HOTKEY, WM_NULL, WM_POWERBROADCAST, WM_SETTINGCHANGE,
     WM_TIMECHANGE,
@@ -52,6 +53,8 @@ fn class_name() -> &'static [u16] {
     static NAME: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
     NAME.get_or_init(|| wide(&format!("Ebb.Shell{}", instance_suffix())))
 }
+/// `WM_SETTINGCHANGE` wparam: the work area changed (taskbar moved or resized).
+const SPI_SETWORKAREA: usize = 0x002F;
 /// Not in the windows crate's Dwm module.
 const WM_DWMCOLORIZATIONCOLORCHANGED: u32 = 0x0320;
 const WM_TRAY: u32 = WM_APP + 1;
@@ -90,6 +93,9 @@ pub enum Event {
     /// Back from sleep, or the clock or time zone changed: timers set for a
     /// wall-clock moment (the morning Rediscover) should look at the time again.
     ClockChanged,
+    /// A monitor was plugged or unplugged, or its resolution, scale or work area
+    /// changed (taskbar moved). Bursts are coalesced into one pending event.
+    DisplayChanged,
     Exit,
 }
 
@@ -417,6 +423,21 @@ thread_local! {
     static STATE: RefCell<Option<ThreadState>> = const { RefCell::new(None) };
 }
 
+/// Queues [`Event::DisplayChanged`] unless one is already waiting: plugging a
+/// monitor sends a burst of broadcasts, and the UI re-reads the whole layout.
+fn push_display_changed() {
+    STATE.with_borrow(|s| {
+        if let Some(s) = s {
+            let mut events = s.shared.events.lock().unwrap();
+            if !events.iter().any(|e| matches!(e, Event::DisplayChanged)) {
+                events.push(Event::DisplayChanged);
+            }
+            drop(events);
+            s.ctx.request_repaint();
+        }
+    });
+}
+
 fn push(event: Event) {
     STATE.with_borrow(|s| {
         if let Some(s) = s {
@@ -499,6 +520,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_SETTINGCHANGE if lparam.0 != 0 && unsafe { PCWSTR(lparam.0 as *const u16).to_string() }.is_ok_and(|s| s == "ImmersiveColorSet") => {
             push(Event::SystemColors)
         }
+        WM_SETTINGCHANGE if wparam.0 == SPI_SETWORKAREA => push_display_changed(),
+        WM_DISPLAYCHANGE => push_display_changed(),
         WM_DWMCOLORIZATIONCOLORCHANGED => push(Event::SystemColors),
         WM_POWERBROADCAST if wparam.0 == PBT_APMRESUMEAUTOMATIC => push(Event::ClockChanged),
         WM_TIMECHANGE => push(Event::ClockChanged),

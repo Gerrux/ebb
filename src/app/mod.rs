@@ -39,7 +39,7 @@ use crate::win::{self, Backdrop};
 pub(crate) use paint::{PANEL_APPEAR, glass_panel, paint_marker, panel_ease};
 
 use cards::{PromptFill, TagInput};
-use layer::{CURTAIN_DROP, TAB_SIZE, place_tab};
+use layer::{CURTAIN_DROP, TAB_SIZE, place_layer};
 use toast::Toast;
 
 const LAYER_FADE_IN: Duration = Duration::from_millis(220);
@@ -49,6 +49,8 @@ const REDISCOVER_AFTER_START: i64 = 3;
 
 // Settings keys.
 const SET_MONITOR: &str = "layer.monitor";
+/// Cards a fit into a smaller layer displaced, to put back later (see `cards::refit`).
+const SET_DISPLACED: &str = "layer.displaced";
 const SET_BACKDROP: &str = "layer.backdrop";
 const SET_TINT: &str = "layer.tint";
 const SET_PIN_BOTTOM: &str = "layer.pin_bottom";
@@ -92,6 +94,11 @@ pub struct EbbApp {
     resize_pending: bool,
     /// Size of the full layer in points, for placing cards while it's collapsed.
     full_area: Vec2,
+    /// A display change resized the layer to this: the cards are fitted into it
+    /// once the window has that size and nothing is being dragged.
+    fit_area: Option<Vec2>,
+    /// What the fit moved or shrank and where it put it; mirrors `layer.displaced`.
+    displaced: Vec<cards::Displaced>,
     settings_on_launch: bool,
     snap: bool,
     /// A shown Private value keeps the layer out of screenshots and recordings.
@@ -209,21 +216,9 @@ impl EbbApp {
         let curtain_top = store.setting(SET_CURTAIN).is_none_or(|v| v != "bottom");
         let mut full_area = vec2(1280.0, 720.0);
         if let Some(h) = hwnd {
-            let monitors = win::monitors();
             let saved = store.setting(SET_MONITOR);
-            // The saved monitor if it's still connected, else the first secondary one.
-            let monitor = saved
-                .as_deref()
-                .and_then(|d| monitors.iter().find(|m| m.matches_device(d)))
-                .or(monitors.first());
-            if let Some(m) = monitor {
-                let (r, s) = (m.work, win::monitor_scale(m));
-                full_area = vec2((r.right - r.left) as f32 / s, (r.bottom - r.top) as f32 / s);
-                if collapsed {
-                    place_tab(h, m, curtain_top);
-                } else {
-                    win::place_on(h, m);
-                }
+            if let Some(area) = place_layer(h, saved.as_deref(), &win::monitors(), collapsed, curtain_top) {
+                full_area = area;
             }
             win::apply_backdrop(h, backdrop, collapsed);
             // Still hidden here (eframe shows it after the first frame), so the
@@ -251,6 +246,10 @@ impl EbbApp {
         let hotkey_config = hotkey::load(|key| store.setting(key));
         shell::spawn(cc.egui_ctx.clone(), shell.clone(), hotkey_config);
         let floating = store.load_desktop().unwrap_or_default();
+        // One read. Leftovers from a small display mode are put back (or fitted
+        // again) once the layer is up, as after a display change.
+        let displaced = store.setting(SET_DISPLACED).map_or_else(Vec::new, |v| cards::decode_displaced(&v));
+        let fit_area = (!displaced.is_empty()).then_some(full_area);
 
         Self {
             store,
@@ -272,6 +271,8 @@ impl EbbApp {
             curtain_anim: None,
             resize_pending: false,
             full_area,
+            fit_area,
+            displaced,
             settings_on_launch,
             snap,
             hide_from_capture,
@@ -777,6 +778,7 @@ impl eframe::App for EbbApp {
                     }
                 }
                 Event::SystemColors => self.refresh_theme(ctx),
+                Event::DisplayChanged => self.display_changed(ctx),
                 Event::HotkeysChanged => {
                     let keys = self.shell.hotkeys().unwrap_or_default();
                     self.library.lock().unwrap().settings.hotkeys = keys;
@@ -1059,6 +1061,7 @@ impl eframe::App for EbbApp {
             self.tab_ui(ui);
         } else {
             self.full_area = full.size();
+            self.fit_cards_to_layer(ui.ctx(), full.size());
             self.step_curtain(ui.ctx());
             ui.painter()
                 .rect_filled(full, CornerRadius::ZERO, theme::scrim(self.tint));
