@@ -13,10 +13,15 @@ pub enum Action {
     Search,
     Library,
     Layer,
+    Palette,
 }
 
+/// Number of actions that can have a hotkey.
+pub const ACTION_COUNT: usize = 5;
+
 impl Action {
-    pub const ALL: [Action; 4] = [Action::Capture, Action::Search, Action::Library, Action::Layer];
+    pub const ALL: [Action; ACTION_COUNT] =
+        [Action::Capture, Action::Search, Action::Library, Action::Layer, Action::Palette];
 
     pub fn index(self) -> usize {
         self as usize
@@ -29,6 +34,7 @@ impl Action {
             Action::Search => "hotkey.search",
             Action::Library => "hotkey.library",
             Action::Layer => "hotkey.layer",
+            Action::Palette => "hotkey.palette",
         }
     }
 
@@ -38,6 +44,7 @@ impl Action {
             Action::Search => "Поиск",
             Action::Library => "Архив и корзина",
             Action::Layer => "Показать / скрыть слой",
+            Action::Palette => "Команды",
         }
     }
 
@@ -56,11 +63,17 @@ impl Action {
             Combo::new(false, true, true, false, b'F' as u32),
         ];
         const LIBRARY: [Combo; 1] = [Combo::new(true, false, true, false, b'L' as u32)];
+        // Ctrl+K as a global combination would be taken from browsers and IDEs.
+        const PALETTE: [Combo; 2] = [
+            Combo::new(true, false, true, false, b'K' as u32),
+            Combo::new(false, true, true, false, b'K' as u32),
+        ];
         match self {
             Action::Capture => &CAPTURE,
             Action::Search => &SEARCH,
             Action::Library => &LIBRARY,
             Action::Layer => &[],
+            Action::Palette => &PALETTE,
         }
     }
 }
@@ -326,18 +339,18 @@ pub fn wanted(setting: Option<&str>) -> Wanted {
 }
 
 /// Every action's wish, indexed by [`Action::index`].
-pub type Config = [Wanted; 4];
+pub type Config = [Wanted; ACTION_COUNT];
 
 /// The order to bind actions in: chosen combinations first, so a default's
 /// fallback candidate can't take one the user gave another action (say, when
 /// the first candidate is held by another program at startup).
-pub fn registration_order(config: &Config) -> [Action; 4] {
+pub fn registration_order(config: &Config) -> [Action; ACTION_COUNT] {
     let mut order = Action::ALL;
     order.sort_by_key(|a| !matches!(config[a.index()], Wanted::Custom(_)));
     order
 }
 
-/// Reads all four settings through `read` (one lookup per action).
+/// Reads every action's setting through `read` (one lookup per action).
 pub fn load(read: impl Fn(&str) -> Option<String>) -> Config {
     Action::ALL.map(|a| wanted(read(a.setting_key()).as_deref()))
 }
@@ -352,7 +365,7 @@ mod tests {
 
     #[test]
     fn default_names_round_trip() {
-        for name in ["Win+Alt+N", "Ctrl+Alt+N", "Ctrl+Alt+Space", "Win+Alt+F", "Ctrl+Alt+F", "Win+Alt+L"] {
+        for name in ["Win+Alt+N", "Ctrl+Alt+N", "Ctrl+Alt+Space", "Win+Alt+F", "Ctrl+Alt+F", "Win+Alt+L", "Win+Alt+K"] {
             assert_eq!(combo(name).to_string(), name);
         }
     }
@@ -364,6 +377,7 @@ mod tests {
         assert_eq!(names(Action::Search), ["Win+Alt+F", "Ctrl+Alt+F"]);
         assert_eq!(names(Action::Library), ["Win+Alt+L"]);
         assert!(names(Action::Layer).is_empty());
+        assert_eq!(names(Action::Palette), ["Win+Alt+K", "Ctrl+Alt+K"]);
         assert!(Action::ALL.iter().flat_map(|a| a.defaults()).all(Combo::valid));
     }
 
@@ -477,7 +491,10 @@ mod tests {
             "hotkey.search" => Some(String::new()),
             _ => None,
         });
-        assert_eq!(config, [Wanted::Custom(combo("Ctrl+Alt+K")), Wanted::Off, Wanted::Default, Wanted::Default]);
+        assert_eq!(
+            config,
+            [Wanted::Custom(combo("Ctrl+Alt+K")), Wanted::Off, Wanted::Default, Wanted::Default, Wanted::Default]
+        );
     }
 
     #[test]
@@ -491,15 +508,15 @@ mod tests {
         }
         assert_eq!(action_of_id(0), None);
         assert_eq!(action_of_id(99), None);
-        assert_eq!(action_of_id(500), None);
+        assert_eq!(action_of_id(600), None);
     }
 
     #[test]
     fn custom_combinations_are_bound_before_defaults() {
         let layer = Wanted::Custom(combo("Ctrl+Alt+N"));
-        let order = registration_order(&[Wanted::Default, Wanted::Off, Wanted::Default, layer]);
-        assert_eq!(order, [Action::Layer, Action::Capture, Action::Search, Action::Library]);
-        let all_default = registration_order(&[Wanted::Default; 4]);
+        let order = registration_order(&[Wanted::Default, Wanted::Off, Wanted::Default, layer, Wanted::Default]);
+        assert_eq!(order, [Action::Layer, Action::Capture, Action::Search, Action::Library, Action::Palette]);
+        let all_default = registration_order(&[Wanted::Default; ACTION_COUNT]);
         assert_eq!(all_default, Action::ALL);
     }
 

@@ -12,6 +12,7 @@ mod cards;
 mod floating;
 mod layer;
 mod paint;
+mod palette;
 mod toast;
 mod upkeep;
 
@@ -158,6 +159,8 @@ pub struct EbbApp {
     rediscover_job: Option<mpsc::Receiver<Option<Vec<i64>>>>,
     /// Weekly backup and the review invitation (see `upkeep`).
     upkeep: upkeep::Upkeep,
+    /// Palette commands that run in the background (see `palette`).
+    palette: palette::Palette,
 }
 
 impl EbbApp {
@@ -306,6 +309,7 @@ impl EbbApp {
             next_rediscover,
             rediscover_job: None,
             upkeep: upkeep::Upkeep::new(now),
+            palette: palette::Palette::default(),
         }
     }
 
@@ -764,12 +768,10 @@ impl eframe::App for EbbApp {
         let mut pressed = None;
         for event in self.shell.take_events() {
             match event {
-                Event::Capture(t) => pressed = Some((Mode::Capture, t)),
-                Event::Search(t) => pressed = Some((Mode::Search, t)),
-                Event::ToggleLayer if self.layer_visible && !self.collapsed => {
-                    self.set_layer_visible(ctx, false)
-                }
-                Event::ToggleLayer => self.summon(ctx),
+                Event::Capture(t) => pressed = Some((Mode::Capture, t, false)),
+                Event::Search(t) => pressed = Some((Mode::Search, t, false)),
+                Event::Palette(t) => pressed = Some((Mode::Search, t, true)),
+                Event::ToggleLayer => self.toggle_layer(ctx),
                 Event::TrayClick => self.tray_click(ctx),
                 Event::Launched => {
                     self.summon(ctx);
@@ -812,6 +814,7 @@ impl eframe::App for EbbApp {
 
         self.schedule_rediscover(ctx);
         self.upkeep.step(ctx);
+        self.command_results(ctx);
 
         if self.layer_faded_out.swap(false, Ordering::Relaxed) && !self.layer_visible {
             ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(false));
@@ -857,8 +860,11 @@ impl eframe::App for EbbApp {
         }
         let id = bar::viewport_id();
         let mut hide = std::mem::take(&mut bar.hide_requested);
-        if let Some((mode, t)) = pressed {
-            match bar.press(mode, t) {
+        if let Some((mode, t, palette)) = pressed {
+            // A snapshot for the palette, whichever way the bar opens: `>` may be typed later.
+            bar.ctx = self.command_ctx();
+            let press = if palette { bar.press_palette(t) } else { bar.press(mode, t) };
+            match press {
                 Press::Hide => hide = true,
                 press => {
                     let size = bar.size();
@@ -921,6 +927,7 @@ impl eframe::App for EbbApp {
                     self.reload_cards();
                     changed = true;
                 }
+                Outbox::Command(id, arg) => self.run_command(ctx, id, arg),
             }
         }
         if changed {
@@ -1000,6 +1007,7 @@ impl eframe::App for EbbApp {
                 i.key_pressed(Key::Escape),
             )
         });
+        self.palette_key(ui);
         if f1 {
             self.show_debug ^= true;
         }

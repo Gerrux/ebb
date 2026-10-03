@@ -71,6 +71,8 @@ pub enum Event {
     /// Capture hotkey (or tray/menu equivalent) pressed at this instant.
     Capture(Instant),
     Search(Instant),
+    /// Command palette hotkey: the search bar with `>` typed.
+    Palette(Instant),
     ToggleLayer,
     /// Left click on the tray icon: summon the layer over the windows, or dismiss it.
     TrayClick,
@@ -143,7 +145,7 @@ impl Binding {
 /// Every action's [`Binding`].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Hotkeys {
-    slots: [Binding; 4],
+    slots: [Binding; hotkey::ACTION_COUNT],
 }
 
 impl Hotkeys {
@@ -512,6 +514,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             Some(Action::Search) => push(Event::Search(Instant::now())),
             Some(Action::Library) => push(Event::OpenLibrary(false)),
             Some(Action::Layer) => push(Event::ToggleLayer),
+            Some(Action::Palette) => push(Event::Palette(Instant::now())),
             None => {}
         },
         WM_SHOW_LAYER => push(Event::Launched),

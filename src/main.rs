@@ -5,6 +5,7 @@ mod bar;
 mod autostart;
 mod bench;
 mod card;
+mod commands;
 mod emoji;
 mod hotkey;
 mod import_ui;

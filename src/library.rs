@@ -101,7 +101,7 @@ impl Default for LayerSettings {
             tint: 70,
             pin_bottom: true,
             hotkeys: Hotkeys::default(),
-            hotkey_config: [Wanted::Default; 4],
+            hotkey_config: [Wanted::Default; hotkey::ACTION_COUNT],
             dismiss_hides: false,
             curtain_top: true,
             settings_on_launch: true,
@@ -227,7 +227,7 @@ pub struct LibraryState {
     pub settings: LayerSettings,
     pub outbox: Vec<Request>,
     /// Why a hotkey didn't change (or a hint while recording), per action.
-    pub hotkey_errors: [Option<String>; 4],
+    pub hotkey_errors: [Option<String>; hotkey::ACTION_COUNT],
     /// The row whose combination is being recorded.
     recording: Option<Action>,
 
@@ -358,6 +358,19 @@ impl LibraryState {
     /// Data changed elsewhere (layer, search bar): refresh on the next frame.
     pub fn invalidate(&mut self) {
         self.searched = None;
+    }
+
+    /// Autostart or the backups changed outside this window (the command
+    /// palette): an open settings tab reads them again.
+    pub fn reread_system_state(&mut self) {
+        if !self.open {
+            return;
+        }
+        self.data_loaded = false;
+        let mut autostart = self.autostart.lock().unwrap();
+        if !matches!(*autostart, AutostartUi::Busy) {
+            *autostart = AutostartUi::Unknown;
+        }
     }
 }
 

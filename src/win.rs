@@ -588,6 +588,13 @@ pub fn monitor_of(raw: isize) -> Option<Monitor> {
     monitors().into_iter().find(|m| m.handle == handle)
 }
 
+/// How many monitors are on the desktop; one metric lookup, unlike [`monitors`],
+/// which also asks for each one's device ids.
+pub fn monitor_count() -> usize {
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CMONITORS};
+    usize::try_from(unsafe { GetSystemMetrics(SM_CMONITORS) }).unwrap_or(1).max(1)
+}
+
 /// The cursor is on a different monitor than the window: a card dragged there
 /// leaves the layer.
 pub fn cursor_on_other_monitor(raw: isize) -> bool {

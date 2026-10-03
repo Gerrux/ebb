@@ -2,6 +2,10 @@
 //! or search. One pre-created window for both instead of two saves a GL surface
 //! (~4 MiB); switching modes only resizes it.
 //!
+//! The command palette lives in the search mode: a query that starts with `>`
+//! lists commands (`commands`) instead of notes. The note search doesn't pay for
+//! it: one check of the query's first character.
+//!
 //! The bar renders in its own deferred-viewport callback, so it keeps its own
 //! database connection for searching and hands anything that changes the layer
 //! to the root viewport through [`Outbox`].
@@ -9,13 +13,14 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use egui::text::{LayoutJob, TextFormat, TextWrapping};
+use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
 use egui::{
-    Align, Align2, Color32, CornerRadius, FontId, Key, Layout, Modifiers, Rect, RichText, Sense,
-    Ui, UiBuilder, Vec2, ViewportId, pos2, vec2,
+    Align, Align2, Color32, CornerRadius, FontId, Id, Key, Layout, Modifiers, Rect, RichText,
+    Sense, Ui, UiBuilder, Vec2, ViewportId, pos2, vec2,
 };
 
 use crate::card::{Kind, Placement, parse_capture_with};
+use crate::commands::{self, Arg, BarTarget, CommandId, Ctx, Match};
 use crate::search::{self, MARK_END, MARK_START};
 use crate::store::{Hit, STORE_FAILED, Store};
 use crate::theme;
@@ -28,6 +33,9 @@ const ROW_H: f32 = 54.0;
 pub const APPEAR_SECS: f32 = 0.16;
 pub const DISAPPEAR_SECS: f32 = 0.11;
 const RESULTS: usize = 40;
+const CMD_ROW_H: f32 = 40.0;
+/// Settings key of the palette's recently used commands.
+const SET_RECENT: &str = "palette.recent";
 
 pub fn viewport_id() -> ViewportId {
     ViewportId::from_hash_of("capture")
@@ -48,6 +56,8 @@ pub enum Outbox {
     Open(i64),
     /// Cards changed in the database (pin, archive, delete): reload.
     Changed,
+    /// A palette command to run, with its number if it takes one.
+    Command(CommandId, Option<i64>),
 }
 
 pub enum Press {
@@ -95,6 +105,29 @@ pub struct BarState {
     search_ms: f64,
     notice: Option<(String, Instant)>,
     store: Option<Store>,
+
+    // Command palette
+    /// What the app looks like, filled by the root each time the bar opens.
+    pub ctx: Ctx,
+    commands: Vec<Match>,
+    /// Query the current commands belong to; None forces a refresh.
+    commands_for: Option<String>,
+    /// The last frame showed commands, not notes.
+    was_command: bool,
+    /// Recently used commands, read from the settings when first needed.
+    recent: Vec<CommandId>,
+    recent_loaded: bool,
+    /// The query was set by the bar: put the caret after its last character.
+    caret_end: bool,
+}
+
+/// The search text is a command query: it starts with `>`.
+fn command_text(query: &str) -> Option<&str> {
+    query.trim_start().strip_prefix('>')
+}
+
+fn query_id() -> Id {
+    Id::new("bar-search-query")
 }
 
 impl BarState {
@@ -107,9 +140,22 @@ impl BarState {
 
     /// A hotkey for `mode` was pressed at `t`.
     pub fn press(&mut self, mode: Mode, t: Instant) -> Press {
+        self.press_as(mode, t, false)
+    }
+
+    /// The palette's hotkey was pressed at `t`: search with `>` typed.
+    pub fn press_palette(&mut self, t: Instant) -> Press {
+        self.press_as(Mode::Search, t, true)
+    }
+
+    fn press_as(&mut self, mode: Mode, t: Instant, palette: bool) -> Press {
         if self.visible && self.mode == mode {
-            self.visible = false;
-            return Press::Hide;
+            // The palette's hotkey turns an open note search into the palette,
+            // and closes an open palette.
+            if !palette || command_text(&self.query).is_some() {
+                self.visible = false;
+                return Press::Hide;
+            }
         }
         let was_visible = self.visible;
         self.visible = true;
@@ -119,7 +165,14 @@ impl BarState {
         if mode == Mode::Search {
             self.query.clear();
             self.searched = None;
+            self.commands_for = None;
             self.action = None;
+            if palette {
+                self.query.push('>');
+                self.caret_end = true;
+                self.selected = 0;
+                self.first_row = 0;
+            }
         }
         if was_visible {
             Press::Switch
@@ -300,16 +353,20 @@ fn actions(hit: &Hit) -> [(ActionKind, &'static str); 5] {
     ]
 }
 
-fn run_search(st: &mut BarState) {
-    if st.searched.as_deref() == Some(st.query.as_str()) {
-        return;
-    }
+fn open_store(st: &mut BarState) {
     if st.store.is_none() {
         st.store = Store::open().ok();
         if st.store.is_none() {
             st.notice = Some((STORE_FAILED.into(), Instant::now()));
         }
     }
+}
+
+fn run_search(st: &mut BarState) {
+    if st.searched.as_deref() == Some(st.query.as_str()) {
+        return;
+    }
+    open_store(st);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
     st.parsed = search::parse_local(&st.query, now);
     let selected_id = st.hits.get(st.selected).map(|h| h.id);
@@ -398,16 +455,181 @@ fn perform(ui: &Ui, st: &mut BarState, kind: ActionKind) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// Command palette
+// ---------------------------------------------------------------------------
+
+/// Looks the commands up again when the query changed.
+fn refresh_commands(st: &mut BarState) {
+    if st.commands_for.as_deref() == Some(st.query.as_str()) {
+        return;
+    }
+    if !st.recent_loaded {
+        // First use: the recents are read here, not at startup.
+        st.recent_loaded = true;
+        open_store(st);
+        st.recent = st.store.as_ref().and_then(|s| s.setting(SET_RECENT)).map_or_else(Vec::new, |v| commands::decode_recent(&v));
+    }
+    let started = Instant::now();
+    st.commands = commands::search(command_text(&st.query).unwrap_or_default(), &st.ctx, &st.recent);
+    st.search_ms = started.elapsed().as_secs_f64() * 1000.0;
+    // New text: start from the top.
+    (st.selected, st.first_row) = (0, 0);
+    st.commands_for = Some(st.query.clone());
+}
+
+/// Enter (or a double click) on a command. True when the bar should close.
+fn run_match(st: &mut BarState, m: &Match) -> bool {
+    let Some(command) = commands::command(m.id) else { return false };
+    if m.needs_arg {
+        // Not run: the name goes into the query for the number to be typed after it.
+        st.query = format!(">{} ", command.title);
+        (st.caret_end, st.request_focus, st.commands_for) = (true, true, None);
+        return false;
+    }
+    commands::push_recent(&mut st.recent, m.id);
+    if let Some(store) = st.store.as_ref() {
+        let _ = store.set_setting(SET_RECENT, &commands::encode_recent(&st.recent));
+    }
+    match m.id.bar_target() {
+        // Another mode of the bar itself: it switches in place and stays open.
+        Some(BarTarget::Search(text)) => {
+            st.query = text.to_owned();
+            (st.caret_end, st.request_focus, st.searched) = (true, true, None);
+            false
+        }
+        // The window changes size: the root does the switch (see `Event::Capture`).
+        Some(BarTarget::Capture) => {
+            st.outbox.push(Outbox::Command(m.id, None));
+            false
+        }
+        None => {
+            st.outbox.push(Outbox::Command(m.id, m.arg));
+            true
+        }
+    }
+}
+
+/// The result list in command mode: header, rows, footer. `keys` are Esc, Enter,
+/// Up and Down, consumed by the caller. True when the bar should close.
+fn command_list(ui: &mut Ui, st: &mut BarState, inner: Rect, query_rect: Rect, keys: [bool; 4]) -> bool {
+    let [esc, enter, up, down] = keys;
+    if esc {
+        return true;
+    }
+    let n = st.commands.len();
+    if n > 0 {
+        if up {
+            st.selected = (st.selected + n - 1) % n;
+        }
+        if down {
+            st.selected = (st.selected + 1) % n;
+        }
+        if enter {
+            let m = st.commands[st.selected].clone();
+            if run_match(st, &m) {
+                return true;
+            }
+        }
+    }
+
+    // Header.
+    let header = Rect::from_min_size(pos2(inner.left(), query_rect.bottom() + 4.0), vec2(inner.width(), 22.0));
+    ui.scope_builder(UiBuilder::new().max_rect(header).layout(Layout::left_to_right(Align::Center)), |ui| {
+        ui.add_space(4.0);
+        ui.label(RichText::new("Команды").size(12.0).color(theme::muted()));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let stats = match st.notice.as_ref().filter(|(_, t)| t.elapsed() < Duration::from_millis(1500)) {
+                Some((text, _)) => text.clone(),
+                None => format!("{} · {:.2} мс", n, st.search_ms),
+            };
+            ui.label(RichText::new(stats).size(11.5).color(theme::muted()));
+        });
+    });
+    if st.notice.as_ref().is_some_and(|(_, t)| t.elapsed() < Duration::from_millis(1500)) {
+        ui.ctx().request_repaint_after(Duration::from_millis(1500));
+    }
+
+    // Rows.
+    let footer_h = 22.0;
+    let list = Rect::from_min_max(pos2(inner.left(), header.bottom() + 6.0), pos2(inner.right(), inner.bottom() - footer_h - 4.0));
+    let visible_rows = ((list.height() / CMD_ROW_H).floor() as usize).max(1);
+    if st.selected < st.first_row {
+        st.first_row = st.selected;
+    } else if st.selected >= st.first_row + visible_rows {
+        st.first_row = st.selected + 1 - visible_rows;
+    }
+    let wheel = ui.input(|i| if list.contains(i.pointer.hover_pos().unwrap_or_default()) { i.smooth_scroll_delta.y } else { 0.0 });
+    if wheel.abs() > 0.5 {
+        let max_first = n.saturating_sub(visible_rows);
+        st.first_row = if wheel < 0.0 { (st.first_row + 1).min(max_first) } else { st.first_row.saturating_sub(1) };
+    }
+    if n == 0 {
+        ui.painter().text(list.center_top() + vec2(0.0, 40.0), Align2::CENTER_TOP, "Такой команды нет", FontId::proportional(14.0), theme::muted());
+    }
+    let (mut clicked, mut double) = (None, None);
+    for (row, idx) in (st.first_row..n.min(st.first_row + visible_rows)).enumerate() {
+        let m = &st.commands[idx];
+        let r = Rect::from_min_size(pos2(list.left(), list.top() + row as f32 * CMD_ROW_H), vec2(list.width(), CMD_ROW_H - 4.0));
+        let resp = ui.interact(r, ui.id().with(("command", m.id.key())), Sense::click());
+        if resp.clicked() {
+            clicked = Some(idx);
+        }
+        if resp.double_clicked() {
+            double = Some(idx);
+        }
+        let selected = idx == st.selected;
+        if selected || resp.hovered() {
+            ui.painter().rect_filled(r, CornerRadius::same(8), theme::wash(if selected { 20 } else { 9 }));
+        }
+        // The format of the number the command takes, on the right.
+        let mut right = r.right() - 14.0;
+        if let Some(Arg::Number { hint, .. }) = commands::command(m.id).map(|c| c.arg) {
+            let hint = match m.arg {
+                Some(n) => format!("{hint}: {n}"),
+                None => hint.to_owned(),
+            };
+            let g = ui.painter().text(pos2(right, r.center().y), Align2::RIGHT_CENTER, hint, FontId::proportional(12.5), theme::muted());
+            right = g.left() - 10.0;
+        }
+        let galley = ui.painter().layout_job(highlighted(&m.title, 14.5, theme::text(), (right - r.left() - 28.0).max(40.0)));
+        ui.painter().galley(pos2(r.left() + 14.0, r.center().y - galley.size().y / 2.0), galley, theme::text());
+    }
+    if let Some(idx) = clicked {
+        st.selected = idx;
+    }
+    if let Some(idx) = double {
+        st.selected = idx;
+        let m = st.commands[idx].clone();
+        if run_match(st, &m) {
+            return true;
+        }
+    }
+
+    ui.painter().text(
+        pos2(inner.left() + 4.0, inner.bottom() - footer_h / 2.0),
+        Align2::LEFT_CENTER,
+        "↑↓ выбор · Enter — выполнить · Esc · стереть > — к заметкам",
+        FontId::proportional(11.5),
+        theme::muted(),
+    );
+    false
+}
+
 fn search_ui(ui: &mut Ui, st: &mut BarState) -> bool {
     let in_actions = st.action.is_some();
+    let commands_shown = command_text(&st.query).is_some();
     // Disabled while fading out: draw as before, react to nothing.
     let enabled = ui.is_enabled();
     let (esc, enter, up, down, left, right, tab, copy) = ui.input_mut(|i| {
         if !enabled {
             return Default::default();
         }
-        let copy = i.events.iter().any(|e| matches!(e, egui::Event::Copy));
-        i.events.retain(|e| !matches!(e, egui::Event::Copy));
+        // Ctrl+C copies the selected note; among commands it stays the text field's.
+        let copy = !commands_shown && i.events.iter().any(|e| matches!(e, egui::Event::Copy));
+        if !commands_shown {
+            i.events.retain(|e| !matches!(e, egui::Event::Copy));
+        }
         (
             i.consume_key(Modifiers::NONE, Key::Escape),
             i.consume_key(Modifiers::NONE, Key::Enter),
@@ -427,11 +649,19 @@ fn search_ui(ui: &mut Ui, st: &mut BarState) -> bool {
     let mut edit = None;
     ui.scope_builder(UiBuilder::new().max_rect(query_rect).layout(Layout::left_to_right(Align::Center)), |ui| {
         ui.add_space(4.0);
-        ui.label(RichText::new("\u{E721}").font(theme::icons(16.0)).color(theme::dim()));
+        let icon = if commands_shown { "\u{E756}" } else { "\u{E721}" };
+        ui.label(RichText::new(icon).font(theme::icons(16.0)).color(theme::dim()));
         ui.add_space(8.0);
+        if std::mem::take(&mut st.caret_end) {
+            let at = CCursor::new(st.query.chars().count());
+            let mut state = egui::text_edit::TextEditState::load(ui.ctx(), query_id()).unwrap_or_default();
+            state.cursor.set_char_range(Some(CCursorRange::one(at)));
+            state.store(ui.ctx(), query_id());
+        }
         edit = Some(
             ui.add(
                 egui::TextEdit::singleline(&mut st.query)
+                    .id(query_id())
                     .hint_text("Найти заметку: текст, #тег, «идеи прошлого месяца»")
                     .font(FontId::proportional(18.0))
                     .text_color(theme::text())
@@ -447,6 +677,18 @@ fn search_ui(ui: &mut Ui, st: &mut BarState) -> bool {
         if edit.changed() {
             st.action = None;
         }
+    }
+    // The palette (`>` typed, or removed again) takes the list over from the notes.
+    let commands_now = command_text(&st.query).is_some();
+    if commands_now != st.was_command {
+        st.was_command = commands_now;
+        (st.selected, st.first_row, st.action) = (0, 0, None);
+        // The hits are for a query typed before the palette; look again.
+        st.searched = None;
+    }
+    if commands_now {
+        refresh_commands(st);
+        return command_list(ui, st, inner, query_rect, [esc, enter, up, down]);
     }
     run_search(st);
 
@@ -669,5 +911,79 @@ pub(crate) fn age(ts: i64) -> String {
         d if d < 30 => format!("{d} дн"),
         d if d < 365 => format!("{} мес", d / 30),
         d => format!("{} г", d / 365),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn palette_hotkey_opens_search_with_the_prompt_typed() {
+        let mut bar = BarState::default();
+        assert!(matches!(bar.press_palette(Instant::now()), Press::Show));
+        assert_eq!((bar.mode, bar.query.as_str(), bar.caret_end), (Mode::Search, ">", true));
+        // A second press closes it.
+        assert!(matches!(bar.press_palette(Instant::now()), Press::Hide));
+        assert!(!bar.visible);
+    }
+
+    #[test]
+    fn palette_hotkey_turns_an_open_search_into_the_palette() {
+        let mut bar = BarState::default();
+        bar.press(Mode::Search, Instant::now());
+        bar.query = "идеи".into();
+        assert!(matches!(bar.press_palette(Instant::now()), Press::Switch));
+        assert_eq!(bar.query, ">");
+        // From capture too.
+        let mut bar = BarState::default();
+        bar.press(Mode::Capture, Instant::now());
+        assert!(matches!(bar.press_palette(Instant::now()), Press::Switch));
+        assert_eq!(bar.mode, Mode::Search);
+    }
+
+    #[test]
+    fn only_a_leading_prompt_makes_a_command_query() {
+        assert_eq!(command_text(">архив"), Some("архив"));
+        assert_eq!(command_text("  > архив"), Some(" архив"));
+        assert_eq!(command_text("архив >"), None);
+        assert_eq!(command_text(""), None);
+    }
+
+    #[test]
+    fn enter_on_a_command_that_needs_a_number_asks_for_it() {
+        let mut st = BarState { ctx: Ctx { layer_visible: true, tint: 70, ..Ctx::default() }, ..BarState::default() };
+        st.recent_loaded = true;
+        st.query = ">затемнение".into();
+        refresh_commands(&mut st);
+        let m = st.commands[0].clone();
+        assert!(!run_match(&mut st, &m));
+        assert_eq!(st.query, ">Затемнение слоя ");
+        assert!(st.outbox.is_empty());
+        // Typing the number makes it runnable and closes the bar.
+        st.query.push_str("40");
+        refresh_commands(&mut st);
+        let m = st.commands[0].clone();
+        assert!(run_match(&mut st, &m));
+        assert!(matches!(st.outbox[..], [Outbox::Command(CommandId::Dimming, Some(40))]));
+    }
+
+    #[test]
+    fn commands_that_open_the_bar_do_not_close_it() {
+        let mut st = BarState { ctx: Ctx { layer_visible: true, ..Ctx::default() }, ..BarState::default() };
+        st.recent_loaded = true;
+        st.query = ">идеи".into();
+        refresh_commands(&mut st);
+        let m = st.commands[0].clone();
+        assert_eq!(m.id, CommandId::ShowIdeas);
+        assert!(!run_match(&mut st, &m));
+        assert_eq!(st.query, "идеи ");
+        assert!(st.outbox.is_empty());
+        // The capture is switched by the root, which resizes the window.
+        st.query = ">новая".into();
+        refresh_commands(&mut st);
+        let m = st.commands[0].clone();
+        assert!(!run_match(&mut st, &m));
+        assert!(matches!(st.outbox[..], [Outbox::Command(CommandId::NewNote, None)]));
     }
 }

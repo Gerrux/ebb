@@ -225,8 +225,7 @@ impl EbbApp {
                 return;
             }
             MenuItem::Collapse => {
-                self.curtain_anim = Some((Instant::now(), self.curtain, 1.0));
-                ui.ctx().request_repaint();
+                self.toggle_curtain(ui.ctx());
                 return;
             }
         };
@@ -451,6 +450,25 @@ impl EbbApp {
         let now = Instant::now();
         self.appearing = self.cards.iter().map(|c| (c.id, now)).collect();
         ctx.request_repaint();
+    }
+
+    /// The layer's hotkey and the palette: hides a layer that is up, else brings it up.
+    pub(super) fn toggle_layer(&mut self, ctx: &egui::Context) {
+        if self.layer_visible && !self.collapsed {
+            self.set_layer_visible(ctx, false);
+        } else {
+            self.summon(ctx);
+        }
+    }
+
+    /// Rolls the layer up into its tab (the curtain), or brings a rolled-up one back.
+    pub(super) fn toggle_curtain(&mut self, ctx: &egui::Context) {
+        if self.collapsed {
+            self.summon(ctx);
+        } else {
+            self.curtain_anim = Some((Instant::now(), self.curtain, 1.0));
+            ctx.request_repaint();
+        }
     }
 
     /// Esc / second tray click: back under the windows, or hidden (a setting).

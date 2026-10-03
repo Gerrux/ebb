@@ -344,6 +344,74 @@ impl EbbApp {
         self.cards.iter().position(|c| c.id == id)
     }
 
+    /// A card that was archived or deleted in the database leaves the layer
+    /// (it fades out); the library and the bar reload.
+    fn leave_layer(&mut self, id: i64) {
+        if let Some(idx) = self.index_of(id) {
+            let card = self.cards.remove(idx);
+            self.leaving.push((card, Instant::now()));
+        }
+        self.library.lock().unwrap().invalidate();
+        self.bar.lock().unwrap().invalidate();
+    }
+
+    /// Archives the card at `idx` with a toast and undo. True when it was saved:
+    /// the caller then takes it off the layer (`leave_layer`).
+    fn archive_card(&mut self, idx: usize, done: bool) -> bool {
+        let id = self.cards[idx].id;
+        // What's typed is saved before the card goes.
+        let Some(idx) = self.commit_edit_of_at(idx) else {
+            return false;
+        };
+        let (placement, review_at) = (self.cards[idx].placement, self.cards[idx].review_at);
+        // A reminder already due is dealt with; left set, Rediscover
+        // would bring the card straight back tomorrow.
+        if self.cards[idx].due_reminder(resurface::unix_now()).is_some() {
+            self.cards[idx].review_at = None;
+        }
+        self.cards[idx].archived = true;
+        self.cards[idx].placement = Placement::Archive;
+        if !self.save(idx) {
+            // Still in the database as it was: stays on the layer.
+            (self.cards[idx].archived, self.cards[idx].placement, self.cards[idx].review_at) =
+                (false, placement, review_at);
+            return false;
+        }
+        let text = if done { "Сделано, карточка в архиве" } else { "Карточка в архиве" };
+        self.toast = Some(Toast::new(text, Some(Undo::Unarchive(id))));
+        true
+    }
+
+    /// Pins the card at `idx`, or unpins it.
+    fn toggle_pin(&mut self, idx: usize) {
+        self.cards[idx].pinned ^= true;
+        self.cards[idx].placement = if self.cards[idx].pinned { Placement::Pinned } else { Placement::Manual };
+        self.save(idx);
+    }
+
+    /// Palette: archives the selected card.
+    pub(super) fn archive_active(&mut self) {
+        let Some(id) = self.active else { return };
+        if let Some(idx) = self.index_of(id)
+            && self.archive_card(idx, false)
+        {
+            self.leave_layer(id);
+            self.active = None;
+        }
+    }
+
+    /// The selected card, if it is still on the layer.
+    pub(super) fn active_card(&self) -> Option<&Card> {
+        self.active.and_then(|id| self.cards.iter().find(|c| c.id == id))
+    }
+
+    /// Palette: pins or unpins the selected card.
+    pub(super) fn toggle_pin_active(&mut self) {
+        if let Some(idx) = self.active.and_then(|id| self.index_of(id)) {
+            self.toggle_pin(idx);
+        }
+    }
+
     /// An empty note at `pos` (layer coordinates), its editor open: the "+"
     /// button, the menu's "Новая заметка" and a double-click on the layer.
     /// Closed with nothing typed, it's discarded (see `commit_edit`).
@@ -780,15 +848,7 @@ impl EbbApp {
                     self.cards[idx].placement = Placement::Manual;
                     self.save(idx);
                 }
-                Action::TogglePin => {
-                    self.cards[idx].pinned ^= true;
-                    self.cards[idx].placement = if self.cards[idx].pinned {
-                        Placement::Pinned
-                    } else {
-                        Placement::Manual
-                    };
-                    self.save(idx);
-                }
+                Action::TogglePin => self.toggle_pin(idx),
                 Action::Copy => {
                     let c = &self.cards[idx];
                     let _ = self.store.touch(c.id);
@@ -887,38 +947,9 @@ impl EbbApp {
                     }
                 }
                 Action::Archive | Action::Done => {
-                    // What's typed is saved before the card goes.
-                    let Some(idx) = self.commit_edit_of_at(idx) else {
-                        continue;
-                    };
-                    let (placement, review_at) =
-                        (self.cards[idx].placement, self.cards[idx].review_at);
-                    // A reminder already due is dealt with; left set, Rediscover
-                    // would bring the card straight back tomorrow.
-                    if self.cards[idx]
-                        .due_reminder(resurface::unix_now())
-                        .is_some()
-                    {
-                        self.cards[idx].review_at = None;
+                    if self.archive_card(idx, done) {
+                        remove = Some(id);
                     }
-                    self.cards[idx].archived = true;
-                    self.cards[idx].placement = Placement::Archive;
-                    if !self.save(idx) {
-                        // Still in the database as it was: stays on the layer.
-                        (
-                            self.cards[idx].archived,
-                            self.cards[idx].placement,
-                            self.cards[idx].review_at,
-                        ) = (false, placement, review_at);
-                        continue;
-                    }
-                    let text = if done {
-                        "Сделано, карточка в архиве"
-                    } else {
-                        "Карточка в архиве"
-                    };
-                    self.toast = Some(Toast::new(text, Some(Undo::Unarchive(id))));
-                    remove = Some(id);
                 }
                 Action::Delete => {
                     let Some(idx) = self.commit_edit_of_at(idx) else {
@@ -1064,12 +1095,7 @@ impl EbbApp {
         self.prompt_fill_ui(ui, origin);
         self.tag_input_ui(ui);
         if let Some(id) = remove {
-            if let Some(idx) = self.index_of(id) {
-                let card = self.cards.remove(idx);
-                self.leaving.push((card, Instant::now()));
-            }
-            self.library.lock().unwrap().invalidate();
-            self.bar.lock().unwrap().invalidate();
+            self.leave_layer(id);
         } else if let Some(idx) = to_front.and_then(|id| self.index_of(id))
             && idx + 1 != self.cards.len()
         {

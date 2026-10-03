@@ -41,7 +41,7 @@
 3. [04 — Карточки и типы](04-cards-and-types.md) — редактирование, теги, snooze, поля типов.
 4. [02 — Weekly Review](02-weekly-review.md) — опирается на 01 и 04.
 5. [08 — Разбор импорта](08-import-review.md) — первое впечатление у пользователя с 400+ заметками.
-6. [05 — Command Palette](05-command-palette.md).
+6. [05 — Command Palette](05-command-palette.md) — первый набор готов: `>` в поиске, Win+Alt+K, Ctrl+K на слое.
 7. [06 — Раскладки и мониторы](06-layouts-and-monitors.md).
 8. [07 — Настройки и хоткеи](07-settings-and-hotkeys.md).
 9. [09 — Контекстный resurfacing](09-contextual-resurfacing.md).
