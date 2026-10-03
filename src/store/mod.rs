@@ -1,7 +1,10 @@
 //! SQLite persistence. The schema and its numbered migrations live in
 //! `migrations` (`PRAGMA user_version`); this module is the queries.
 
+mod backup;
 mod migrations;
+
+pub use backup::{backup_dir, latest_backup};
 
 use std::path::{Path, PathBuf};
 
@@ -599,6 +602,14 @@ impl Store {
             card_row,
         )?
         .collect()
+    }
+
+    /// When the latest review was started, if there ever was one.
+    pub fn last_review_at(&self) -> Option<i64> {
+        self.conn
+            .query_row("SELECT MAX(started_at) FROM reviews", [], |r| r.get(0))
+            .ok()
+            .flatten()
     }
 
     pub fn begin_review(&self, at: i64) -> rusqlite::Result<i64> {

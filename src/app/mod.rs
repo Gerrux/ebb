@@ -13,6 +13,7 @@ mod floating;
 mod layer;
 mod paint;
 mod toast;
+mod upkeep;
 
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -142,6 +143,8 @@ pub struct EbbApp {
     /// The pick running on its own thread: the cards it brought back, or None
     /// when there was nothing to do (already made today, or it failed).
     rediscover_job: Option<mpsc::Receiver<Option<Vec<i64>>>>,
+    /// Weekly backup and the review invitation (see `upkeep`).
+    upkeep: upkeep::Upkeep,
 }
 
 impl EbbApp {
@@ -291,6 +294,7 @@ impl EbbApp {
             frames: 0,
             next_rediscover,
             rediscover_job: None,
+            upkeep: upkeep::Upkeep::new(now),
         }
     }
 
@@ -505,7 +509,9 @@ impl EbbApp {
             Request::Changed => {
                 self.reload_cards();
                 self.bar.lock().unwrap().invalidate();
+                self.upkeep.cards_changed(&self.store);
             }
+            Request::ReviewSchedule => self.upkeep.rerun(ctx),
             Request::SetMonitor(device) => self.set_monitor(&device),
             Request::SetBackdrop(b) => self.set_backdrop(b),
             Request::SetTint(t) => {
@@ -716,7 +722,10 @@ impl eframe::App for EbbApp {
                 }
                 // Slept through the morning, or the clock moved: look again now
                 // (a pick already made today is left as it is).
-                Event::ClockChanged => self.next_rediscover = 0,
+                Event::ClockChanged => {
+                    self.next_rediscover = 0;
+                    self.upkeep.rerun(ctx);
+                }
                 Event::TogglePinBottom => {
                     self.set_pin_bottom(!win::PIN_BOTTOM.load(Ordering::Relaxed))
                 }
@@ -737,6 +746,7 @@ impl eframe::App for EbbApp {
         }
 
         self.schedule_rediscover(ctx);
+        self.upkeep.step(ctx);
 
         if self.layer_faded_out.swap(false, Ordering::Relaxed) && !self.layer_visible {
             ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(false));
@@ -1010,6 +1020,12 @@ impl eframe::App for EbbApp {
                     .ui(ui, &mut self.store, &mut self.cards, self.hwnd)
                 {
                     self.open_library(ui.ctx(), Tab::Import);
+                }
+                // The import goes first; the invitation waits for its panel to close.
+                if !self.sticky.showing()
+                    && matches!(self.upkeep.ui(ui, &self.store), upkeep::Choice::Start)
+                {
+                    self.open_library(ui.ctx(), Tab::Review);
                 }
                 self.toast_ui(ui);
                 self.menu_ui(ui);

@@ -147,6 +147,11 @@ impl StickyImport {
             .expect("spawn sticky scan");
     }
 
+    /// Whether a panel is up (the offer, a result or an error).
+    pub fn showing(&self) -> bool {
+        !matches!(*self.state.lock().unwrap(), State::Idle | State::Scanning)
+    }
+
     fn apply(offer: &Offer, store: &mut Store, cards: &mut Vec<Card>, screen: &sticky::Screen) -> State {
         // Cards being replaced don't block their own spots.
         let occupied: Vec<Rect> = cards

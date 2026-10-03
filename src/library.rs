@@ -17,12 +17,13 @@ use crate::autostart;
 use crate::bar::{age, highlighted};
 use crate::card::{Card, Kind};
 use crate::resurface::{self, DAY, days_word};
+use crate::review;
 use crate::rich_text;
 use crate::search;
 use crate::sticky::ImportGroup;
 use crate::store::{
     Hit, ImportAction, ImportItem, ImportSnapshot, ReviewAction, ReviewSnapshot, STORE_FAILED,
-    Scope, Store, TRASH_DAYS,
+    Scope, Store, TRASH_DAYS, backup_dir, latest_backup,
 };
 use crate::theme;
 use crate::win::{self, Backdrop};
@@ -32,8 +33,15 @@ pub const SETTINGS_SIZE: Vec2 = vec2(600.0, 680.0);
 const ROW_H: f32 = 58.0;
 const HEADER_H: f32 = 52.0;
 const RESULTS: usize = 200;
-/// Cards in one weekly review.
-const REVIEW_CARDS: usize = 15;
+const WEEKDAYS: [&str; 7] = [
+    "Понедельник",
+    "Вторник",
+    "Среда",
+    "Четверг",
+    "Пятница",
+    "Суббота",
+    "Воскресенье",
+];
 /// Review buttons, in key order: label, action, what the summary calls it.
 const REVIEW_ACTIONS: [(&str, ReviewAction, &str); 6] = [
     ("← Оставить", ReviewAction::Keep, "оставлено"),
@@ -119,7 +127,67 @@ pub enum Request {
     SetHideFromCapture(bool),
     SetCardStyle(crate::card::CardStyle),
     SetTheme(theme::ThemeMode),
+    /// The review invitation's schedule changed (already saved).
+    ReviewSchedule,
     ImportSticky,
+}
+
+/// The manual backup as the settings tab shows it.
+#[derive(Default)]
+struct BackupUi {
+    busy: bool,
+    /// Date of the newest backup, "31.01.2025".
+    last: Option<String>,
+    /// How the last manual backup ended.
+    result: Option<Result<(), String>>,
+}
+
+/// "ebb-2025-01-31.db" -> "31.01.2025".
+fn backup_date(path: &std::path::Path) -> Option<String> {
+    let name = path.file_name()?.to_string_lossy();
+    let date = name.strip_prefix("ebb-")?.strip_suffix(".db")?;
+    let mut parts = date.splitn(3, '-');
+    let (y, m, d) = (parts.next()?, parts.next()?, parts.next()?);
+    Some(format!("{d}.{m}.{y}"))
+}
+
+fn newest_backup_date() -> Option<String> {
+    latest_backup(&backup_dir()).and_then(|p| backup_date(&p))
+}
+
+/// A copy of the database on its own short-lived thread and connection:
+/// `VACUUM INTO` can take longer than a frame may.
+fn backup_job(state: &Arc<Mutex<BackupUi>>, ctx: &egui::Context) {
+    {
+        let mut ui = state.lock().unwrap();
+        if ui.busy {
+            return;
+        }
+        ui.busy = true;
+        ui.result = None;
+    }
+    let (job_state, ctx) = (state.clone(), ctx.clone());
+    let spawned = std::thread::Builder::new().name("backup".into()).spawn(move || {
+        let (now, offset) = (resurface::unix_now(), search::local_offset_secs());
+        let result = Store::open()
+            .and_then(|store| store.backup_into(&backup_dir(), now, offset))
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+        let last = newest_backup_date();
+        let mut ui = job_state.lock().unwrap();
+        ui.busy = false;
+        if result.is_ok() {
+            ui.last = last;
+        }
+        ui.result = Some(result);
+        drop(ui);
+        ctx.request_repaint_of(viewport_id());
+    });
+    if let Err(e) = spawned {
+        let mut ui = state.lock().unwrap();
+        ui.busy = false;
+        ui.result = Some(Err(e.to_string()));
+    }
 }
 
 #[derive(Default)]
@@ -167,6 +235,12 @@ pub struct LibraryState {
     import: ImportReview,
     /// Imported cards not yet sorted out; the Import tab shows while there are any.
     import_left: usize,
+    /// The review and backup values below are read when the settings tab opens.
+    data_loaded: bool,
+    review_on: bool,
+    review_day: u8,
+    review_hour: u8,
+    backup: Arc<Mutex<BackupUi>>,
 }
 
 /// The import review: groups of imported cards and what was done to them.
@@ -200,6 +274,7 @@ impl LibraryState {
             self.monitors = win::monitors();
         }
         self.open = true;
+        self.data_loaded = false;
         self.tab = tab;
         self.settings_only = tab == Tab::Settings;
         if tab == Tab::Review {
@@ -478,7 +553,7 @@ fn ensure_review(st: &mut LibraryState) {
     let cards = st
         .store
         .as_ref()
-        .and_then(|store| store.review_queue(resurface::unix_now(), REVIEW_CARDS).ok());
+        .and_then(|store| store.review_queue(resurface::unix_now(), review::REVIEW_CARDS).ok());
     st.review = Review {
         loaded: true,
         cards: cards.unwrap_or_default(),
@@ -1628,6 +1703,23 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
     if let Some(store) = st.store.as_ref() {
         st.counts = store.counts().unwrap_or(st.counts);
         st.import_left = store.import_left().unwrap_or(st.import_left);
+        if !st.data_loaded {
+            st.data_loaded = true;
+            let defaults = review::Schedule::default();
+            let read = |key: &str, max: u8, fallback: u8| {
+                store
+                    .setting(key)
+                    .and_then(|v| v.trim().parse::<u8>().ok())
+                    .filter(|v| *v <= max)
+                    .unwrap_or(fallback)
+            };
+            st.review_on = store.setting(review::SET_INVITE).as_deref() != Some("0");
+            st.review_day = read(review::SET_DAY, 6, defaults.weekday);
+            st.review_hour = read(review::SET_HOUR, 23, defaults.hour);
+            let mut backup = st.backup.lock().unwrap();
+            backup.last = newest_backup_date();
+            backup.result = None;
+        }
     }
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 6.0;
@@ -1776,6 +1868,41 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
         }
         note(ui, "Пока секрет показан, слой не попадает в скриншоты, запись и демонстрацию экрана.");
 
+        section(ui, "Обзор");
+        let mut changed = ui
+            .checkbox(&mut st.review_on, "Приглашать к обзору раз в неделю")
+            .changed();
+        if st.review_on {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Когда").size(13.0).color(theme::dim()));
+                egui::ComboBox::from_id_salt("review-day")
+                    .selected_text(WEEKDAYS[usize::from(st.review_day)])
+                    .width(130.0)
+                    .show_ui(ui, |ui| {
+                        for (i, name) in WEEKDAYS.iter().enumerate() {
+                            changed |= ui.selectable_value(&mut st.review_day, i as u8, *name).changed();
+                        }
+                    });
+                egui::ComboBox::from_id_salt("review-hour")
+                    .selected_text(format!("{:02}:00", st.review_hour))
+                    .width(80.0)
+                    .show_ui(ui, |ui| {
+                        for hour in 0..24u8 {
+                            changed |= ui
+                                .selectable_value(&mut st.review_hour, hour, format!("{hour:02}:00"))
+                                .changed();
+                        }
+                    });
+            });
+        }
+        note(ui, "На слое появится приглашение разобрать заметки. Через три дня оно уходит само; если разбирать почти нечего, не появляется.");
+        if changed && let Some(store) = st.store.as_ref() {
+            let _ = store.set_setting(review::SET_INVITE, if st.review_on { "1" } else { "0" });
+            let _ = store.set_setting(review::SET_DAY, &st.review_day.to_string());
+            let _ = store.set_setting(review::SET_HOUR, &st.review_hour.to_string());
+            st.outbox.push(Request::ReviewSchedule);
+        }
+
         section(ui, "Запуск");
         let mut on_launch = st.settings.settings_on_launch;
         if ui.checkbox(&mut on_launch, "Открывать это окно при запуске Ebb из ярлыка").changed() {
@@ -1865,5 +1992,51 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
                 }
             }
         });
+
+        ui.add_space(4.0);
+        let (busy, last, result) = {
+            let backup = st.backup.lock().unwrap();
+            (backup.busy, backup.last.clone(), backup.result.clone())
+        };
+        ui.label(
+            RichText::new(match &last {
+                Some(date) => format!("Последняя копия: {date}"),
+                None => "Последняя копия: ещё не делалась".to_owned(),
+            })
+            .size(13.0)
+            .color(theme::dim()),
+        );
+        note(ui, "Раз в неделю, хранятся 4 последние. Значения Private в копии читаются только под этим профилем Windows.");
+        ui.horizontal(|ui| {
+            if ui.add_enabled(!busy, egui::Button::new("Сделать копию сейчас")).clicked() {
+                backup_job(&st.backup, ui.ctx());
+            }
+            if ui.button("Показать копии").clicked() {
+                let dir = backup_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::process::Command::new("explorer.exe").arg(dir).spawn();
+            }
+            match &result {
+                Some(Ok(())) => note(ui, "Копия сохранена"),
+                Some(Err(e)) => note(ui, &format!("Не удалось: {e}")),
+                None if busy => note(ui, "Копирую…"),
+                None => {}
+            }
+        });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::backup_date;
+    use std::path::Path;
+
+    #[test]
+    fn backup_date_reads_the_file_name() {
+        assert_eq!(
+            backup_date(Path::new("x/ebb-2025-01-31.db")).as_deref(),
+            Some("31.01.2025")
+        );
+        assert_eq!(backup_date(Path::new("x/other.db")), None);
+    }
 }
