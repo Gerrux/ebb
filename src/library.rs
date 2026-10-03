@@ -16,10 +16,12 @@ use egui::{
 use crate::autostart;
 use crate::bar::{age, highlighted};
 use crate::card::{Card, Kind};
+use crate::hotkey::{self, Action, Combo, Config, Wanted};
 use crate::resurface::{self, DAY, days_word};
 use crate::review;
 use crate::rich_text;
 use crate::search;
+use crate::shell::{self, Binding, Hotkeys};
 use crate::sticky::ImportGroup;
 use crate::store::{
     Hit, ImportAction, ImportItem, ImportSnapshot, ReviewAction, ReviewSnapshot, STORE_FAILED,
@@ -74,8 +76,9 @@ pub struct LayerSettings {
     pub backdrop: Backdrop,
     pub tint: u8,
     pub pin_bottom: bool,
-    pub capture_hotkey: Option<&'static str>,
-    pub search_hotkey: Option<&'static str>,
+    /// What each hotkey is bound to now, and what the settings ask of it.
+    pub hotkeys: Hotkeys,
+    pub hotkey_config: Config,
     /// Esc / tray click on a summoned layer hides it instead of sending it back.
     pub dismiss_hides: bool,
     /// The layer collapses to a notch at the top edge; else to a tab at the bottom.
@@ -97,8 +100,8 @@ impl Default for LayerSettings {
             backdrop: Backdrop::AccentAcrylic,
             tint: 70,
             pin_bottom: true,
-            capture_hotkey: None,
-            search_hotkey: None,
+            hotkeys: Hotkeys::default(),
+            hotkey_config: [Wanted::Default; 4],
             dismiss_hides: false,
             curtain_top: true,
             settings_on_launch: true,
@@ -127,6 +130,12 @@ pub enum Request {
     SetHideFromCapture(bool),
     SetCardStyle(crate::card::CardStyle),
     SetTheme(theme::ThemeMode),
+    /// Bind the action's hotkey as asked; the root answers through
+    /// [`LibraryState::hotkey_errors`] and `settings.hotkeys`.
+    SetHotkey(Action, Wanted),
+    /// A combination is being recorded (`true`): Ebb's own hotkeys step aside
+    /// until `false`.
+    RecordHotkey(bool),
     /// The review invitation's schedule changed (already saved).
     ReviewSchedule,
     ImportSticky,
@@ -217,6 +226,10 @@ pub struct LibraryState {
     pub welcome: bool,
     pub settings: LayerSettings,
     pub outbox: Vec<Request>,
+    /// Why a hotkey didn't change (or a hint while recording), per action.
+    pub hotkey_errors: [Option<String>; 4],
+    /// The row whose combination is being recorded.
+    recording: Option<Action>,
 
     store: Option<Store>,
     query: String,
@@ -266,10 +279,24 @@ struct Review {
 }
 
 impl LibraryState {
+    /// Whether a hotkey combination is being recorded.
+    pub fn recording(&self) -> bool {
+        self.recording.is_some()
+    }
+
+    /// Ends recording and lets Ebb's hotkeys back in.
+    fn stop_recording(&mut self) {
+        if self.recording.take().is_some() {
+            self.outbox.push(Request::RecordHotkey(false));
+        }
+    }
+
     pub fn open(&mut self, tab: Tab) {
+        self.stop_recording();
         if !self.open {
             self.placed = false;
             self.hwnd = None;
+            self.hotkey_errors = Default::default();
             *self.autostart.lock().unwrap() = AutostartUi::Unknown;
             self.monitors = win::monitors();
         }
@@ -297,6 +324,7 @@ impl LibraryState {
     }
 
     fn switch_tab(&mut self, tab: Tab) {
+        self.stop_recording();
         self.tab = tab;
         self.query.clear();
         self.searched = None;
@@ -309,6 +337,7 @@ impl LibraryState {
     }
 
     fn close(&mut self) {
+        self.stop_recording();
         self.open = false;
         self.welcome = false;
         // Drop the connection and results with the window.
@@ -348,6 +377,8 @@ pub fn ui(ui: &mut Ui, state: &Mutex<LibraryState>) {
     if !st.open {
         return;
     }
+    // First: it takes the key presses, so Esc and the shortcuts below don't see them.
+    record_hotkey(ui, &mut st);
     let (close_requested, esc) =
         ui.input(|i| (i.viewport().close_requested(), i.key_pressed(Key::Escape)));
     let next_tab = !st.settings_only && ui.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Tab));
@@ -392,6 +423,58 @@ pub fn ui(ui: &mut Ui, state: &Mutex<LibraryState>) {
     }
     if !st.outbox.is_empty() {
         ui.ctx().request_repaint_of(ViewportId::ROOT);
+    }
+}
+
+/// While a hotkey row records: swallows the frame's key events and turns the
+/// first key press into a combination. Esc cancels; a combination without Ctrl,
+/// Alt or Win, or a key Ebb doesn't offer, is a hint and recording goes on.
+fn record_hotkey(ui: &Ui, st: &mut LibraryState) {
+    let Some(action) = st.recording else { return };
+    // Away from the window the keys belong to other programs: let the hotkeys back.
+    if ui.input(|i| i.viewport().focused) == Some(false) {
+        st.stop_recording();
+        return;
+    }
+    let mut pressed = None;
+    ui.input_mut(|i| {
+        let frame_mods = i.modifiers;
+        i.events.retain(|event| {
+            let press = match event {
+                egui::Event::Key { key, physical_key, pressed: down, repeat, modifiers, .. } => {
+                    // The physical key keeps it working under the Russian layout.
+                    (*down && !*repeat).then(|| (physical_key.unwrap_or(*key), *modifiers))
+                }
+                // Typed text would otherwise reach a focused field.
+                egui::Event::Text(_) => None,
+                // Ctrl+C, Ctrl+Alt+V and the like come as clipboard events, not keys.
+                egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_) => {
+                    let (insert, delete) = (shell::key_down(hotkey::VK_INSERT), shell::key_down(hotkey::VK_DELETE));
+                    hotkey::clipboard_key(event, insert, delete).map(|k| (k, frame_mods))
+                }
+                _ => return true,
+            };
+            if pressed.is_none() {
+                pressed = press;
+            }
+            false
+        });
+    });
+    let Some((key, mods)) = pressed else { return };
+    let slot = action.index();
+    if key == Key::Escape {
+        st.stop_recording();
+        return;
+    }
+    let combo = Combo::from_egui(key, mods.ctrl, mods.alt, mods.shift, shell::win_key_down());
+    match combo {
+        Some(combo) if combo.valid() => {
+            st.stop_recording();
+            st.hotkey_errors[slot] = None;
+            st.outbox.push(Request::SetHotkey(action, Wanted::Custom(combo)));
+        }
+        Some(_) => st.hotkey_errors[slot] = Some("Нужен Win или два из Ctrl, Alt, Shift".into()),
+        None => st.hotkey_errors[slot] = Some("Эту клавишу нельзя использовать".into()),
     }
 }
 
@@ -1696,6 +1779,67 @@ fn preset_tile(ui: &mut Ui, preset: &crate::card::Preset, on: bool) -> egui::Res
         .on_hover_text(preset.hint)
 }
 
+/// One hotkey: its name, the combination as a button that records a new one,
+/// "Сбросить" and "Выключить", and below, why the last attempt didn't work.
+fn hotkey_row(ui: &mut Ui, st: &mut LibraryState, action: Action) {
+    let slot = action.index();
+    let recording = st.recording == Some(action);
+    let wanted = st.settings.hotkey_config[slot];
+    let text = if recording {
+        "Нажмите сочетание…".to_owned()
+    } else {
+        match st.settings.hotkeys.get(action) {
+            Binding::Bound(c) => c.to_string(),
+            Binding::Off => "выключено".to_owned(),
+            Binding::Taken(Some(c)) => format!("занято: {c}"),
+            Binding::Taken(None) => "нет свободного сочетания".to_owned(),
+        }
+    };
+    // Without defaults (the layer) "off" and "default" are the same thing.
+    let no_default = action.defaults().is_empty();
+    let is_off = wanted == Wanted::Off || (no_default && wanted == Wanted::Default);
+    let is_default = wanted == Wanted::Default || (no_default && wanted == Wanted::Off);
+
+    ui.horizontal(|ui| {
+        ui.scope(|ui| {
+            ui.set_min_width(170.0);
+            ui.label(RichText::new(action.label()).size(13.0).color(theme::dim()));
+        });
+        let button = ui
+            .add(egui::Button::new(RichText::new(text).size(13.0)).min_size(vec2(170.0, 0.0)).selected(recording))
+            .on_hover_cursor(CursorIcon::PointingHand);
+        if recording && ui.input(|i| i.pointer.any_pressed()) && !button.contains_pointer() {
+            // A click anywhere else gives up.
+            st.stop_recording();
+        } else if button.clicked() {
+            if recording {
+                st.stop_recording();
+            } else {
+                // Only on the way in: a press on another row has already ended the
+                // recording (above), so this is the usual case.
+                if st.recording.is_none() {
+                    st.outbox.push(Request::RecordHotkey(true));
+                }
+                st.recording = Some(action);
+                st.hotkey_errors[slot] = None;
+            }
+        }
+        if !is_default && ui.small_button("Сбросить").on_hover_text("Вернуть стандартное сочетание").clicked() {
+            st.stop_recording();
+            st.hotkey_errors[slot] = None;
+            st.outbox.push(Request::SetHotkey(action, Wanted::Default));
+        }
+        if !is_off && ui.small_button("Выключить").clicked() {
+            st.stop_recording();
+            st.hotkey_errors[slot] = None;
+            st.outbox.push(Request::SetHotkey(action, Wanted::Off));
+        }
+    });
+    if let Some(error) = &st.hotkey_errors[slot] {
+        ui.label(RichText::new(error).size(12.0).color(ui.visuals().warn_fg_color));
+    }
+}
+
 fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
     if st.store.is_none() {
         st.store = Store::open().ok();
@@ -1960,10 +2104,10 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
         });
 
         section(ui, "Горячие клавиши");
-        let key = |k: Option<&'static str>| k.unwrap_or("занята другой программой");
-        note(ui, &format!("Записать мысль: {}", key(st.settings.capture_hotkey)));
-        note(ui, &format!("Поиск: {}", key(st.settings.search_hotkey)));
-        note(ui, "Если сочетание занято, берётся следующее свободное. Выбор своих сочетаний появится позже.");
+        for action in Action::ALL {
+            hotkey_row(ui, st, action);
+        }
+        note(ui, "Нажмите на сочетание и введите новое: нужен Win или два из Ctrl, Alt, Shift; Esc отменяет. Пока сочетание не выбрано, берётся первое свободное из стандартных.");
 
         section(ui, "Импорт");
         ui.horizontal(|ui| {

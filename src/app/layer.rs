@@ -11,6 +11,7 @@ use egui::{
 use std::sync::atomic::Ordering;
 
 use crate::card;
+use crate::hotkey::Action;
 use crate::library::Tab;
 use crate::shell::Event;
 use crate::theme;
@@ -79,16 +80,12 @@ impl EbbApp {
             Align2::LEFT_CENTER,
             {
                 let keys = self.shell.hotkeys();
-                let label = |key: Option<Option<&'static str>>| match key {
-                    Some(Some(label)) => label,
-                    Some(None) => "хоткей занят",
-                    None => "…",
-                };
+                let label = |action| keys.map_or_else(|| "…".to_owned(), |k| k.get(action).short());
                 format!(
                     "{} карточек  ·  {} — записать  ·  {} — найти  ·  F1 — debug",
                     self.cards.len(),
-                    label(keys.map(|k| k.capture)),
-                    label(keys.map(|k| k.search)),
+                    label(Action::Capture),
+                    label(Action::Search),
                 )
             },
             FontId::proportional(13.0),
@@ -151,7 +148,9 @@ impl EbbApp {
         let button = button.on_hover_cursor(CursorIcon::PointingHand);
 
         let keys = self.shell.hotkeys().unwrap_or_default();
-        let (capture_key, search_key) = (keys.capture.unwrap_or(""), keys.search.unwrap_or(""));
+        let key_text = |action| keys.bound(action).map(|c| c.to_string()).unwrap_or_default();
+        let (capture_key, search_key, library_key) =
+            (key_text(Action::Capture), key_text(Action::Search), key_text(Action::Library));
         let dismiss_label = if self.dismiss_hides { "Скрыть слой" } else { "Убрать на фон" };
         let mut chosen = None;
         egui::Popup::menu(&button)
@@ -167,9 +166,9 @@ impl EbbApp {
                     }
                 };
                 item(ui, "Новая заметка", "", MenuItem::NewNote);
-                item(ui, "Записать мысль", capture_key, MenuItem::Capture);
-                item(ui, "Найти", search_key, MenuItem::Search);
-                item(ui, "Архив и корзина", "Win+Alt+L", MenuItem::Library);
+                item(ui, "Записать мысль", &capture_key, MenuItem::Capture);
+                item(ui, "Найти", &search_key, MenuItem::Search);
+                item(ui, "Архив и корзина", &library_key, MenuItem::Library);
                 item(ui, "Еженедельный обзор", "", MenuItem::Review);
                 ui.separator();
                 item(ui, "Импорт из Sticky Notes…", "", MenuItem::Import);

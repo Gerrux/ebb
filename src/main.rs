@@ -6,6 +6,7 @@ mod autostart;
 mod bench;
 mod card;
 mod emoji;
+mod hotkey;
 mod import_ui;
 mod library;
 mod renderer;

@@ -791,6 +791,12 @@ impl Store {
         Ok(())
     }
 
+    /// Removes the setting's row, so its default applies again; fine if there is none.
+    pub fn delete_setting(&self, key: &str) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM settings WHERE key=?1", [key])?;
+        Ok(())
+    }
+
     /// State of earlier imports from `prefix`, for importing again:
     /// - source ids to leave alone: their card was changed in Ebb (moved, edited,
     ///   trashed) or is gone, so a re-import must not duplicate or resurrect it;

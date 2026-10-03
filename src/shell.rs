@@ -1,10 +1,15 @@
-//! Process-level shell integration: single instance, tray icon, global hotkey.
+//! Process-level shell integration: single instance, tray icon, global hotkeys.
 //!
 //! One background thread owns a hidden top-level window that receives tray
 //! callbacks, `WM_HOTKEY`, `TaskbarCreated` (Explorer restarts) and the "show
 //! the layer" request from a second instance. It blocks in `GetMessageW`, so it
 //! costs nothing while idle. Results reach the UI as [`Event`]s plus a repaint
 //! request, which runs `App::logic` even while the layer is hidden.
+//!
+//! Hotkeys are registered to that window only, so the UI asks for changes
+//! ([`set_hotkey`], [`suspend_hotkeys`]) through a command queue in [`Shared`]
+//! and a posted message, and hears back with [`Event::HotkeySet`]. Which
+//! combinations to bind comes from [`crate::hotkey`].
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -16,7 +21,9 @@ use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
-use windows::Win32::UI::Input::KeyboardAndMouse::{HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_WIN, RegisterHotKey, VK_SPACE};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, HOT_KEY_MODIFIERS, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey, VK_LWIN, VK_RWIN,
+};
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION, NIN_SELECT, NINF_KEY,
     NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
@@ -32,6 +39,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{PCWSTR, w};
 
 use crate::autostart;
+use crate::hotkey::{self, Action, Combo, Config, Wanted};
 
 /// Instance identity. `EBB_INSTANCE=<name>` runs a separate instance (own mutex
 /// and shell window) next to the normal one, e.g. for testing against another
@@ -50,6 +58,7 @@ const WM_TRAY: u32 = WM_APP + 1;
 const WM_SHOW_LAYER: u32 = WM_APP + 2;
 const WM_QUIT_APP: u32 = WM_APP + 3;
 const WM_RETRY_HOTKEYS: u32 = WM_APP + 4;
+const WM_HOTKEY_COMMANDS: u32 = WM_APP + 5;
 const TRAY_ID: u32 = 1;
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 /// `WM_POWERBROADCAST`: resumed from sleep or hibernation.
@@ -72,8 +81,12 @@ pub enum Event {
     OpenReview,
     /// Windows' light/dark mode or accent color changed.
     SystemColors,
-    /// A hotkey taken at startup was registered later; see [`Shared::hotkeys`].
+    /// The bindings changed on their own (a taken hotkey was registered later, or
+    /// they came back after a recording); see [`Shared::hotkeys`].
     HotkeysChanged,
+    /// The answer to [`set_hotkey`]; `ok` is false when a custom combination was
+    /// held by another program (the action then keeps what it had).
+    HotkeySet { action: Action, wanted: Wanted, ok: bool },
     /// Back from sleep, or the clock or time zone changed: timers set for a
     /// wall-clock moment (the morning Rediscover) should look at the time again.
     ClockChanged,
@@ -89,15 +102,77 @@ pub struct Shared {
     pub pin_bottom: AtomicBool,
     /// Hotkeys registered so far; `None` until the shell thread is up.
     hotkeys: Mutex<Option<Hotkeys>>,
+    /// Changes asked of the shell thread, in order; see [`WM_HOTKEY_COMMANDS`].
+    commands: Mutex<Vec<Command>>,
     hwnd: AtomicIsize,
 }
 
-/// Which combination each hotkey got; `None` = every candidate was taken.
-#[derive(Clone, Copy, Default, PartialEq)]
+enum Command {
+    Set(Action, Wanted),
+    Suspend(bool),
+}
+
+/// How one action's hotkey stands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Binding {
+    #[default]
+    Off,
+    Bound(Combo),
+    /// Held by another program: the wanted custom combination, or `None` when
+    /// every default candidate was taken.
+    Taken(Option<Combo>),
+}
+
+impl Binding {
+    /// For the layer's header: the combination or why there is none.
+    pub fn short(self) -> String {
+        match self {
+            Binding::Bound(c) => c.to_string(),
+            Binding::Off => "хоткей выключен".to_owned(),
+            Binding::Taken(_) => "хоткей занят".to_owned(),
+        }
+    }
+}
+
+/// Every action's [`Binding`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Hotkeys {
-    pub capture: Option<&'static str>,
-    pub search: Option<&'static str>,
-    pub library: Option<&'static str>,
+    slots: [Binding; 4],
+}
+
+impl Hotkeys {
+    pub fn get(&self, action: Action) -> Binding {
+        self.slots[action.index()]
+    }
+
+    /// The combination the action holds now, if any.
+    pub fn bound(&self, action: Action) -> Option<Combo> {
+        match self.get(action) {
+            Binding::Bound(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    fn set(&mut self, action: Action, binding: Binding) {
+        self.slots[action.index()] = binding;
+    }
+
+    /// Nothing registered (no shell window): what each wish comes to.
+    fn unbound(config: Config) -> Self {
+        let mut keys = Self::default();
+        for a in Action::ALL {
+            keys.set(
+                a,
+                match config[a.index()] {
+                    Wanted::Default if a.defaults().is_empty() => Binding::Off,
+                    Wanted::Default => Binding::Taken(None),
+                    Wanted::Off => Binding::Off,
+                    Wanted::Custom(c) => Binding::Taken(Some(c)),
+                },
+            );
+        }
+        keys
+    }
 }
 
 impl Shared {
@@ -120,6 +195,45 @@ pub fn retry_hotkeys(shared: &Shared) {
             let _ = PostMessageW(Some(HWND(raw as *mut c_void)), WM_RETRY_HOTKEYS, WPARAM(0), LPARAM(0));
         }
     }
+}
+
+/// Queues `command` for the shell thread. False if it has no window to post to.
+fn post_command(shared: &Shared, command: Command) -> bool {
+    let raw = shared.hwnd.load(Ordering::Relaxed);
+    if raw == 0 {
+        return false;
+    }
+    shared.commands.lock().unwrap().push(command);
+    // Once queued the command runs, if not on this post then with the next
+    // drain; reporting a failed post would answer it twice.
+    let _ = unsafe { PostMessageW(Some(HWND(raw as *mut c_void)), WM_HOTKEY_COMMANDS, WPARAM(0), LPARAM(0)) };
+    true
+}
+
+/// Asks the shell thread to bind `action` as `wanted`; never blocks. Answered
+/// with [`Event::HotkeySet`].
+pub fn set_hotkey(shared: &Shared, action: Action, wanted: Wanted) {
+    if !post_command(shared, Command::Set(action, wanted)) {
+        // No shell window (it failed to start): nothing can be bound.
+        shared.events.lock().unwrap().push(Event::HotkeySet { action, wanted, ok: false });
+    }
+}
+
+/// Unregisters all of Ebb's hotkeys (`true`) or binds them again as configured
+/// (`false`), so a combination Ebb itself holds can be pressed in the settings
+/// window while one is being recorded.
+pub fn suspend_hotkeys(shared: &Shared, suspend: bool) {
+    post_command(shared, Command::Suspend(suspend));
+}
+
+/// Whether the Win key is down right now; egui's modifiers don't have it.
+pub fn win_key_down() -> bool {
+    [VK_LWIN, VK_RWIN].into_iter().any(|vk| key_down(u32::from(vk.0)))
+}
+
+/// Whether the key with virtual-key code `vk` is down right now.
+pub fn key_down(vk: u32) -> bool {
+    unsafe { GetAsyncKeyState(vk as i32) < 0 }
 }
 
 // ---------------------------------------------------------------------------
@@ -176,63 +290,127 @@ pub fn send_to_existing(request: Request) -> bool {
 // Shell thread
 // ---------------------------------------------------------------------------
 
-/// Candidate capture hotkeys, first free one wins. Ctrl+Alt+Space is often taken
-/// (PowerToys), Ctrl+Space and Ctrl+Shift+Space collide with IDE completion.
-const CAPTURE_HOTKEYS: &[(&str, HOT_KEY_MODIFIERS, u32)] = &[
-    ("Win+Alt+N", HOT_KEY_MODIFIERS(MOD_WIN.0 | MOD_ALT.0), b'N' as u32),
-    ("Ctrl+Alt+N", HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_ALT.0), b'N' as u32),
-    ("Ctrl+Alt+Space", HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_ALT.0), VK_SPACE.0 as u32),
-];
-
-/// Search: the spec's Ctrl+Space collides with IDE completion, like capture's.
-const SEARCH_HOTKEYS: &[(&str, HOT_KEY_MODIFIERS, u32)] = &[
-    ("Win+Alt+F", HOT_KEY_MODIFIERS(MOD_WIN.0 | MOD_ALT.0), b'F' as u32),
-    ("Ctrl+Alt+F", HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_ALT.0), b'F' as u32),
-];
-/// Library (archive, trash, settings).
-const LIBRARY_HOTKEYS: &[(&str, HOT_KEY_MODIFIERS, u32)] = &[("Win+Alt+L", HOT_KEY_MODIFIERS(MOD_WIN.0 | MOD_ALT.0), b'L' as u32)];
-/// `WM_HOTKEY` ids: capture candidates use 1.., search 101.., library 201...
-const SEARCH_ID_BASE: i32 = 101;
-const LIBRARY_ID_BASE: i32 = 201;
-
-/// Registers the first free combination; ids are `base + index`.
-unsafe fn register_first(hwnd: HWND, base: i32, candidates: &[(&'static str, HOT_KEY_MODIFIERS, u32)]) -> Option<&'static str> {
-    candidates
-        .iter()
-        .enumerate()
-        .find(|(i, (_, mods, vk))| unsafe { RegisterHotKey(Some(hwnd), base + *i as i32, *mods | MOD_NOREPEAT, *vk) }.is_ok())
-        .map(|(_, (name, ..))| *name)
+unsafe fn try_register(hwnd: HWND, id: i32, combo: &Combo) -> bool {
+    unsafe { RegisterHotKey(Some(hwnd), id, HOT_KEY_MODIFIERS(combo.modifiers()) | MOD_NOREPEAT, combo.vk) }.is_ok()
 }
 
-/// Registers whichever of the three hotkeys is still missing. Runs on the shell
-/// thread, which owns the window the hotkeys are registered to.
-unsafe fn register_missing(hwnd: HWND, mut keys: Hotkeys) -> Hotkeys {
-    unsafe {
-        keys.capture = keys.capture.or_else(|| register_first(hwnd, 1, CAPTURE_HOTKEYS));
-        keys.search = keys.search.or_else(|| register_first(hwnd, SEARCH_ID_BASE, SEARCH_HOTKEYS));
-        keys.library = keys.library.or_else(|| register_first(hwnd, LIBRARY_ID_BASE, LIBRARY_HOTKEYS));
+/// Binds `action` as `wanted`: a default is the first free candidate, a custom
+/// combination is all or nothing. Runs on the shell thread, which owns the
+/// window the hotkeys are registered to.
+unsafe fn register_action(hwnd: HWND, action: Action, wanted: Wanted) -> Binding {
+    match wanted {
+        Wanted::Off => Binding::Off,
+        Wanted::Default if action.defaults().is_empty() => Binding::Off,
+        Wanted::Default => action
+            .defaults()
+            .iter()
+            .enumerate()
+            .find(|(i, c)| unsafe { try_register(hwnd, hotkey::hotkey_id(action, *i), c) })
+            .map_or(Binding::Taken(None), |(_, c)| Binding::Bound(*c)),
+        Wanted::Custom(c) if unsafe { try_register(hwnd, hotkey::hotkey_id(action, 0), &c) } => Binding::Bound(c),
+        Wanted::Custom(c) => Binding::Taken(Some(c)),
+    }
+}
+
+/// Drops whatever `action` has registered (any candidate, or the custom one).
+unsafe fn unregister_action(hwnd: HWND, action: Action) {
+    for i in 0..action.defaults().len().max(1) {
+        let _ = unsafe { UnregisterHotKey(Some(hwnd), hotkey::hotkey_id(action, i)) };
+    }
+}
+
+unsafe fn register_all(hwnd: HWND, config: Config) -> Hotkeys {
+    let mut keys = Hotkeys::default();
+    for a in hotkey::registration_order(&config) {
+        keys.set(a, unsafe { register_action(hwnd, a, config[a.index()]) });
     }
     keys
 }
 
-/// Retries the missing hotkeys and tells the UI when something changed.
-unsafe fn retry_missing(hwnd: HWND) {
-    let Some((shared, before)) = STATE.with_borrow(|s| s.as_ref().map(|s| (s.shared.clone(), s.shared.hotkeys()))) else { return };
-    let Some(before) = before else { return };
-    if before.capture.is_some() && before.search.is_some() && before.library.is_some() {
-        return;
-    }
-    let after = unsafe { register_missing(hwnd, before) };
+/// Runs `f` on the shell thread's state (never across a call that pushes events).
+fn with_state<R>(f: impl FnOnce(&mut ThreadState) -> R) -> Option<R> {
+    STATE.with_borrow_mut(|s| s.as_mut().map(f))
+}
+
+/// Publishes new bindings to the UI, with a notice if they differ.
+fn publish_hotkeys(shared: &Shared, before: Hotkeys, after: Hotkeys) {
     if after != before {
         *shared.hotkeys.lock().unwrap() = Some(after);
         push(Event::HotkeysChanged);
     }
 }
 
+/// Retries the hotkeys that were taken and tells the UI when something changed.
+unsafe fn retry_missing(hwnd: HWND) {
+    let Some((shared, config, suspended)) = with_state(|s| (s.shared.clone(), s.config, s.suspended)) else { return };
+    let Some(before) = shared.hotkeys() else { return };
+    if suspended || !Action::ALL.iter().any(|a| matches!(before.get(*a), Binding::Taken(_))) {
+        return;
+    }
+    let mut after = before;
+    for a in hotkey::registration_order(&config) {
+        if matches!(before.get(a), Binding::Taken(_)) {
+            after.set(a, unsafe { register_action(hwnd, a, config[a.index()]) });
+        }
+    }
+    publish_hotkeys(&shared, before, after);
+}
+
+/// Drains the queue of [`Command`]s in the order they were sent.
+unsafe fn run_commands(hwnd: HWND) {
+    let Some(shared) = with_state(|s| s.shared.clone()) else { return };
+    let commands = std::mem::take(&mut *shared.commands.lock().unwrap());
+    for command in commands {
+        match command {
+            Command::Set(action, wanted) => unsafe { set_one(hwnd, action, wanted) },
+            Command::Suspend(on) => unsafe { suspend(hwnd, on) },
+        }
+    }
+}
+
+unsafe fn suspend(hwnd: HWND, on: bool) {
+    let Some((shared, config, was)) = with_state(|s| (s.shared.clone(), s.config, std::mem::replace(&mut s.suspended, on))) else { return };
+    if on == was {
+        return;
+    }
+    if on {
+        for a in Action::ALL {
+            unsafe { unregister_action(hwnd, a) };
+        }
+    } else if let Some(before) = shared.hotkeys() {
+        publish_hotkeys(&shared, before, unsafe { register_all(hwnd, config) });
+    }
+}
+
+/// Moves one action to `wanted`; if a custom combination can't be had, the
+/// action goes back to what it had.
+unsafe fn set_one(hwnd: HWND, action: Action, wanted: Wanted) {
+    // Recording ended without its resume reaching us (or never began): bind
+    // everything again first, so the old state is the one that gets restored.
+    unsafe { suspend(hwnd, false) };
+    let Some((shared, old)) = with_state(|s| (s.shared.clone(), s.config[action.index()])) else { return };
+    let Some(mut keys) = shared.hotkeys() else { return };
+    unsafe { unregister_action(hwnd, action) };
+    let mut binding = unsafe { register_action(hwnd, action, wanted) };
+    let ok = !(matches!(wanted, Wanted::Custom(_)) && matches!(binding, Binding::Taken(_)));
+    if ok {
+        with_state(|s| s.config[action.index()] = wanted);
+    } else {
+        binding = unsafe { register_action(hwnd, action, old) };
+    }
+    keys.set(action, binding);
+    *shared.hotkeys.lock().unwrap() = Some(keys);
+    push(Event::HotkeySet { action, wanted, ok });
+}
+
 struct ThreadState {
     ctx: egui::Context,
     shared: Arc<Shared>,
     taskbar_created: u32,
+    /// What each action's hotkey should be; the registrations follow it.
+    config: Config,
+    /// All hotkeys are unregistered while a combination is recorded.
+    suspended: bool,
 }
 
 thread_local! {
@@ -250,7 +428,7 @@ fn push(event: Event) {
 
 /// Starts the shell thread without waiting for it: window class, tray icon and
 /// hotkey registration cost ~20 ms that would otherwise delay the first frame.
-pub fn spawn(ctx: egui::Context, shared: Arc<Shared>) {
+pub fn spawn(ctx: egui::Context, shared: Arc<Shared>, config: Config) {
     std::thread::Builder::new()
         .name("shell".into())
         .spawn(move || unsafe {
@@ -280,15 +458,21 @@ pub fn spawn(ctx: egui::Context, shared: Arc<Shared>) {
                 None,
             );
             let Ok(hwnd) = hwnd else {
-                *shared.hotkeys.lock().unwrap() = Some(Hotkeys::default());
+                *shared.hotkeys.lock().unwrap() = Some(Hotkeys::unbound(config));
                 return;
             };
             shared.hwnd.store(hwnd.0 as isize, Ordering::Relaxed);
 
-            *shared.hotkeys.lock().unwrap() = Some(register_missing(hwnd, Hotkeys::default()));
+            *shared.hotkeys.lock().unwrap() = Some(register_all(hwnd, config));
             ctx.request_repaint();
 
-            STATE.set(Some(ThreadState { ctx, shared, taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")) }));
+            STATE.set(Some(ThreadState {
+                ctx,
+                shared,
+                taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
+                config,
+                suspended: false,
+            }));
             add_tray_icon(hwnd);
 
             let mut msg = MSG::default();
@@ -302,9 +486,13 @@ pub fn spawn(ctx: egui::Context, shared: Arc<Shared>) {
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
-        WM_HOTKEY if wparam.0 as i32 >= LIBRARY_ID_BASE => push(Event::OpenLibrary(false)),
-        WM_HOTKEY if wparam.0 as i32 >= SEARCH_ID_BASE => push(Event::Search(Instant::now())),
-        WM_HOTKEY => push(Event::Capture(Instant::now())),
+        WM_HOTKEY => match hotkey::action_of_id(wparam.0 as i32) {
+            Some(Action::Capture) => push(Event::Capture(Instant::now())),
+            Some(Action::Search) => push(Event::Search(Instant::now())),
+            Some(Action::Library) => push(Event::OpenLibrary(false)),
+            Some(Action::Layer) => push(Event::ToggleLayer),
+            None => {}
+        },
         WM_SHOW_LAYER => push(Event::Launched),
         // Broadcast to top-level windows: "ImmersiveColorSet" when the app mode or
         // the accent changes.
@@ -316,6 +504,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_TIMECHANGE => push(Event::ClockChanged),
         WM_QUIT_APP => push(Event::Exit),
         WM_RETRY_HOTKEYS => unsafe { retry_missing(hwnd) },
+        WM_HOTKEY_COMMANDS => unsafe { run_commands(hwnd) },
         WM_TRAY => match (lparam.0 & 0xFFFF) as u32 {
             NIN_SELECT | NIN_KEYSELECT => push(Event::TrayClick),
             WM_CONTEXTMENU => {
@@ -354,8 +543,7 @@ unsafe fn tray_menu(hwnd: HWND, pt: POINT) {
         let s = s.as_ref().unwrap();
         (s.shared.layer_visible.load(Ordering::Relaxed), s.shared.pin_bottom.load(Ordering::Relaxed), s.shared.hotkeys().unwrap_or_default())
     });
-    let (hotkey, search_hotkey) = (keys.capture, keys.search);
-    let with_hotkey = |label: &str, key: Option<&str>| match key {
+    let with_hotkey = |label: &str, key: Option<Combo>| match key {
         Some(k) => format!("{label}\t{k}"),
         None => label.to_owned(),
     };
@@ -366,10 +554,10 @@ unsafe fn tray_menu(hwnd: HWND, pt: POINT) {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let items: [(_, usize, Option<String>); 11] = [
-            (MF_STRING, LAYER, Some(if visible { "Скрыть слой" } else { "Показать слой" }.into())),
-            (MF_STRING, CAPTURE, Some(with_hotkey("Записать мысль", hotkey))),
-            (MF_STRING, SEARCH, Some(with_hotkey("Найти", search_hotkey))),
-            (MF_STRING, LIBRARY, Some(with_hotkey("Архив и корзина…", keys.library))),
+            (MF_STRING, LAYER, Some(with_hotkey(if visible { "Скрыть слой" } else { "Показать слой" }, keys.bound(Action::Layer)))),
+            (MF_STRING, CAPTURE, Some(with_hotkey("Записать мысль", keys.bound(Action::Capture)))),
+            (MF_STRING, SEARCH, Some(with_hotkey("Найти", keys.bound(Action::Search)))),
+            (MF_STRING, LIBRARY, Some(with_hotkey("Архив и корзина…", keys.bound(Action::Library)))),
             (MF_SEPARATOR, 0, None),
             (check(bottom), BOTTOM, Some("Слой под окнами".into())),
             (check(autostart_on), AUTOSTART, Some("Запускать при входе в Windows".into())),

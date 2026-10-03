@@ -27,6 +27,7 @@ use std::sync::atomic::Ordering;
 
 use crate::bar::{self, BarState, Mode, Outbox, Press};
 use crate::card::{self, Card, MIN_SIZE, Placement};
+use crate::hotkey::{self, Action, Wanted};
 use crate::import_ui::StickyImport;
 use crate::library::{self, LibraryState, Request, Tab};
 use crate::resurface;
@@ -100,6 +101,11 @@ pub struct EbbApp {
     /// Started by the user (not at logon): bring the layer up, maybe open settings.
     manual_start: bool,
     library: Arc<Mutex<LibraryState>>,
+    /// What the settings ask of each hotkey (the shell thread has the same).
+    hotkey_config: hotkey::Config,
+    /// The shell has been told to unregister its hotkeys for a recording; see
+    /// `release_hotkeys`.
+    hotkeys_suspended: bool,
 
     editing: Option<(i64, String)>,
     /// Last card clicked or dragged: shows its details until something else is clicked.
@@ -241,7 +247,9 @@ impl EbbApp {
         let shell = Arc::new(shell::Shared::default());
         shell.layer_visible.store(true, Ordering::Relaxed);
         shell.pin_bottom.store(pin_bottom, Ordering::Relaxed);
-        shell::spawn(cc.egui_ctx.clone(), shell.clone());
+        // Four lookups on the open connection; the shell thread binds them.
+        let hotkey_config = hotkey::load(|key| store.setting(key));
+        shell::spawn(cc.egui_ctx.clone(), shell.clone(), hotkey_config);
         let floating = store.load_desktop().unwrap_or_default();
 
         Self {
@@ -249,6 +257,8 @@ impl EbbApp {
             cards,
             bar: Arc::default(),
             shell,
+            hotkey_config,
+            hotkeys_suspended: false,
             bar_faded_out: Arc::default(),
             layer_faded_out: Arc::default(),
             hwnd,
@@ -424,8 +434,8 @@ impl EbbApp {
             backdrop: self.backdrop,
             tint: self.tint,
             pin_bottom: win::PIN_BOTTOM.load(Ordering::Relaxed),
-            capture_hotkey: self.shell.hotkeys().and_then(|k| k.capture),
-            search_hotkey: self.shell.hotkeys().and_then(|k| k.search),
+            hotkeys: self.shell.hotkeys().unwrap_or_default(),
+            hotkey_config: self.hotkey_config,
             dismiss_hides: self.dismiss_hides,
             curtain_top: self.curtain_top,
             settings_on_launch: self.settings_on_launch,
@@ -503,8 +513,62 @@ impl EbbApp {
         let _ = self.store.set_setting(key, if on { "1" } else { "0" });
     }
 
+    /// A hotkey change from the settings: a combination another Ebb action holds
+    /// is refused here, anything else goes to the shell thread, which answers
+    /// with `Event::HotkeySet`.
+    fn set_hotkey(&mut self, ctx: &egui::Context, action: Action, wanted: Wanted) {
+        if let Wanted::Custom(combo) = wanted {
+            let keys = self.shell.hotkeys().unwrap_or_default();
+            let holder = Action::ALL.into_iter().find(|a| {
+                *a != action && (keys.bound(*a) == Some(combo) || self.hotkey_config[a.index()] == wanted)
+            });
+            if let Some(other) = holder {
+                let mut lib = self.library.lock().unwrap();
+                lib.hotkey_errors[action.index()] = Some(format!("Уже занято действием «{}»", other.label()));
+                ctx.request_repaint_of(library::viewport_id());
+                return;
+            }
+        }
+        shell::set_hotkey(&self.shell, action, wanted);
+    }
+
+    /// The shell's answer to `set_hotkey`: a bound change is saved, a refused
+    /// one is explained and the setting stays as it was.
+    fn hotkey_set(&mut self, ctx: &egui::Context, action: Action, wanted: Wanted, ok: bool) {
+        if ok {
+            let key = action.setting_key();
+            let _ = match wanted.setting_value() {
+                Some(value) => self.store.set_setting(key, &value),
+                None => self.store.delete_setting(key),
+            };
+            self.hotkey_config[action.index()] = wanted;
+        }
+        let mut lib = self.library.lock().unwrap();
+        lib.hotkey_errors[action.index()] = (!ok).then(|| "Занято другой программой".to_owned());
+        lib.settings.hotkeys = self.shell.hotkeys().unwrap_or_default();
+        lib.settings.hotkey_config = self.hotkey_config;
+        ctx.request_repaint_of(library::viewport_id());
+    }
+
+    /// Recording must always end: if the library isn't recording any more (it
+    /// closed, changed tab, lost focus) its resume request may be lost or late,
+    /// so hotkeys come back here whenever nothing is recording.
+    fn release_hotkeys(&mut self, recording: bool) {
+        if self.hotkeys_suspended && !recording {
+            self.hotkeys_suspended = false;
+            shell::suspend_hotkeys(&self.shell, false);
+        }
+    }
+
     fn apply_library_request(&mut self, ctx: &egui::Context, request: Request) {
         match request {
+            Request::SetHotkey(action, wanted) => self.set_hotkey(ctx, action, wanted),
+            Request::RecordHotkey(on) => {
+                if on != self.hotkeys_suspended {
+                    self.hotkeys_suspended = on;
+                    shell::suspend_hotkeys(&self.shell, on);
+                }
+            }
             Request::Open(id) => self.open_card(ctx, id),
             Request::Changed => {
                 self.reload_cards();
@@ -715,11 +779,10 @@ impl eframe::App for EbbApp {
                 Event::SystemColors => self.refresh_theme(ctx),
                 Event::HotkeysChanged => {
                     let keys = self.shell.hotkeys().unwrap_or_default();
-                    let mut lib = self.library.lock().unwrap();
-                    (lib.settings.capture_hotkey, lib.settings.search_hotkey) =
-                        (keys.capture, keys.search);
+                    self.library.lock().unwrap().settings.hotkeys = keys;
                     ctx.request_repaint_of(library::viewport_id());
                 }
+                Event::HotkeySet { action, wanted, ok } => self.hotkey_set(ctx, action, wanted, ok),
                 // Slept through the morning, or the clock moved: look again now
                 // (a pick already made today is left as it is).
                 Event::ClockChanged => {
@@ -753,7 +816,7 @@ impl eframe::App for EbbApp {
         }
 
         // Library window: place it once created, apply its requests.
-        let requests = {
+        let (requests, recording) = {
             let mut lib = self.library.lock().unwrap();
             if lib.open && lib.hwnd.is_none() {
                 lib.hwnd = win::find_library_window();
@@ -775,11 +838,12 @@ impl eframe::App for EbbApp {
                     win::trim_working_set();
                 });
             }
-            std::mem::take(&mut lib.outbox)
+            (std::mem::take(&mut lib.outbox), lib.open && lib.recording())
         };
         for request in requests {
             self.apply_library_request(ctx, request);
         }
+        self.release_hotkeys(recording);
 
         let mut bar = self.bar.lock().unwrap();
         if bar.hwnd.is_none() {
