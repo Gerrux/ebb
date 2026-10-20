@@ -91,18 +91,51 @@ fn window_title(card: i64) -> String {
     format!("Ebb Note {card}")
 }
 
-/// Where the window is let go of, and whether that's over the layer.
-fn dropped(ui: &Ui, card: &Card, layer: Option<Rect>) -> Option<Event> {
+/// Where the window is let go of, and whether that's over the layer. `offset`:
+/// where the card is in the window (see `menu_room`).
+fn dropped(ui: &Ui, card: &Card, layer: Option<Rect>, offset: Vec2) -> Option<Event> {
     let (rect, scale) = ui.input(|i| {
         i.viewport()
             .outer_rect
             .zip(i.viewport().native_pixels_per_point)
     })?;
-    let safe = win::clamp_to_work_area(Rect::from_min_size(rect.min, card.shown_size()), scale);
+    let safe = win::clamp_to_work_area(
+        Rect::from_min_size(rect.min + offset, card.shown_size()),
+        scale,
+    );
     let over_layer = layer.is_some_and(|target| {
         target.contains(Rect::from_min_size(safe, card.shown_size()).center())
     });
     Some(Event::Dropped(card.id, safe, over_layer))
+}
+
+/// The window while one of the card's menus is open, in card coordinates; None
+/// while none is. A menu can't leave its window, and a small card's window is
+/// too small for one: the window grows by the menu's size (measured the frame it
+/// opens, before it's shown), below the card and to both sides, since a menu
+/// hangs from a button inside the card and may reach past either edge. The card
+/// keeps its place on screen.
+fn menu_room(ctx: &egui::Context, card: Vec2) -> Option<Rect> {
+    // A button's inset in the card, and the menu's shadow.
+    const MARGIN: f32 = 16.0;
+    if !egui::Popup::is_any_open(ctx) {
+        return None;
+    }
+    let menu = ctx.memory(|m| {
+        m.areas()
+            .visible_layer_ids()
+            .into_iter()
+            .filter(|layer| layer.order == egui::Order::Foreground)
+            .filter_map(|layer| m.area_rect(layer.id))
+            .fold(Vec2::ZERO, |size, rect| size.max(rect.size()))
+    });
+    let side = (menu.x - card.x).max(0.0) + MARGIN;
+    (menu.y > 0.0).then(|| {
+        Rect::from_min_size(
+            pos2(-side, 0.0),
+            vec2(card.x + 2.0 * side, card.y + menu.y + MARGIN),
+        )
+    })
 }
 
 impl EbbApp {
@@ -527,17 +560,25 @@ fn card_window(
     let native_resizing = ui
         .data(|data| data.get_temp::<bool>(native_resize_id))
         .unwrap_or(false);
-    if native_resizing && !card.collapsed {
+    // While a menu is open the window is bigger than the card (see `menu_room`):
+    // the window's rect in card coordinates.
+    let room_id = Id::new(("floating-room", id));
+    let room = ui.data(|d| d.get_temp::<Rect>(room_id));
+    let offset = room.map_or(Vec2::ZERO, |r| -r.min.to_vec2());
+    if native_resizing && !card.collapsed && room.is_none() {
         card.size = full.size();
     }
+    let card_rect = room.map_or(full, |_| {
+        Rect::from_min_size(full.min + offset, card.shown_size())
+    });
     let hovered = ui
         .input(|i| i.pointer.hover_pos())
-        .is_some_and(|p| full.contains(p));
+        .is_some_and(|p| card_rect.contains(p));
     let active = editing.is_some();
     let actions = card_ui(
         ui,
-        full.min,
-        full.size(),
+        card_rect.min,
+        card_rect.size(),
         &mut card,
         hovered,
         editing.as_mut(),
@@ -596,7 +637,7 @@ fn card_window(
     }
     if handoff_done {
         shared.lock().unwrap().handoff.take_if(|h| h.card == id);
-        if let Some(event) = dropped(ui, &card, layer) {
+        if let Some(event) = dropped(ui, &card, layer, offset) {
             to_layer(ui, event);
         }
     }
@@ -605,22 +646,47 @@ fn card_window(
     let native_size = ui
         .input(|i| i.viewport().inner_rect)
         .map(|rect| rect.size());
-    let safe = viewport_rect.zip(scale).map(|(rect, scale)| {
-        let desired = Rect::from_min_size(rect.min, desired_size);
+    let clamp = |desired: Rect, scale: f32| {
         hwnd.map_or_else(
             || win::clamp_to_work_area(desired, scale),
             |h| win::clamp_to_work_area_on(h, desired, scale),
         )
-    });
+    };
+    // Where the card is on screen, kept in the work area.
+    let safe = viewport_rect
+        .zip(scale)
+        .map(|(rect, scale)| clamp(Rect::from_min_size(rect.min + offset, desired_size), scale));
+    // The room for a menu goes into the work area too; it's the card that keeps
+    // its place, so near the screen's bottom the window grows upwards instead.
+    let new_room = menu_room(ui.ctx(), desired_size)
+        .filter(|_| !native_resizing && handoff.is_none())
+        .zip(safe.zip(scale))
+        .map(|(room, (safe, scale))| {
+            let window = room.translate(safe.to_vec2());
+            Rect::from_min_size(clamp(window, scale), room.size()).translate(-safe.to_vec2())
+        });
+    if new_room != room {
+        if let Some(r) = new_room {
+            ui.data_mut(|d| d.insert_temp(room_id, r));
+        } else {
+            ui.data_mut(|d| d.remove::<Rect>(room_id));
+        }
+        let size = new_room.map_or(desired_size, |r| r.size());
+        if native_size != Some(size) {
+            ui.ctx().send_viewport_cmd(ViewportCommand::InnerSize(size));
+        }
+        ui.ctx().request_repaint();
+    }
     // Not while the system moves it: that's the pointer's to place.
     if let (Some(rect), Some(safe), None) = (viewport_rect, safe, handoff) {
-        if safe != rect.min {
+        let window = safe + new_room.map_or(Vec2::ZERO, |r| r.min.to_vec2());
+        if window != rect.min {
             ui.ctx()
-                .send_viewport_cmd(ViewportCommand::OuterPosition(safe));
+                .send_viewport_cmd(ViewportCommand::OuterPosition(window));
         }
     }
     if card.size != original_size {
-        if !native_resizing && native_size != Some(desired_size) {
+        if !native_resizing && new_room.is_none() && native_size != Some(desired_size) {
             ui.ctx()
                 .send_viewport_cmd(ViewportCommand::InnerSize(desired_size));
         }
@@ -631,7 +697,7 @@ fn card_window(
     for action in actions {
         match action {
             Action::WindowDragStopped => {
-                if let Some(event) = dropped(ui, &card, layer) {
+                if let Some(event) = dropped(ui, &card, layer, offset) {
                     to_layer(ui, event);
                 }
             }

@@ -253,15 +253,8 @@ pub(super) fn mark_copied(ui: &Ui, card: i64) {
 
 /// Menu under a card's kind: every kind (with its digit key), then the card's color.
 /// `below`: the anchor is at the top of the card, so the menu opens downwards.
-/// A floating card has only its own small viewport, so its menu must scroll instead
-/// of being clipped when the card is shorter than the list.
-fn kind_menu(
-    anchor: &egui::Response,
-    card: &Card,
-    out: &mut Vec<Action>,
-    below: bool,
-    floating: bool,
-) {
+/// A floating card's window grows to fit its menus (see `floating::menu_room`).
+fn kind_menu(anchor: &egui::Response, card: &Card, out: &mut Vec<Action>, below: bool) {
     egui::Popup::menu(anchor)
         .align(if below {
             egui::RectAlign::BOTTOM_START
@@ -271,74 +264,12 @@ fn kind_menu(
         .gap(4.0)
         .width(236.0)
         .show(|ui| {
+            // A menu is first measured within its window, and a floating card's
+            // window can be narrower than this one: it would keep that width, the
+            // colors wrapping onto a second row.
+            ui.set_min_width(236.0 - ui.spacing().menu_margin.sum().x);
             ui.spacing_mut().button_padding = vec2(8.0, 5.0);
-            let mut contents = |ui: &mut Ui| {
-                for kind in Kind::ALL {
-                    let mut job = egui::text::LayoutJob::default();
-                    let format = |font: FontId, color: Color32| egui::TextFormat {
-                        font_id: font,
-                        color,
-                        valign: Align::Center,
-                        ..Default::default()
-                    };
-                    job.append(kind.icon(), 0.0, format(theme::icons(13.0), kind.accent()));
-                    job.append(
-                        kind.label(),
-                        10.0,
-                        format(FontId::proportional(14.0), theme::text()),
-                    );
-                    let button = egui::Button::new(job)
-                        .selected(kind == card.kind)
-                        .shortcut_text(RichText::new(kind.key().to_string()).size(12.5))
-                        .min_size(vec2(ui.available_width(), 0.0));
-                    if ui.add(button).clicked() {
-                        out.push(Action::SetKind(kind));
-                    }
-                }
-                ui.separator();
-                ui.add(
-                    egui::Label::new(RichText::new("Цвет").size(12.0).color(theme::muted()))
-                        .selectable(false),
-                );
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(2.0, 4.0);
-                    let swatches =
-                        std::iter::once(None).chain(card::Tint::ALL.into_iter().map(Some));
-                    for tint in swatches {
-                        let (rect, resp) =
-                            ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
-                        let color = tint.map_or(card.kind.accent(), card::Tint::color);
-                        let p = ui.painter();
-                        if tint.is_none() {
-                            // "By kind": a ring in the kind's color.
-                            p.circle_stroke(rect.center(), 6.0, Stroke::new(2.0, color));
-                        } else {
-                            p.circle_filled(rect.center(), 7.0, color);
-                        }
-                        if tint == card.tint {
-                            p.circle_stroke(rect.center(), 9.5, Stroke::new(1.5, theme::text()));
-                        } else if resp.hovered() {
-                            p.circle_stroke(rect.center(), 9.5, Stroke::new(1.0, theme::muted()));
-                        }
-                        let label = tint.map_or("По типу", card::Tint::label);
-                        resp.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label)
-                        });
-                        if resp
-                            .on_hover_text(label)
-                            .on_hover_cursor(CursorIcon::PointingHand)
-                            .clicked()
-                        {
-                            out.push(Action::SetTint(tint));
-                        }
-                    }
-                });
-                ui.separator();
-                let (glyph, label) = if card.collapsed {
-                    ("\u{E70D}", "Развернуть")
-                } else {
-                    ("\u{E70E}", "Свернуть в строку")
-                };
+            for kind in Kind::ALL {
                 let mut job = egui::text::LayoutJob::default();
                 let format = |font: FontId, color: Color32| egui::TextFormat {
                     font_id: font,
@@ -346,26 +277,81 @@ fn kind_menu(
                     valign: Align::Center,
                     ..Default::default()
                 };
-                job.append(glyph, 0.0, format(theme::icons(13.0), theme::muted()));
+                job.append(kind.icon(), 0.0, format(theme::icons(13.0), kind.accent()));
                 job.append(
-                    label,
+                    kind.label(),
                     10.0,
                     format(FontId::proportional(14.0), theme::text()),
                 );
-                if ui
-                    .add(egui::Button::new(job).min_size(vec2(ui.available_width(), 0.0)))
-                    .clicked()
-                {
-                    out.push(Action::ToggleCollapse);
+                let button = egui::Button::new(job)
+                    .selected(kind == card.kind)
+                    .shortcut_text(RichText::new(kind.key().to_string()).size(12.5))
+                    .min_size(vec2(ui.available_width(), 0.0));
+                if ui.add(button).clicked() {
+                    out.push(Action::SetKind(kind));
                 }
-            };
-            if floating {
-                egui::ScrollArea::vertical()
-                    .id_salt(("kind-menu-scroll", card.id))
-                    .auto_shrink([false, false])
-                    .show(ui, contents);
+            }
+            ui.separator();
+            ui.add(
+                egui::Label::new(RichText::new("Цвет").size(12.0).color(theme::muted()))
+                    .selectable(false),
+            );
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(2.0, 4.0);
+                let swatches =
+                    std::iter::once(None).chain(card::Tint::ALL.into_iter().map(Some));
+                for tint in swatches {
+                    let (rect, resp) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
+                    let color = tint.map_or(card.kind.accent(), card::Tint::color);
+                    let p = ui.painter();
+                    if tint.is_none() {
+                        // "By kind": a ring in the kind's color.
+                        p.circle_stroke(rect.center(), 6.0, Stroke::new(2.0, color));
+                    } else {
+                        p.circle_filled(rect.center(), 7.0, color);
+                    }
+                    if tint == card.tint {
+                        p.circle_stroke(rect.center(), 9.5, Stroke::new(1.5, theme::text()));
+                    } else if resp.hovered() {
+                        p.circle_stroke(rect.center(), 9.5, Stroke::new(1.0, theme::muted()));
+                    }
+                    let label = tint.map_or("По типу", card::Tint::label);
+                    resp.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label)
+                    });
+                    if resp
+                        .on_hover_text(label)
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        out.push(Action::SetTint(tint));
+                    }
+                }
+            });
+            ui.separator();
+            let (glyph, label) = if card.collapsed {
+                ("\u{E70D}", "Развернуть")
             } else {
-                contents(ui);
+                ("\u{E70E}", "Свернуть в строку")
+            };
+            let mut job = egui::text::LayoutJob::default();
+            let format = |font: FontId, color: Color32| egui::TextFormat {
+                font_id: font,
+                color,
+                valign: Align::Center,
+                ..Default::default()
+            };
+            job.append(glyph, 0.0, format(theme::icons(13.0), theme::muted()));
+            job.append(
+                label,
+                10.0,
+                format(FontId::proportional(14.0), theme::text()),
+            );
+            if ui
+                .add(egui::Button::new(job).min_size(vec2(ui.available_width(), 0.0)))
+                .clicked()
+            {
+                out.push(Action::ToggleCollapse);
             }
         });
 }
@@ -908,7 +894,7 @@ pub(super) fn card_ui(
     } else {
         kind
     };
-    kind_menu(&kind, card, &mut out, true, window_drag);
+    kind_menu(&kind, card, &mut out, true);
 
     // Footer while editing: the formatting toolbar in place of tags and age. Drawn
     // before the body, so a click applies in the same frame the editor reads it.
