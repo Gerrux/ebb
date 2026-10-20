@@ -16,7 +16,6 @@ use crate::win;
 use super::EbbApp;
 use super::card_text::edit_text;
 use super::card_ui::{Action, HEADER_H, card_ui, mark_copied};
-use super::floating::Handoff;
 use super::toast::{Toast, Undo};
 
 pub(super) const REVEAL_FOR: Duration = Duration::from_secs(5);
@@ -906,16 +905,18 @@ impl EbbApp {
                     if detach.is_some() || !self.hwnd.is_some_and(win::cursor_on_other_monitor) {
                         continue;
                     }
-                    let Some(idx) = self.commit_edit_of_at(idx) else {
-                        continue;
-                    };
+                    // The editor goes along into the card's window, not closed here:
+                    // a new note with nothing typed yet would be discarded on the way.
+                    let editor = self.editing.take_if(|(eid, _)| *eid == id);
                     let stand_in = self.cards[idx].clone();
                     self.cards[idx].pos = desktop_origin + at.to_vec2();
                     self.cards[idx].placement = Placement::Desktop;
                     if self.save(idx) {
                         detach = Some(id);
                         self.pulled = Some(stand_in);
-                        self.floating_shared.lock().unwrap().handoff = Some(Handoff::new(id, grab));
+                        self.floating_shared.lock().unwrap().pull(id, grab, editor);
+                    } else {
+                        self.editing = editor;
                     }
                 }
                 Action::Duplicate => {

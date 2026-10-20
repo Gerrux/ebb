@@ -41,6 +41,15 @@ impl Shared {
             .is_some_and(|h| h.card == card && !h.taken)
     }
 
+    /// A card pulled off the layer, the button still held; its editor, if it was
+    /// open on the layer, stays open in the card's window.
+    pub(super) fn pull(&mut self, card: i64, grab: Vec2, editor: Option<(i64, String)>) {
+        self.handoff = Some(Handoff::new(card, grab));
+        if let Some(editor) = editor.filter(|(id, _)| *id == card) {
+            self.editing = Some(editor);
+        }
+    }
+
     /// Drops a Private value on show whose card no longer has a window: only that
     /// window's frames time it out, and the value mustn't outlive it in memory or
     /// show again if the card is pulled off the layer once more.
@@ -189,10 +198,9 @@ impl EbbApp {
                         continue;
                     };
                     if over_layer {
-                        self.commit_floating_edit_of(id);
-                        let Some(idx) = self.floating.iter().position(|c| c.id == id) else {
-                            continue;
-                        };
+                        // The editor comes back onto the layer with the card, as it
+                        // went out with it: closed, an empty new note would be gone.
+                        let editor = self.floating_shared.lock().unwrap().editing.take_if(|(eid, _)| *eid == id);
                         let mut card = self.floating.remove(idx);
                         let origin =
                             ctx.input(|i| i.viewport().outer_rect.map_or(Pos2::ZERO, |r| r.min));
@@ -204,6 +212,12 @@ impl EbbApp {
                         card.placement = Placement::Manual;
                         let _ = self.store.save(&card);
                         self.cards.push(card);
+                        if editor.is_some() {
+                            // One editor at a time: the layer's, if any, closes first.
+                            self.commit_edit();
+                            self.editing = editor;
+                            self.active = Some(id);
+                        }
                     } else {
                         self.floating[idx].pos = pos;
                         let _ = self.store.save(&self.floating[idx]);
@@ -736,5 +750,19 @@ mod tests {
         assert!(shared.forget_handoff_unless(|id| id == 8));
         assert!(shared.handoff.is_none());
         assert!(!shared.forget_handoff_unless(|_| false));
+    }
+
+    #[test]
+    fn pulled_card_keeps_its_editor() {
+        // A new note pulled off the layer before anything was typed in it: its
+        // editor opens in its window, so it isn't discarded on the way.
+        let mut shared = Shared::default();
+        shared.pull(7, vec2(10.0, 5.0), Some((7, String::new())));
+        assert!(shared.handoff_waiting(7));
+        assert_eq!(shared.editing, Some((7, String::new())));
+        // Without an editor open on the layer there is none in the window either.
+        let mut shared = Shared::default();
+        shared.pull(7, vec2(10.0, 5.0), None);
+        assert!(shared.editing.is_none());
     }
 }
