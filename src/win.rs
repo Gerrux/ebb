@@ -30,7 +30,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindowLongPtrW, HWND_BOTTOM, IsWindowVisible,
     MONITORINFOF_PRIMARY, PostMessageW, SET_WINDOW_POS_FLAGS, STYLESTRUCT, SWP_FRAMECHANGED,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos,
-    WINDOWPOS, WM_ACTIVATEAPP, WM_EXITSIZEMOVE, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_STYLECHANGING,
+    WINDOWPOS, WM_ACTIVATEAPP, WM_EXITSIZEMOVE, WM_MOUSEMOVE, WM_NCACTIVATE, WM_NCCALCSIZE,
+    WM_NCPAINT, WM_STYLECHANGING,
     WM_WINDOWPOSCHANGING, WS_BORDER, WS_DLGFRAME,
     WS_EX_APPWINDOW,
     WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_LAYERED, WS_EX_STATICEDGE, WS_EX_TOOLWINDOW,
@@ -985,6 +986,10 @@ pub const FADE: usize = 2;
 /// A transparent card draws all of its own chrome, including resize handles.
 pub const BORDERLESS: usize = 4;
 
+/// Undocumented: uxtheme asks the window to draw its themed caption and frame.
+const WM_NCUAHDRAWCAPTION: u32 = 0x00AE;
+const WM_NCUAHDRAWFRAME: u32 = 0x00AF;
+
 /// Whole-window opacity through the layered-window alpha, which DWM applies to the
 /// composed window including its acrylic backdrop (egui can only fade its own
 /// drawing). Needs the FADE window rule.
@@ -1111,6 +1116,18 @@ unsafe extern "system" fn subclass_proc(
             // WM_NCCALCSIZE handler then adds a one-pixel top inset; a floating
             // card owns all of its chrome, so let the client area fill the window.
             WM_NCCALCSIZE if flags & BORDERLESS != 0 && wparam.0 != 0 => {
+                return LRESULT(0);
+            }
+            // The window keeps WS_SIZEBOX (and winit's WS_CAPTION until the style
+            // rule strips it) for the system's resize and move loops, so the default
+            // procedure paints a standard frame straight over the card on activation
+            // and on a press on its edge, until egui's next frame covers it. There
+            // is no non-client area to paint: lParam -1 keeps activation's
+            // bookkeeping without the repaint, the rest is just not drawn.
+            WM_NCACTIVATE if flags & BORDERLESS != 0 => {
+                return DefSubclassProc(hwnd, msg, wparam, LPARAM(-1));
+            }
+            WM_NCPAINT | WM_NCUAHDRAWCAPTION | WM_NCUAHDRAWFRAME if flags & BORDERLESS != 0 => {
                 return LRESULT(0);
             }
             // The end of a move loop begin_move started: winit didn't start it, so

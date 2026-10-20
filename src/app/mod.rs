@@ -764,6 +764,7 @@ impl EbbApp {
 impl eframe::App for EbbApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.floating_events(ctx);
+        self.show_floating(ctx);
         // Runs even while the layer is hidden, so tray and hotkey events work then too.
         let mut pressed = None;
         for event in self.shell.take_events() {

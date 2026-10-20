@@ -167,9 +167,14 @@ impl EbbApp {
                 .with_min_inner_size(MIN_SIZE)
                 .with_taskbar(false);
             if created {
+                // Hidden until it's borderless (see `show_floating`): winit makes
+                // it with a standard frame, which would flash on screen.
                 viewport = viewport
                     .with_inner_size(card.shown_size())
-                    .with_position(card.pos);
+                    .with_position(card.pos)
+                    .with_visible(false);
+                // The window is made at the end of this frame; the next one shows it.
+                ui.ctx().request_repaint();
             }
             ui.ctx().show_viewport_deferred(
                 viewport_id(card.id),
@@ -178,6 +183,23 @@ impl EbbApp {
                     card_window(ui, &title, &card, &shared, layer, style, hide_from_capture)
                 },
             );
+        }
+    }
+
+    /// A card's window made since the last frame gets its window rules, once,
+    /// and only then is shown. From `logic`: a hidden window gets no frames of
+    /// its own, nor does the root's ui while nothing of Ebb is on screen.
+    pub(super) fn show_floating(&self, ctx: &egui::Context) {
+        for card in &self.floating {
+            let Some(h) = win::find_own_window_title(&window_title(card.id)) else {
+                continue;
+            };
+            if win::is_window_visible(h) {
+                continue;
+            }
+            win::set_window_rounded(h, false);
+            win::install_window_rules(h, win::BORDERLESS);
+            ctx.send_viewport_cmd_to(viewport_id(card.id), ViewportCommand::Visible(true));
         }
     }
 
@@ -495,10 +517,6 @@ fn card_window(
     hide_from_capture: bool,
 ) {
     let hwnd = win::find_own_window_title(title);
-    if let Some(h) = hwnd {
-        win::set_window_rounded(h, false);
-        win::install_window_rules(h, win::BORDERLESS);
-    }
     let full = ui.max_rect();
     let original_size = card.size;
     let mut card = card.clone();
