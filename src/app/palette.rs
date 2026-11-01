@@ -13,6 +13,7 @@ use egui::{Key, Modifiers, Ui, ViewportCommand, ViewportId};
 
 use crate::autostart;
 use crate::commands::{self, CommandId, Ctx};
+use crate::i18n;
 use crate::library::{self, Request, Tab};
 use crate::resurface;
 use crate::search;
@@ -206,17 +207,19 @@ impl EbbApp {
     /// Reports the background commands that have finished.
     pub(super) fn command_results(&mut self, ctx: &egui::Context) {
         while let Ok(finished) = self.palette.rx.try_recv() {
+            let l = &i18n::s().layer;
+            let failed = i18n::s().common.failed;
             let text = match finished {
-                Finished::Autostart(Ok(true)) => "Запускать при входе: включено",
-                Finished::Autostart(Ok(false)) => "Запускать при входе: выключено",
+                Finished::Autostart(Ok(true)) => l.autostart_on.to_owned(),
+                Finished::Autostart(Ok(false)) => l.autostart_off.to_owned(),
                 Finished::Autostart(Err(e)) => {
                     eprintln!("autostart: {e}");
-                    "Не удалось изменить автозапуск"
+                    failed(l.do_change_autostart)
                 }
-                Finished::Backup(Ok(())) => "Резервная копия сохранена",
+                Finished::Backup(Ok(())) => l.backup_saved.to_owned(),
                 Finished::Backup(Err(e)) => {
                     eprintln!("backup failed: {e}");
-                    "Не удалось сделать резервную копию"
+                    failed(l.do_backup)
                 }
             };
             self.toast = Some(Toast::new(text, None));
