@@ -13,7 +13,7 @@ Segoe Fluent Icons и Consolas, как и приложение.
 
 ```powershell
 powershell -File docs\mock\shoot.ps1            # все сцены
-powershell -File docs\mock\shoot.ps1 layer      # одна сцена, оба языка
+powershell -File docs\mock\shoot.ps1 layer cards  # выбранные сцены, оба языка
 ```
 
 Нужен Chrome (или Edge). Скрипт пишет в `docs/screenshots/`: русский вариант `<сцена>.png`,
@@ -25,9 +25,16 @@ powershell -File docs\mock\shoot.ps1 layer      # одна сцена, оба я
 | `cards` | 780×400 | 2 | действия при наведении и меню «Позже» |
 | `capture` | 720×212 | 2 | быстрый захват, `Win+Alt+N` |
 | `search` | 760×556 | 2 | поиск с фильтрами, `Win+Alt+F` |
+| `styles` | 1280×764 | 2 | восемь видов карточек (`card::PRESETS`), тёмная тема |
+| `styles-light` | 1280×764 | 2 | то же в светлой теме |
+| `import` | 1352×498 | 2 | импорт из Sticky Notes: до и после |
 | `social` | 1280×640 | 1 | превью ссылки для GitHub, X, Reddit (до 1 МБ) |
 
 Посмотреть сцену в браузере: `docs/mock/index.html?scene=search&lang=en`.
+
+Эти же картинки берёт страница проекта `docs/index.html` (GitHub Pages из `master:/docs`):
+русские при `?lang=ru`, `-en` при `?lang=en`, `styles-light` по кнопке «Светлая». Новую сцену,
+которую нужно показать на странице, туда добавить отдельно.
 
 Английский вариант — для английского README и постов. Подписи совпадают с английской таблицей
 строк приложения (`src/i18n/`): поменялась строка там — поправить и здесь.

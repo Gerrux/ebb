@@ -697,11 +697,11 @@ pub const EN: Library = Library {
         format!("{}: {on_layer} on the layer, {archived} in the archive.", (super::common::EN.notes)(importable))
     },
     sticky_replaced: |n| format!("Replaced from the previous import: {n}."),
-    sticky_originals: "The originals in Sticky Notes were left in place.",
+    sticky_originals: "The originals are still in Sticky Notes.",
     sticky_sort_out: "Sort out",
     sticky_sort_out_hint: "Groups: passwords, links, prompts, ideas… — one button decides for a group",
     sticky_done_button: "Done",
-    sticky_undo: "Undo the import",
+    sticky_undo: "Undo import",
 };
 
 #[cfg(test)]

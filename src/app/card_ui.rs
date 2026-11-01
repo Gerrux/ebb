@@ -43,6 +43,9 @@ pub(super) enum Action {
         at: Pos2,
         grab: Vec2,
     },
+    /// "Вынести на рабочий стол": off the layer into its own window where it is
+    /// on screen now, no drag (one monitor has no edge to pull a card past).
+    ToDesktop,
     Duplicate,
     Archive,
     Delete,
@@ -147,20 +150,21 @@ fn primary_action(card: &Card) -> Option<(&'static str, &'static str, Action)> {
 }
 
 /// The rest of the actions: pin, copy (when the kind's own action isn't copy),
-/// fold, a copy of the card, and delete. A pinned (`locked`) card can't be
-/// deleted from here, only unpinned.
+/// fold, a copy of the card, off the layer (`on_layer`), and delete. A pinned
+/// (`locked`) card can't be deleted or moved from here, only unpinned.
 fn more_menu(
     anchor: &egui::Response,
     popup: Id,
     locked: bool,
     with_copy: bool,
+    on_layer: bool,
     out: &mut Vec<Action>,
 ) {
     egui::Popup::menu(anchor)
         .id(popup)
         .align(egui::RectAlign::BOTTOM_END)
         .gap(4.0)
-        .width(190.0)
+        .width(220.0)
         .show(|ui| {
             ui.spacing_mut().button_padding = vec2(8.0, 5.0);
             let item = |ui: &mut Ui, glyph: &str, label: &str, color: Color32| -> bool {
@@ -201,6 +205,9 @@ fn more_menu(
             }
             if locked {
                 return;
+            }
+            if on_layer && item(ui, "\u{E7F4}", l.to_desktop, theme::dim()) {
+                out.push(Action::ToDesktop);
             }
             ui.separator();
             if item(ui, "\u{E74D}", l.delete, theme::muted()) {
@@ -762,7 +769,7 @@ pub(super) fn card_ui(
                     return;
                 }
                 let more = icon_button(ui, "\u{E712}", l.more, theme::dim());
-                more_menu(&more, more_popup, locked, !primary_is_copy, &mut out);
+                more_menu(&more, more_popup, locked, !primary_is_copy, !window_drag, &mut out);
                 if !locked {
                     if !primary_is_done
                         && icon_button(ui, "\u{E7B8}", l.archive, theme::dim()).clicked()

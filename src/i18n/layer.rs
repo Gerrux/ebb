@@ -16,6 +16,8 @@ pub struct Layer {
     pub pin_in_place: &'static str,
     pub collapse_to_line: &'static str,
     pub duplicate: &'static str,
+    /// Off the layer into the card's own window on the desktop.
+    pub to_desktop: &'static str,
     pub delete: &'static str,
     /// Caption of the "Later" menu: the days follow as `resurface::snooze_label`.
     pub put_away_until: &'static str,
@@ -144,6 +146,7 @@ pub const RU: Layer = Layer {
     pin_in_place: "Закрепить на месте",
     collapse_to_line: "Свернуть в строку",
     duplicate: "Дублировать",
+    to_desktop: "Вынести на рабочий стол",
     delete: "Удалить",
     put_away_until: "Убрать и вернуть",
     color: "Цвет",
@@ -262,6 +265,7 @@ pub const EN: Layer = Layer {
     pin_in_place: "Pin in place",
     collapse_to_line: "Collapse to one line",
     duplicate: "Duplicate",
+    to_desktop: "Move to the desktop",
     delete: "Delete",
     put_away_until: "Put away until",
     color: "Color",

@@ -921,6 +921,28 @@ impl EbbApp {
                         self.editing = editor;
                     }
                 }
+                Action::ToDesktop => {
+                    // The press on the menu has closed the editor already, as
+                    // for any menu item: what's typed is saved, an empty new
+                    // note is gone.
+                    if detach.is_some() {
+                        continue;
+                    }
+                    let Some(idx) = self.commit_edit_of_at(idx) else {
+                        continue;
+                    };
+                    // Where it is on screen now: the layer is under the other
+                    // windows, the card's window comes up over them in its place.
+                    let c = &mut self.cards[idx];
+                    let was = (c.pos, c.placement);
+                    c.pos = desktop_origin + c.pos.to_vec2();
+                    c.placement = Placement::Desktop;
+                    if self.save(idx) {
+                        detach = Some(id);
+                    } else {
+                        (self.cards[idx].pos, self.cards[idx].placement) = was;
+                    }
+                }
                 Action::Duplicate => {
                     let src = self.cards[idx].clone();
                     let pos = card::beside(&self.cards, &src, area);

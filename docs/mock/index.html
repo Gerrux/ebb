@@ -13,6 +13,8 @@
   ?scene=cards    a card on hover: its actions and the "Later" menu (780x400)
   ?scene=capture  quick capture, Win+Alt+N (720x212)
   ?scene=search   search, Win+Alt+F (760x556)
+  ?scene=styles   every card style preset, dark theme (1280x764); styles-light: light theme
+  ?scene=import   Sticky Notes import, before and after (1352x498)
   ?scene=social   1280x640 link preview (GitHub, X, Reddit)
   &lang=ru|en     interface language of the mock (default ru)
 -->
@@ -22,8 +24,6 @@
     --text: rgb(236,239,244); --dim: rgb(178,186,198); --muted: rgb(128,136,150);
     --glass: rgba(30,33,40,.843); --glass-hover: rgba(40,44,53,.894);
     --stroke: rgba(255,255,255,.102); --chip: rgba(255,255,255,.063);
-    /* card style "Ebb" preset: opacity 85 %, hovered +12/255 */
-    --card: rgba(30,33,40,.85); --card-hover: rgba(40,44,53,.897);
     --link: rgb(156,195,245); --success: rgb(52,211,153);
     --highlight: 96,165,250;
     --ui: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
@@ -55,9 +55,13 @@
           display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 16px; }
 
   /* A card (src/app/card_ui.rs, src/app/paint.rs) */
-  .card { position: absolute; border-radius: 12px; background: var(--card);
-          box-shadow: inset 0 0 0 1px var(--stroke), 0 8px 28px rgba(0,0,0,.275); overflow: hidden; }
-  .card.hover { background: var(--card-hover); }
+  /* Fill, radius, shadow and text size come from the card style (card() in the script). */
+  .card { position: absolute; overflow: hidden; color: var(--text); font-size: var(--fs); --wash22: rgba(255,255,255,.086); }
+  /* The LIGHT palette of src/theme.rs */
+  .light { --text: rgb(26,28,34); --dim: rgb(72,78,90); --muted: rgb(112,118,130);
+           --glass: rgba(249,250,252,.882); --glass-hover: rgba(255,255,255,.941);
+           --stroke: rgba(0,0,0,.086); --chip: rgba(0,0,0,.047); --link: rgb(0,95,184);
+           --wash22: rgba(0,0,0,.059); --highlight: 0,120,212; }
   .glow { position: absolute; left: 0; top: 0; pointer-events: none; }
   .meta { position: absolute; left: 14px; right: 14px; top: 10px; height: 20px; }
   .mark { position: absolute; left: 0; top: 0; height: 20px; display: flex; align-items: center;
@@ -69,12 +73,12 @@
           box-shadow: inset 0 0 0 1px var(--stroke), 0 2px 10px rgba(0,0,0,.275); }
   .pill .b { width: 24px; height: 22px; border-radius: 6px; display: flex; align-items: center;
              justify-content: center; font-size: 12.5px; color: var(--dim); }
-  .pill .b.on { background: rgba(255,255,255,.086); }
+  .pill .b.on { background: var(--wash22); }
   .body { position: absolute; left: 14px; right: 14px; top: 34px; bottom: 32px; overflow: hidden; }
   .reason { font-size: 11.5px; color: var(--dim); margin-bottom: 3px; }
-  .h { font-weight: 600; font-size: 15px; color: var(--text); }
-  .t { color: var(--text); white-space: pre-wrap; }
-  .t.sub { color: var(--dim); font-size: 13.5px; }
+  .h { font-weight: 600; font-size: calc(var(--fs) + .5px); color: var(--text); }
+  .t { color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .t.sub { color: var(--dim); font-size: calc(var(--fs) - 1px); }
   .ln { position: relative; min-height: 1.34em; }
   .ln.bullet { padding-left: 16px; }
   .ln.todo, .ln.done { padding-left: 22px; }
@@ -83,7 +87,7 @@
   .ln .box { position: absolute; left: 0; top: calc(.67em - 7px); width: 14px; height: 14px; border-radius: 4px;
              border: 1.5px solid var(--muted); }
   .ln.done .box { border: none; display: flex; align-items: center; justify-content: center;
-                  font-size: 9px; color: rgb(30,33,40); text-decoration: none; }
+                  font-size: 9px; text-decoration: none; }
   .ln.mono { font: 12.5px/1.6 var(--mono); padding-right: 26px; color: var(--dim); }
   .ln .copy { position: absolute; right: 2px; top: 50%; transform: translateY(-50%); font-size: 11px; color: var(--dim); }
   .var { font: 12px var(--mono); }
@@ -158,6 +162,15 @@ const ui = {
                 en: '←→ action · Enter — run · Tab or Esc — back' },
   actions: { ru: ['На слой', 'Копировать', 'Закрепить', 'В архив', 'В корзину'],
              en: ['To the layer', 'Copy', 'Pin', 'Archive', 'Delete'] },
+  before: { ru: 'Windows Sticky Notes', en: 'Windows Sticky Notes' },
+  after: { ru: 'Ebb после импорта: те же места и цвета', en: 'Ebb after the import: same places, same colors' },
+  imported: {
+    title: { ru: 'Sticky Notes импортированы', en: 'Sticky Notes imported' },
+    count: { ru: '47 заметок: 3 на слое, 44 в архиве.', en: '47 notes: 3 on the layer, 44 in the archive.' },
+    kept: { ru: 'Оригиналы в Sticky Notes остались на месте.', en: 'The originals are still in Sticky Notes.' },
+    sort: { ru: 'Разобрать', en: 'Sort out' }, done: { ru: 'Готово', en: 'Done' },
+    undo: { ru: 'Отменить импорт', en: 'Undo import' },
+  },
 }
 
 // Kind → tint mark color (src/card.rs: Kind::tint, Tint::raw_color).
@@ -212,6 +225,23 @@ const demo = {
     call: { kind: 'note', age: { ru: '1 дн', en: '1 d' },
       body: { ru: 'Позвонить в сервис насчёт гарантии на чайник, чек в почте', en: 'Call the repair shop about the kettle warranty, the receipt is in the mail' }, tags: [] },
   },
+  // Open Sticky Notes and the cards the import makes of them: same rect, same color,
+  // the kind read from the text (src/sticky.rs, card::parse_capture).
+  sticky: [
+    { at: [16, 216, 200, 180], tint: 'yellow',
+      text: { ru: 'Идеи на выходные:\n- блинный завтрак\n- прогулка по набережной\n- настолки с друзьями',
+              en: 'Weekend ideas:\n- pancake breakfast\n- a walk by the river\n- board games with friends' },
+      card: { kind: 'note', tint: 'yellow', tags: [],
+              body: { ru: 'Идеи на выходные:\n- блинный завтрак\n- прогулка по набережной\n- настолки с друзьями',
+                      en: 'Weekend ideas:\n- pancake breakfast\n- a walk by the river\n- board games with friends' } } },
+    { at: [228, 236, 196, 148], tint: 'pink',
+      text: { ru: 'Рецепт сырников https://example.net/recipes/syrniki', en: 'Pancake recipe https://example.net/recipes/pancakes' },
+      card: { kind: 'link', tint: 'pink', tags: [], domain: 'example.net',
+              body: { ru: 'Рецепт сырников https://example.net/recipes/syrniki', en: 'Pancake recipe https://example.net/recipes/pancakes' } } },
+    { at: [436, 220, 192, 124], tint: 'green',
+      text: { ru: 'Цель: 10 000 шагов каждый день', en: 'Goal: 10,000 steps a day' },
+      card: { kind: 'goal', tint: 'green', tags: [], body: { ru: '10 000 шагов каждый день', en: '10,000 steps a day' } } },
+  ],
   capture: { ru: 'идея: собрать голосовые заметки в подкаст\nраз в неделю, по пятницам #подкаст',
              en: 'idea: turn voice memos into a podcast\nonce a week, on Fridays #podcast' },
   captureTag: { ru: 'подкаст', en: 'podcast' },
@@ -234,29 +264,100 @@ const demo = {
 
 // --- primitives -----------------------------------------------------------
 
-function lineHtml(raw, c) {
+// One line of a card's text; `a` is the card's mark color, `on` its fill (the check's color).
+function lineHtml(raw, c, a, on) {
   let cls = '', pre = '', s = raw
-  if (/^- \[[xX]\] /.test(s)) { cls = 'done'; pre = `<span class="box" style="background:rgb(${tint[kindTint[c.kind]]})">${ic('check')}</span>`; s = s.slice(6) }
+  if (/^- \[[xX]\] /.test(s)) { cls = 'done'; pre = `<span class="box" style="background:rgb(${a});color:rgb(${on})">${ic('check')}</span>`; s = s.slice(6) }
   else if (/^- \[ \] /.test(s)) { cls = 'todo'; pre = '<span class="box"></span>'; s = s.slice(6) }
   else if (/^- /.test(s)) { cls = 'bullet'; pre = '<span class="bul"></span>'; s = s.slice(2) }
   let h = esc(s)
   h = h.replace(/https?:\/\/\S+/g, u => `<span class="url">${u}</span>`)
   if (c.kind === 'prompt') {
-    const a = tint[kindTint.prompt]
     h = h.replace(/\{\{[^}]+\}\}/g, v => `<span class="var" style="color:rgb(${a});background:rgba(${a},.16)">${v}</span>`)
   }
   if (c.mono) { cls += ' mono'; if (c.hover) pre += `<span class="copy">${ic('copyLine')}</span>` }
   return `<div class="ln ${cls}">${pre}${h}</div>`
 }
 
-function card(c, x, y, w, h) {
-  const t = tint[c.tint || kindTint[c.kind]]
-  const reach = Math.min(240, Math.max(w, h) * .75)
-  const glow = `<div class="glow" style="width:${reach}px;height:${reach}px;background:radial-gradient(circle ${reach}px at 0 0,
-    rgba(${t},.2) 0%, rgba(${t},.113) 25%, rgba(${t},.05) 50%, rgba(${t},.0125) 75%, rgba(${t},0) 100%)"></div>`
-  // A plain note shows its kind only on hover.
+// Card style presets (src/card.rs: PRESETS): marker, kind mark, strength, bold icon,
+// strip, radius, shadow, opacity, font, text size (half points), background.
+const presets = [
+  { id: 'ebb', name: 'Ebb', hint: { ru: 'Стекло и свечение цвета', en: 'Glass and a glow of color' },
+    st: ['glow', 'top', 50, false, 5, 12, 50, 85, 'system', 29, 'theme'] },
+  { id: 'sticky', name: 'Sticky Notes', hint: { ru: 'Цветная бумага, шапка при наведении', en: 'Colored paper, a header on hover' },
+    st: ['paper', 'hover', 50, false, 8, 8, 35, 100, 'system', 29, 'theme'] },
+  { id: 'keep', name: 'Google Keep', hint: { ru: 'Пастель днём, ночные тона в темноте', en: 'Pastels by day, night shades in the dark' },
+    st: ['fill', 'hover', 50, false, 5, 8, 0, 100, 'system', 28, 'theme'] },
+  { id: 'canvas', name: 'Obsidian Canvas', hint: { ru: 'Рамка и лёгкий тон', en: 'An outline and a light tint' },
+    st: ['outline', 'top', 60, false, 5, 8, 0, 95, 'system', 28, 'theme'] },
+  { id: 'trello', name: 'Trello', hint: { ru: 'Цветная метка слева', en: 'A color strip on the left' },
+    st: ['strip-left', 'top', 80, false, 4, 6, 20, 100, 'system', 28, 'theme'] },
+  { id: 'paper', name: { ru: 'Бумажный стикер', en: 'Paper sticker' }, hint: { ru: 'Заливка, тень, от руки', en: 'Fill, shadow, handwriting' },
+    st: ['fill', 'hover', 60, false, 5, 2, 70, 100, 'segoe-print', 29, 'theme'] },
+  { id: 'minimal', name: { ru: 'Минимализм', en: 'Minimal' }, hint: { ru: 'Только жирная иконка', en: 'Just a bold icon' },
+    st: ['none', 'glyph', 50, true, 5, 12, 20, 85, 'system', 29, 'theme'] },
+  { id: 'windows', name: 'Windows', hint: { ru: 'Фон как у панели задач', en: 'The taskbar\'s background' },
+    st: ['none', 'top', 50, false, 5, 8, 35, 96, 'system', 28, 'taskbar'] },
+]
+const EBB = presets[0].st
+
+// Paper (light theme) and night (dark theme) surfaces of each tint (src/card.rs: Tint).
+const paper = { yellow: [255, 242, 171], orange: [255, 217, 184], pink: [255, 204, 229], purple: [231, 207, 255],
+                blue: [205, 233, 255], teal: [197, 236, 236], green: [203, 241, 196], gray: [237, 238, 241] }
+const night = { yellow: [64, 59, 40], orange: [68, 52, 40], pink: [66, 44, 56], purple: [54, 48, 74],
+                blue: [36, 50, 70], teal: [34, 58, 60], green: [38, 60, 46], gray: [43, 47, 54] }
+const lerp = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t))
+const rgb = a => a.join(',')
+
+// A card. `o.st` is a preset's style (default Ebb), `o.light` the light theme.
+function card(c, x, y, w, h, o = {}) {
+  const [marker, spot, strength, bold, strip, radius, shadow, opacity, font, text, bg] = o.st || EBB
+  const light = !!o.light
+  const s = strength / 50
+  const hue = c.tint || kindTint[c.kind]
+  // theme::adapt darkens the mark colors on the light theme.
+  const mark3 = tint[hue].split(',').map(Number).map(v => light ? Math.floor(v * .68) : v)
+  const t = rgb(mark3)
+  let base = light ? [249, 250, 252] : [30, 33, 40]
+  let hoverBase = light ? [255, 255, 255] : [40, 44, 53]
+  if (bg === 'taskbar') {
+    base = light ? [238, 238, 238] : [32, 32, 32]
+    hoverBase = lerp(base, light ? [0, 0, 0] : [255, 255, 255], .05)
+  }
+  const alpha = v => Math.min(255, opacity * 2.55 + (v ? 12 : 0)) / 255
+  const fill = `rgba(${rgb(c.hover ? hoverBase : base)},${alpha(c.hover).toFixed(3)})`
+  const k = shadow / 50
+  const shadowCss = shadow ? `, 0 ${Math.round(8 * Math.min(k, 1.5))}px ${Math.round(28 * Math.min(k, 1.5))}px rgba(0,0,0,${(Math.min(160, (light ? 28 : 70) * k) / 255).toFixed(3)})` : ''
+  const stroke = light ? 'rgba(0,0,0,.086)' : 'rgba(255,255,255,.102)'
+  let over = ''
+  if (marker === 'glow') {
+    const reach = Math.min(240, Math.max(w, h) * .75), a = Math.min(.2 * s, .6)
+    over = `<div class="glow" style="width:${reach}px;height:${reach}px;background:radial-gradient(circle ${reach}px at 0 0,
+      rgba(${t},${a}) 0%, rgba(${t},${a * .5625}) 25%, rgba(${t},${a * .25}) 50%, rgba(${t},${a * .0625}) 75%, rgba(${t},0) 100%)"></div>`
+  } else if (marker === 'strip-left') {
+    over = `<div class="glow" style="width:${strip}px;bottom:0;background:rgba(${t},${Math.min(.85 * s, 1)})"></div>`
+  } else if (marker === 'outline') {
+    over = `<div class="glow" style="right:0;bottom:0;border-radius:${radius}px;background:rgba(${t},${Math.min(.07 * s, .3)});
+      box-shadow:inset 0 0 0 2px rgba(${t},${Math.min(.8 * s, 1)})"></div>`
+  } else if (marker === 'fill' || marker === 'paper') {
+    // theme::surface: toward the paper (or night shade), above 50 toward the mark color.
+    const surf = light ? paper[hue] : night[hue]
+    const sc = s <= 1 ? lerp(base, surf, s) : lerp(surf, mark3, Math.min((s - 1) * .5, .5))
+    over = `<div class="glow" style="right:0;bottom:0;background:rgba(${rgb(sc)},${alpha(false).toFixed(3)})"></div>`
+    if (marker === 'paper' && c.hover) {
+      const bar = lerp(sc, mark3, light ? .32 : .22)
+      over += `<div class="glow" style="right:0;height:30px;background:rgb(${rgb(bar)})"></div>`
+    } else if (c.hover) {
+      over += `<div class="glow" style="right:0;bottom:0;background:${light ? 'rgba(0,0,0,.027)' : 'rgba(255,255,255,.04)'}"></div>`
+    }
+  }
+  // The kind's mark: dot and name, the glyph alone, or only on hover. A plain note
+  // shows it only on hover.
   let mark = ''
-  if (c.kind !== 'note' || c.hover) {
+  const shown = c.hover || (spot !== 'hover' && (c.kind !== 'note' || c.tint))
+  if (shown && spot === 'glyph') {
+    mark = `<div class="mark" style="color:rgb(${t});font-size:${bold ? 14 : 12}px">${ic(c.kind, bold ? '-webkit-text-stroke:.6px' : '')}</div>`
+  } else if (shown) {
     const label = L(ui.kinds[c.kind]) + (c.due ? ` · ${L(c.due)}` : '')
     mark = `<div class="mark" style="color:rgb(${t})"><span class="dot" style="background:rgb(${t})"></span>${esc(label)}</div>`
   }
@@ -273,20 +374,22 @@ function card(c, x, y, w, h) {
   if (c.reason) body += `<div class="reason">${esc(L(c.reason))}</div>`
   if (c.title) body += `<div class="h">${esc(L(c.title))}</div>`
   if (c.kind === 'private') body += `<div class="t sub redacted">••••••••••</div>`
-  else body += `<div class="t${c.title ? ' sub' : ''}">${L(c.body).split('\n').map(l => lineHtml(l, c)).join('')}</div>`
+  else body += `<div class="t${c.title ? ' sub' : ''}">${L(c.body).split('\n').map(l => lineHtml(l, c, t, rgb(base))).join('')}</div>`
   if (c.domain) body += `<div class="domain">${esc(c.domain)}</div>`
   // Footer: the idea's status always; tags and age only on hover.
   let foot = ''
   if (c.status) {
-    const s = tint[statusTint[c.status]]
+    const s = rgb(tint[statusTint[c.status]].split(',').map(Number).map(v => light ? Math.floor(v * .68) : v))
     foot += `<span class="chip status" style="--sc:rgba(${s},.6);--sc2:rgb(${s})">${esc(L(ui.status[c.status]))}</span>`
   }
   if (c.hover) {
     foot += c.tags.map(g => `<span class="chip">#${esc(L(g))}<i class="ic x">&#x${G.x};</i></span>`).join('')
     foot += `<span class="plus ic">&#x${G.plus};</span><span class="age">${esc(L(c.age))}</span>`
   }
-  return `<div class="card${c.hover ? ' hover' : ''}" style="left:${x}px;top:${y}px;width:${w}px;height:${h}px">
-    ${glow}<div class="meta">${mark}${right}</div><div class="body">${body}</div><div class="foot">${foot}</div></div>`
+  const face = font === 'segoe-print' ? `font-family:'Segoe Print',var(--ui);` : ''
+  return `<div class="card${light ? ' light' : ''}" style="left:${x}px;top:${y}px;width:${w}px;height:${h}px;
+      border-radius:${radius}px;background:${fill};box-shadow:inset 0 0 0 1px ${stroke}${shadowCss};--fs:${text / 2}px">
+    ${over}<div class="meta">${mark}${right}</div><div class="body" style="${face}">${body}</div><div class="foot">${foot}</div></div>`
 }
 
 // The Ebb logo, from paint_logo (a 140-unit square).
@@ -386,6 +489,65 @@ function search() {
     </div>`)}</div>`
 }
 
+// Every card style preset: its name, and two cards on the layer in it; the lower
+// one hovered (the Sticky Notes header, the pill). `light`: the light theme.
+function styles(light) {
+  // The week's list without its last item: the tiles are small.
+  const first3 = s => s.split('\n').slice(0, 3).join('\n')
+  const week3 = on(C.week, { hover: true, body: { ru: first3(C.week.body.ru), en: first3(C.week.body.en) } })
+  const tile = (p, i) => {
+    const x = 24 + (i % 4) * 312, y = 24 + Math.floor(i / 4) * 368
+    const o = { st: p.st, light }
+    return `<div style="position:absolute;left:${x}px;top:${y}px;width:296px">
+      <div style="height:40px">
+        <div style="font-weight:600;font-size:15px;color:var(--text)">${esc(L(p.name))}</div>
+        <div style="font-size:12.5px;color:var(--muted)">${esc(L(p.hint))}</div></div>
+      <div class="scene" style="width:296px;height:308px;border-radius:12px;box-shadow:0 0 0 1px var(--stroke)">
+        ${desktop(true)}<div class="scrim" style="background:${light ? 'rgba(255,255,255,.588)' : 'rgba(0,0,0,.275)'}"></div>
+        ${card(C.podcast, 16, 14, 264, 132, o)}${card(week3, 16, 146, 264, 150, o)}</div></div>`
+  }
+  return `<div class="scene${light ? ' light' : ''}" style="width:1280px;height:764px;background:${light ? '#eef1f5' : '#0b1220'}">
+    ${presets.map(tile).join('')}</div>`
+}
+
+// Sticky Notes import: the same notes before (Sticky Notes windows on the desktop)
+// and after (cards on the layer, where they were, in their colors), with the
+// layer's "imported" panel (src/import_ui.rs: State::Done).
+function importScene() {
+  const notes = demo.sticky
+  const frame = (x, title, inner) => `<div style="position:absolute;left:${x}px;top:24px;width:640px">
+    <div style="height:30px;font-weight:600;font-size:15px;color:var(--dim)">${esc(L(title))}</div>
+    <div class="scene" style="width:640px;height:420px;border-radius:12px;box-shadow:0 0 0 1px var(--stroke)">${inner}</div></div>`
+  const window = n => {
+    const [x, y, w, h] = n.at, p = paper[n.tint]
+    const bar = lerp(p, tint[n.tint].split(',').map(Number), .22)
+    const lines = L(n.text).split('\n').map(l => /^- /.test(l) ? `<div style="padding-left:16px;position:relative">
+      <span style="position:absolute;left:3px">•</span>${esc(l.slice(2))}</div>` : `<div>${esc(l)}</div>`).join('')
+    return `<div style="position:absolute;left:${x}px;top:${y}px;width:${w}px;height:${h}px;border-radius:8px;overflow:hidden;
+        background:rgb(${rgb(p)});box-shadow:0 0 0 1px rgba(0,0,0,.12), 0 6px 18px rgba(0,0,0,.35);color:rgb(26,28,34)">
+      <div style="height:30px;background:rgb(${rgb(bar)});display:flex;align-items:center;padding:0 10px;font-size:12px;color:rgba(0,0,0,.62)">
+        ${ic('plus')}<span style="margin-left:auto;display:flex;gap:16px">${ic('more')}${ic('x')}</span></div>
+      <div style="padding:10px 12px;font-size:14px;line-height:1.4;overflow-wrap:anywhere">${lines}</div></div>`
+  }
+  const btn = t => `<span style="height:20px;padding:0 6px;border-radius:3px;background:rgb(60,60,60);color:rgb(180,180,180);
+    font-size:12.5px;display:inline-flex;align-items:center">${esc(t)}</span>`
+  const s = ui.imported
+  const panel = `<div style="position:absolute;left:188px;top:64px;width:420px;height:132px;border-radius:12px;background:var(--glass);
+      box-shadow:inset 0 0 0 1px var(--stroke), 0 8px 28px rgba(0,0,0,.275);padding:16px 20px">
+    <div style="display:flex;align-items:center;gap:6px"><span style="font-size:15px;color:var(--dim)">${ic('E8B5')}</span>
+      <span style="font-weight:600;font-size:15px">${esc(L(s.title))}</span></div>
+    <div style="margin-top:7px;font-size:13px">${esc(L(s.count))}</div>
+    <div style="margin-top:5px;font-size:13px;color:var(--muted)">${esc(L(s.kept))}</div>
+    <div style="margin-top:11px;display:flex;gap:6px">${btn(L(s.sort))}${btn(L(s.done))}<span style="margin-left:auto">${btn(L(s.undo))}</span></div></div>`
+  return `<div class="scene" style="width:1352px;height:498px;background:#0b1220">
+    ${frame(24, ui.before, desktop(false) + notes.map(window).join(''))}
+    ${frame(688, ui.after, desktop(true) + '<div class="scrim"></div>' +
+      notes.map(n => card(n.card, ...n.at)).join('') + panel)}
+    <div style="position:absolute;left:656px;top:224px;width:40px;height:40px;border-radius:50%;background:var(--glass-hover);
+      box-shadow:inset 0 0 0 1px var(--stroke), 0 4px 14px rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;
+      font-size:15px;color:var(--success)">${ic('E72A')}</div></div>`
+}
+
 function social() {
   const chips = ['Glass cards on a second monitor', 'Win+Alt+N capture', 'Instant search', 'Sticky Notes import']
   return `<div class="scene" style="width:1280px;height:640px;background:radial-gradient(circle at 18% 28%, #123a35 0%, #0b1220 62%)">
@@ -405,7 +567,8 @@ function social() {
   </div>`
 }
 
-const scenes = { layer, cards, capture, search, social }
+const scenes = { layer, cards, capture, search, styles: () => styles(false), 'styles-light': () => styles(true),
+                 import: importScene, social }
 const scene = new URLSearchParams(location.search).get('scene') || 'layer'
 document.documentElement.lang = lang
 document.getElementById('root').innerHTML = (scenes[scene] || layer)()

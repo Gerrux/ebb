@@ -6,6 +6,8 @@
 
 <p align="center"><b>English</b> · <a href="README.ru.md">Русский</a></p>
 
+<p align="center"><a href="https://gerrux.github.io/ebb/?lang=en">gerrux.github.io/ebb</a></p>
+
 ---
 
 Ebb replaces scattered Sticky Notes: ideas, prompts, links, goals and reminders lie as glass
@@ -26,8 +28,15 @@ holding it in your head, and Ebb brings what matters back into view.
 - At rest a card is just its text and kind; tags, age and actions appear on hover: the kind's
   main action (open the link, copy the prompt, mark the goal done), pin, copy, "Later", and a
   "⋯" menu with archive and delete.
+- A card can leave the layer for its own window on the desktop: drag it past the layer's edge to
+  another monitor, or pick "Move to the desktop" in the "⋯" menu — that works with one monitor
+  too.
 - A settings window on first launch and when started from the shortcut: layer monitor,
   behaviour, autostart.
+- Appearance: a theme (same as Windows, dark, light) and eight card looks — Ebb, Sticky Notes,
+  Google Keep, Obsidian Canvas, Trello, paper sticker, minimal, Windows.
+- English and Russian UI: the language follows Windows and can be changed in Settings →
+  Appearance.
 - Quick capture from any app — `Win+Alt+N`, with kinds and `#tags` right in the text.
 - Instant search (SQLite FTS5) — `Win+Alt+F`; archive and trash — `Win+Alt+L`.
 - Imports your open Windows Sticky Notes just as they lie on the screen.
@@ -36,9 +45,10 @@ holding it in your head, and Ebb brings what matters back into view.
   button by its line; in a Prompt, `{{variables}}` show up as chips.
 - A note editor with mouse selection and formatting: `Ctrl+B`, `Ctrl+I`, `Ctrl+U`,
   strikethrough, highlighter and monospace code, also on a compact toolbar.
-- English and Russian UI: the language follows Windows and can be changed in Settings →
-  Appearance.
 - Tray icon, single instance, autostart at sign-in without Explorer's startup delay.
+
+If a shortcut is taken by another app, Ebb takes the next free one (`Ctrl+Alt+N`, …) — the
+current one is shown in the tray menu.
 
 ![Card actions on hover and the "Later" menu](docs/screenshots/cards-en.png)
 
@@ -46,8 +56,15 @@ holding it in your head, and Ebb brings what matters back into view.
 
 ![Search with the filters "ideas last month"](docs/screenshots/search-en.png)
 
-If a shortcut is taken by another app, Ebb takes the next free one (`Ctrl+Alt+N`, …) — the
-current one is shown in the tray menu.
+![Sticky Notes import: notes land on the layer in their places and colors](docs/screenshots/import-en.png)
+
+### Appearance
+
+Eight card looks, in the dark and the light theme:
+
+![Card looks in the dark theme](docs/screenshots/styles-en.png)
+
+![Card looks in the light theme](docs/screenshots/styles-light-en.png)
 
 ## Install
 
