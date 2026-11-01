@@ -631,7 +631,10 @@ impl EbbApp {
                     None => self.store.delete_setting(SET_LANGUAGE),
                 };
                 i18n::set(i18n::resolve(language));
+                // The picker is in the library; it and the bar draw their own frames.
                 ctx.request_repaint();
+                ctx.request_repaint_of(library::viewport_id());
+                ctx.request_repaint_of(bar::viewport_id());
             }
             Request::ImportSticky => {
                 self.set_layer_visible(ctx, true);

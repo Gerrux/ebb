@@ -88,7 +88,7 @@ const STOP_WORDS: &[&str] = &[
     "что", "я", "мы", "мне", "мой", "мои", "моих", "писал", "писала", "писали", "записывал", "записывала", "про",
     "о", "об", "обо", "для", "по", "все", "всё", "где", "как", "это", "было", "были", "найди", "найти", "покажи",
     "заметки", "заметку", "заметок", "заметка", "the", "about", "my", "notes", "note", "find", "show", "за", "на",
-    "в", "во", "с", "и", "or", "and", "in", "for", "of",
+    "в", "во", "с", "и", "or", "and", "in", "for", "of", "from",
 ];
 
 fn kind_word(w: &str) -> Option<Kind> {
@@ -456,6 +456,31 @@ mod tests {
         assert!(q.terms.is_empty());
         let (from, to, _) = q.range.unwrap();
         assert_eq!((from, to), (day(2026, 8, 1), day(2026, 9, 1)));
+    }
+
+    /// The example queries the search fields suggest are read as filters only, in both
+    /// languages: no leftover word that every note would have to contain.
+    #[test]
+    fn hint_examples_are_pure_filters() {
+        use crate::i18n::{Lang, strings};
+        let quoted = |hint: &str, open: char, close: char| -> String {
+            let start = hint.find(open).expect(hint) + open.len_utf8();
+            let end = hint[start..].find(close).expect(hint) + start;
+            hint[start..end].to_owned()
+        };
+        let (ru, en) = (strings(Lang::Ru), strings(Lang::En));
+        for (hint, open, close, kind, period) in [
+            (ru.bar.search_hint, '«', '»', Kind::Idea, Period::LastMonth),
+            (ru.library.search_archive, '«', '»', Kind::Link, Period::LastYear),
+            (en.bar.search_hint, '“', '”', Kind::Idea, Period::LastMonth),
+            (en.library.search_archive, '“', '”', Kind::Link, Period::LastYear),
+        ] {
+            let example = quoted(hint, open, close);
+            let q = parse(&example, NOW, MSK);
+            assert_eq!(q.kind, Some(kind), "{example}");
+            assert_eq!(q.range.map(|r| r.2), Some(period), "{example}");
+            assert!(q.terms.is_empty(), "{example}: leftover terms {:?}", q.terms);
+        }
     }
 
     #[test]

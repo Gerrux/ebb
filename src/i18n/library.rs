@@ -533,7 +533,7 @@ pub const EN: Library = Library {
     import_hint_secrets: "Will become Private: the value is encrypted and leaves search, the label stays.",
     import_hint_old: "Not changed for over a year. Search still finds them in the archive.",
     import_hint_other: "Ordinary notes. Keep them as they are or move them to the archive.",
-    import_hint_kind: |kind| format!("Looks like the “{kind}” kind."),
+    import_hint_kind: |kind| format!("Looks like the “{kind}” type."),
     import_accept: |kind| format!("Accept: {kind}"),
     import_keep: "Keep as they are",
     import_kept: |n| format!("{n} kept as they are"),
@@ -543,7 +543,7 @@ pub const EN: Library = Library {
     import_trashed: |n, days| format!("{n} moved to the trash, can be restored for {}", (super::common::EN.days)(days)),
     import_collapse: "Collapse",
     import_expand: "View",
-    import_kind_set: |kind| format!("Kind: {kind}"),
+    import_kind_set: |kind| format!("Type: {kind}"),
     import_item_age: |d| match d {
         ..=0 => "today".to_owned(),
         d => format!("{d} {} ago", en_days(d)),
@@ -621,7 +621,7 @@ pub const EN: Library = Library {
     card_looks: "Card style",
     custom_style_note: "Custom style: set up by hand.",
     customize: "Customize",
-    marker_caption: "Kind color on the card",
+    marker_caption: "Type color on the card",
     intensity: "Intensity",
     strip_width: "Strip width",
     corner_radius: "Corner radius",
@@ -629,10 +629,10 @@ pub const EN: Library = Library {
     opacity: "Background opacity",
     text_font: "Text font",
     text_size: "Text size",
-    icon_caption: "Kind mark",
+    icon_caption: "Type mark",
     big_icon: "Large icon",
     card_background: "Card background",
-    appearance_note: "The layer updates right away. F4 on the layer cycles through colors. Clicking the kind mark on a card changes its kind and color.",
+    appearance_note: "The layer updates right away. F4 on the layer cycles through colors. Clicking the type mark on a card changes its type and color.",
     section_cards: "Cards",
     snap: "Snap to the edges of neighboring cards",
     snap_note: "Hold Alt while dragging to place a card freely.",
@@ -765,7 +765,7 @@ mod tests {
         let en = &strings(Lang::En).library;
         assert_eq!((en.with_undo_hint)("5 notes archived"), "5 notes archived · Ctrl+Z — undo");
         assert_eq!((en.import_count_on_layer)(7, 3), "7 · 3 on the layer");
-        assert_eq!((en.import_hint_kind)("Link"), "Looks like the “Link” kind.");
+        assert_eq!((en.import_hint_kind)("Link"), "Looks like the “Link” type.");
         assert_eq!((en.sticky_to_layer)(10, 7, 3), "To the layer: 10 open ones, as on screen (7 in place, 3 nearby).");
         assert_eq!((en.sticky_skip)(1, 2), "Will skip: 1 empty, 2 duplicates.");
         assert_eq!(en.import_groups.len(), crate::sticky::ImportGroup::ALL.len());
