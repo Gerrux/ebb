@@ -112,7 +112,7 @@ cards(id, kind, title, body, tags /*csv*/, pinned, archived,
       review_at, last_resurfaced_at, resurface_count, ignored_count, priority,
       z, collapsed, meta /*JSON: idea_status*/)
 cards_fts  -- FTS5 external content (title, body, tags), unicode61 remove_diacritics 2
-settings(key, value)          -- layer.*, sticky_import, rediscover_day, review.*, backup.last, …
+settings(key, value)          -- layer.*, app.language, sticky_import, rediscover_day, review.*, backup.last, …
 imported(source_id, card_id, batch, reviewed)
 reviews(id, started_at, finished_at, kept, archived, snoozed, trashed, pinned)
 review_items(review_id, card_id, action, at)
@@ -123,4 +123,4 @@ review_items(review_id, card_id, action, at)
 Модули: `app` (слой: `mod` — события, `layer` — окно и шторка, `cards` — действия карточек,
 `card_ui`/`card_text` — отрисовка карточки, `toast`, `paint`), `bar` (захват/поиск), `library` (архив/корзина/настройки), `shell` (трей,
 хоткеи, единственный экземпляр), `store` (SQLite), `search` (разбор запроса), `sticky` (импорт),
-`import_ui`, `autostart`, `win` (Win32), `card`, `theme`, `bench`, `renderer`.
+`import_ui`, `autostart`, `win` (Win32), `card`, `theme`, `i18n` (строки интерфейса RU/EN), `bench`, `renderer`.

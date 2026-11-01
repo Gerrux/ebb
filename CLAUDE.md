@@ -79,6 +79,12 @@ when touching a file.
   style and re-serializes on save.
 - **`win`** — thin Win32 layer: acrylic/backdrop effects, monitor placement, hotkey registration,
   metrics.
+- **`i18n`** — every user-visible string, as complete per-language tables (`RU`, `EN`) split by
+  area (`common`, `layer`, `bar`, `library`); a missing translation is a compile error. The
+  active language is a process-wide atomic (Windows UI language, or `app.language` from
+  Settings); `i18n::s()` reads it. Tests check English via `i18n::strings(Lang::En)` and never
+  set the global. Words Ebb *parses* (search filters, `идея:` prefixes) stay in their parsers,
+  which accept both languages.
 - **`theme`** — fonts/colors; uses system Segoe UI Variable / Segoe Fluent Icons, nothing bundled.
 - **`emoji`** — color emoji rendering: egui/epaint only rasterizes coverage glyphs, so a
   post-frame plugin replaces emoji glyphs (laid out via Segoe UI Emoji for correct advances/ZWJ)

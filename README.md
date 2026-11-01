@@ -2,72 +2,78 @@
 
 <h1 align="center">Ebb</h1>
 
-<p align="center">Заметки, которые уходят из головы и сами возвращаются.<br>Спокойный слой памяти на втором мониторе Windows.</p>
+<p align="center">Notes that ebb away and come back on their own.<br>A calm memory layer on your second Windows monitor.</p>
+
+<p align="center"><b>English</b> · <a href="README.ru.md">Русский</a></p>
 
 ---
 
-Ebb заменяет разбросанные Sticky Notes: идеи, prompts, ссылки, цели и напоминания лежат
-стеклянными карточками на отдельном мониторе — под окнами, не на панели задач. Записали,
-перестали держать в голове, а Ebb вернёт нужное в поле зрения.
+Ebb replaces scattered Sticky Notes: ideas, prompts, links, goals and reminders lie as glass
+cards on a separate monitor — under your windows, not on the taskbar. Write it down, stop
+holding it in your head, and Ebb brings what matters back into view.
 
 **Capture → Forget → Resurface → Act → Archive**
 
-![Слой карточек Ebb на втором мониторе](docs/screenshots/layer.png)
+![Ebb's layer of cards on a second monitor](docs/screenshots/layer-en.png)
 
-## Возможности
+## Features
 
-- Слой карточек на выбранном мониторе, акрил, перетаскивание и изменение размера за любой край
-  или угол по сетке, магнит — карточки встают вплотную к соседним (Alt — без магнита), прокрутка
-  длинных заметок.
-- Клик по значку в трее поднимает слой поверх окон; Esc или повторный клик возвращают его на фон.
-  Меню «⋯» в углу слоя — те же действия, что в трее.
-- В покое карточка — текст и метка типа; теги, возраст и действия появляются при наведении:
-  главное действие типа (открыть ссылку, скопировать prompt, отметить цель сделанной), закрепить,
-  копировать, «Позже» и меню «⋯» с архивом и удалением.
-- Окно настроек при первом запуске и при запуске из ярлыка: монитор слоя, поведение, автозапуск.
-- Быстрый захват из любого приложения — `Win+Alt+N`, типы и `#теги` прямо в тексте.
-- Мгновенный поиск (SQLite FTS5) — `Win+Alt+F`, архив и корзина — `Win+Alt+L`.
-- Импорт открытых Windows Sticky Notes так, как они лежат на экране.
-- Списки как в Sticky Notes: строка с `- ` показывается с маркером, `- [ ]` — с чекбоксом, клик
-  по нему отмечает пункт сделанным. В Reference каждая команда, путь или адрес копируется одной
-  кнопкой у строки; в Prompt `{{переменные}}` видны как чипы.
-- Редактор заметок с выделением мышью и форматированием: `Ctrl+B`, `Ctrl+I`, `Ctrl+U`,
-  зачёркивание, маркер и моноширинный код; те же действия доступны на компактной панели.
-- Трей, один экземпляр, автозапуск при входе без задержки Explorer.
+- A layer of cards on the monitor you pick, with acrylic blur; drag cards and resize them by any
+  edge or corner on a grid, with a magnet that snaps them to their neighbours (hold Alt to place
+  freely); long notes scroll.
+- A click on the tray icon brings the layer above your windows; Esc or another click sends it
+  back. The "⋯" menu in the layer's corner has the same actions as the tray.
+- At rest a card is just its text and kind; tags, age and actions appear on hover: the kind's
+  main action (open the link, copy the prompt, mark the goal done), pin, copy, "Later", and a
+  "⋯" menu with archive and delete.
+- A settings window on first launch and when started from the shortcut: layer monitor,
+  behaviour, autostart.
+- Quick capture from any app — `Win+Alt+N`, with kinds and `#tags` right in the text.
+- Instant search (SQLite FTS5) — `Win+Alt+F`; archive and trash — `Win+Alt+L`.
+- Imports your open Windows Sticky Notes just as they lie on the screen.
+- Lists like in Sticky Notes: a line starting with `- ` gets a bullet, `- [ ]` a checkbox you can
+  click to mark the item done. In a Reference every command, path or address copies with one
+  button by its line; in a Prompt, `{{variables}}` show up as chips.
+- A note editor with mouse selection and formatting: `Ctrl+B`, `Ctrl+I`, `Ctrl+U`,
+  strikethrough, highlighter and monospace code, also on a compact toolbar.
+- English and Russian UI: the language follows Windows and can be changed in Settings →
+  Appearance.
+- Tray icon, single instance, autostart at sign-in without Explorer's startup delay.
 
-![Действия карточки при наведении и меню «Позже»](docs/screenshots/cards.png)
+![Card actions on hover and the "Later" menu](docs/screenshots/cards-en.png)
 
-![Быстрый захват: тип и теги прямо в тексте](docs/screenshots/capture.png)
+![Quick capture: kind and tags right in the text](docs/screenshots/capture-en.png)
 
-![Поиск с фильтрами «идеи прошлого месяца»](docs/screenshots/search.png)
+![Search with the filters "ideas last month"](docs/screenshots/search-en.png)
 
-Если сочетание занято другой программой, Ebb берёт следующее свободное (`Ctrl+Alt+N`, …) —
-актуальное видно в меню трея.
+If a shortcut is taken by another app, Ebb takes the next free one (`Ctrl+Alt+N`, …) — the
+current one is shown in the tray menu.
 
-## Установка
+## Install
 
-Скачайте последний [релиз](https://github.com/Gerrux/ebb/releases/latest):
+Download the latest [release](https://github.com/Gerrux/ebb/releases/latest):
 
-- `Ebb-Setup-x.y.z.exe` — установщик, без прав администратора;
-- `ebb-x.y.z-windows-x64.zip` — портативный `ebb.exe`.
+- `Ebb-Setup-x.y.z.exe` — installer, no admin rights needed;
+- `ebb-x.y.z-windows-x64.zip` — portable `ebb.exe`.
 
-Нужна Windows 10 1809+ (лучше Windows 11). Заметки хранятся в `%LOCALAPPDATA%\Ebb\ebb.db`.
+Requires Windows 10 1809+ (Windows 11 recommended). Notes are stored in
+`%LOCALAPPDATA%\Ebb\ebb.db` and stay on your machine.
 
-## Сборка
+## Build
 
 ```powershell
 cargo build --release                      # target\release\ebb.exe
-powershell -File installer\build.ps1       # + dist\Ebb-Setup-*.exe и zip (нужен Inno Setup 6)
+powershell -File installer\build.ps1       # + dist\Ebb-Setup-*.exe and zip (needs Inno Setup 6)
 ```
 
-Командная строка: `ebb --quit`, `ebb --autostart-on|off|status`.
+Command line: `ebb --quit`, `ebb --autostart-on|off|status`.
 
-Иконка генерируется `python scripts/make-icon.py` (Pillow) в `assets/`.
+The icon is generated by `python scripts/make-icon.py` (Pillow) into `assets/`.
 
-## Выпуск
+## Release
 
-1. Поднять `version` в `Cargo.toml`, закоммитить.
-2. `git tag vX.Y.Z && git push origin vX.Y.Z` — workflow `release` соберёт установщик и
-   опубликует релиз.
+1. Bump `version` in `Cargo.toml`, commit.
+2. `git tag vX.Y.Z && git push origin vX.Y.Z` — the `release` workflow builds the installer and
+   publishes the release.
 
-Дальнейшие планы — в [docs/specs](docs/specs/README.md).
+Plans and design notes (in Russian) are in [docs/specs](docs/specs/README.md).
