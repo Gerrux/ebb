@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Ebb screenshots</title>
+<!--
+  Renders README/article images from demo data in Ebb's own design (src/theme.rs,
+  src/card.rs, src/app/paint.rs, src/app/card_ui.rs, src/app/card_text.rs, src/bar.rs).
+  No real notes, projects or hosts. Windows only: it uses the system's Segoe UI
+  Variable, Segoe Fluent Icons and Consolas, like the app. Regenerate: docs/mock/README.md
+
+  ?scene=layer    the card layer on a second monitor (1280x592)
+  ?scene=cards    a card on hover: its actions and the "Later" menu (780x400)
+  ?scene=capture  quick capture, Win+Alt+N (720x212)
+  ?scene=search   search, Win+Alt+F (760x556)
+  ?scene=social   1280x640 link preview (GitHub, X, Reddit)
+  &lang=ru|en     interface language of the mock (default ru)
+-->
+<style>
+  /* src/theme.rs, DARK palette */
+  :root {
+    --text: rgb(236,239,244); --dim: rgb(178,186,198); --muted: rgb(128,136,150);
+    --glass: rgba(30,33,40,.843); --glass-hover: rgba(40,44,53,.894);
+    --stroke: rgba(255,255,255,.102); --chip: rgba(255,255,255,.063);
+    /* card style "Ebb" preset: opacity 85 %, hovered +12/255 */
+    --card: rgba(30,33,40,.85); --card-hover: rgba(40,44,53,.897);
+    --link: rgb(156,195,245); --success: rgb(52,211,153);
+    --highlight: 96,165,250;
+    --ui: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+    --icons: "Segoe Fluent Icons", "Segoe MDL2 Assets";
+    --mono: Consolas, "Cascadia Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: #0b1220; color: var(--text); font: 14.5px/1.34 var(--ui); }
+  .ic { font-family: var(--icons); font-style: normal; font-weight: 400; line-height: 1; display: inline-block; }
+  .scene { position: relative; overflow: hidden; }
+
+  /* The desktop under the layer: an abstract Windows-style wallpaper. */
+  .wall { position: absolute; inset: -80px;
+    background:
+      radial-gradient(ellipse 42% 55% at 72% 38%, #2b6fd6 0%, rgba(43,111,214,0) 70%),
+      radial-gradient(ellipse 35% 45% at 58% 62%, #1fa3c9 0%, rgba(31,163,201,0) 70%),
+      radial-gradient(ellipse 30% 40% at 84% 70%, #6a4bc4 0%, rgba(106,75,196,0) 70%),
+      radial-gradient(ellipse 50% 60% at 18% 25%, #16325f 0%, rgba(22,50,95,0) 75%),
+      linear-gradient(160deg, #0a1426 0%, #0d1b33 45%, #0a1020 100%); }
+  .blur { filter: blur(56px) saturate(1.1); }
+  /* The layer's tint over the desktop: black at alpha 70 (layer.tint default). */
+  .scrim { position: absolute; inset: 0; background: rgba(0,0,0,.275); }
+
+  /* Layer header (src/app/layer.rs: header, menu_ui) */
+  .head { position: absolute; left: 32px; top: 20px; display: flex; align-items: center; gap: 14px;
+          font-size: 13px; color: var(--muted); }
+  .gbtn { position: absolute; top: 16px; width: 40px; height: 36px; border-radius: 10px;
+          background: var(--glass); border: 1px solid var(--stroke);
+          display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 16px; }
+
+  /* A card (src/app/card_ui.rs, src/app/paint.rs) */
+  .card { position: absolute; border-radius: 12px; background: var(--card);
+          box-shadow: inset 0 0 0 1px var(--stroke), 0 8px 28px rgba(0,0,0,.275); overflow: hidden; }
+  .card.hover { background: var(--card-hover); }
+  .glow { position: absolute; left: 0; top: 0; pointer-events: none; }
+  .meta { position: absolute; left: 14px; right: 14px; top: 10px; height: 20px; }
+  .mark { position: absolute; left: 0; top: 0; height: 20px; display: flex; align-items: center;
+          font-weight: 600; font-size: 11.5px; white-space: nowrap; }
+  .mark .dot { width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; flex: none; }
+  .pin { position: absolute; right: 0; top: 4px; font-size: 11px; }
+  .pill { position: absolute; right: -4px; top: -3px; height: 26px; padding: 0 4px; border-radius: 7px;
+          display: flex; gap: 2px; align-items: center; background: var(--glass-hover);
+          box-shadow: inset 0 0 0 1px var(--stroke), 0 2px 10px rgba(0,0,0,.275); }
+  .pill .b { width: 24px; height: 22px; border-radius: 6px; display: flex; align-items: center;
+             justify-content: center; font-size: 12.5px; color: var(--dim); }
+  .pill .b.on { background: rgba(255,255,255,.086); }
+  .body { position: absolute; left: 14px; right: 14px; top: 34px; bottom: 32px; overflow: hidden; }
+  .reason { font-size: 11.5px; color: var(--dim); margin-bottom: 3px; }
+  .h { font-weight: 600; font-size: 15px; color: var(--text); }
+  .t { color: var(--text); white-space: pre-wrap; }
+  .t.sub { color: var(--dim); font-size: 13.5px; }
+  .ln { position: relative; min-height: 1.34em; }
+  .ln.bullet { padding-left: 16px; }
+  .ln.todo, .ln.done { padding-left: 22px; }
+  .ln.done { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--muted); }
+  .ln .bul { position: absolute; left: 4.5px; top: calc(.67em - 2.5px); width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+  .ln .box { position: absolute; left: 0; top: calc(.67em - 7px); width: 14px; height: 14px; border-radius: 4px;
+             border: 1.5px solid var(--muted); }
+  .ln.done .box { border: none; display: flex; align-items: center; justify-content: center;
+                  font-size: 9px; color: rgb(30,33,40); text-decoration: none; }
+  .ln.mono { font: 12.5px/1.6 var(--mono); padding-right: 26px; color: var(--dim); }
+  .ln .copy { position: absolute; right: 2px; top: 50%; transform: translateY(-50%); font-size: 11px; color: var(--dim); }
+  .var { font: 12px var(--mono); }
+  .url { color: var(--link); }
+  .domain { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .redacted { color: rgba(178,186,198,.45); letter-spacing: 1px; }
+  .foot { position: absolute; left: 14px; right: 14px; bottom: 10px; height: 20px; display: flex;
+          align-items: center; gap: 4px; font-size: 11.5px; }
+  .chip { height: 18px; padding: 0 6px; border-radius: 6px; background: var(--chip); color: var(--dim);
+          display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .chip .x { font-size: 7.5px; color: var(--muted); }
+  .chip.status { box-shadow: inset 0 0 0 1px var(--sc); color: var(--sc2); }
+  .plus { width: 22px; height: 18px; display: flex; align-items: center; justify-content: center; font-size: 9.5px; color: var(--muted); }
+  .age { margin-left: auto; color: var(--muted); }
+
+  /* egui's dark menu (the "Later" popup) */
+  .menu { position: absolute; width: 170px; padding: 6px; border-radius: 6px; background: rgb(27,27,27);
+          box-shadow: inset 0 0 0 1px rgb(60,60,60), 0 8px 20px rgba(0,0,0,.4); font-size: 14px; }
+  .menu .cap { font-size: 12px; color: var(--muted); padding: 2px 2px 4px; }
+  .menu .it { padding: 4px 8px; border-radius: 4px; color: rgb(180,180,180); }
+  .menu .it.hov { background: rgb(70,70,70); color: rgb(240,240,240); }
+
+  /* The bar window (src/bar.rs): acrylic + window_fill(150), DWM-rounded */
+  .win { position: absolute; border-radius: 8px; overflow: hidden;
+         box-shadow: 0 0 0 1px rgba(255,255,255,.09), 0 18px 48px rgba(0,0,0,.55); }
+  .win .fill { position: absolute; inset: 0; background: rgba(22,24,30,.588); }
+  .win .in { position: absolute; }
+  .caret { display: inline-block; width: 1.5px; height: 22px; background: var(--text); vertical-align: -4px; margin-left: 1px; }
+  .hint { color: var(--muted); font-size: 11.5px; }
+  .qchip { height: 20px; padding: 0 7px; border-radius: 7px; background: rgba(var(--highlight),.176);
+           color: var(--text); font-size: 12px; display: inline-flex; align-items: center; }
+  .row { position: absolute; left: 0; right: 0; height: 50px; border-radius: 8px; }
+  .row.sel { background: rgba(255,255,255,.078); }
+  .row .k { position: absolute; left: 14px; top: 12px; font-size: 14px; }
+  .row .l1 { position: absolute; left: 40px; top: 7px; font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .l2 { position: absolute; left: 40px; top: 29px; font-size: 12.5px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .ag { position: absolute; right: 12px; top: 12px; font-size: 11.5px; color: var(--muted); }
+  .row .badge { position: absolute; top: 11px; font-size: 11px; color: var(--dim); background: var(--chip); border-radius: 6px; padding: 1px 5px; }
+  .hl { background: rgba(var(--highlight),.275); color: var(--text); }
+  .acts { position: absolute; left: 40px; top: 28px; display: flex; gap: 6px; }
+  .acts span { font-size: 12px; padding: 2px 7px 3px; border-radius: 6px; background: rgba(255,255,255,.055); color: var(--dim); }
+  .acts span.on { background: rgba(var(--highlight),.43); color: var(--text); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const lang = new URLSearchParams(location.search).get('lang') === 'en' ? 'en' : 'ru'
+const L = v => (v && typeof v === 'object' && 'ru' in v) ? v[lang] : v
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+// Interface strings: the app's own (src/card.rs, src/app/card_ui.rs, src/bar.rs,
+// src/search.rs, src/resurface.rs). The English column is a translation for posts:
+// the app itself speaks Russian.
+const ui = {
+  kinds: {
+    note: { ru: 'Заметка', en: 'Note' }, idea: { ru: 'Идея', en: 'Idea' }, prompt: 'Prompt',
+    link: { ru: 'Ссылка', en: 'Link' }, goal: { ru: 'Цель', en: 'Goal' },
+    reminder: { ru: 'Напоминание', en: 'Reminder' }, reference: 'Reference', private: 'Private',
+  },
+  status: { potential: { ru: 'Потенциал', en: 'Potential' }, explore: { ru: 'Изучить', en: 'Explore' },
+            important: { ru: 'Важно', en: 'Important' } },
+  header: { ru: n => `${n} карточек  ·  Win+Alt+N — записать  ·  Win+Alt+F — найти  ·  F1 — debug`,
+            en: n => `${n} cards  ·  Win+Alt+N — capture  ·  Win+Alt+F — find  ·  F1 — debug` },
+  later: { ru: 'Убрать и вернуть', en: 'Put away until' },
+  snooze: { ru: ['Завтра', 'Через 3 дня', 'Через неделю', 'Через месяц'],
+            en: ['Tomorrow', 'In 3 days', 'In a week', 'In a month'] },
+  capHint: { ru: 'Enter — сохранить · Shift+Enter — строка · Esc   ·   14 мс',
+             en: 'Enter — save · Shift+Enter — new line · Esc   ·   14 ms' },
+  searchStats: { ru: '6 · 1.6 мс · открыто за 21 мс', en: '6 · 1.6 ms · opened in 21 ms' },
+  searchHint: { ru: '←→ действие · Enter — выполнить · Tab или Esc — назад',
+                en: '←→ action · Enter — run · Tab or Esc — back' },
+  actions: { ru: ['На слой', 'Копировать', 'Закрепить', 'В архив', 'В корзину'],
+             en: ['To the layer', 'Copy', 'Pin', 'Archive', 'Delete'] },
+}
+
+// Kind → tint mark color (src/card.rs: Kind::tint, Tint::raw_color).
+const tint = { gray: '160,174,192', yellow: '250,204,21', purple: '167,139,250', blue: '96,165,250',
+               green: '52,211,153', orange: '251,146,60', teal: '45,212,191', pink: '244,114,182' }
+const kindTint = { note: 'gray', idea: 'yellow', prompt: 'purple', link: 'blue', goal: 'green',
+                   reminder: 'orange', reference: 'teal', private: 'pink' }
+const statusTint = { potential: 'blue', explore: 'teal', important: 'orange' }
+// Segoe Fluent Icons glyphs (src/card.rs: Kind::icon, src/app/card_ui.rs).
+const G = { note: 'E70B', idea: 'EA80', prompt: 'E99A', link: 'E71B', goal: 'E7C1', reminder: 'E823',
+            reference: 'E943', private: 'E72E', more: 'E712', later: 'E708', archive: 'E7B8', copy: 'E77F',
+            open: 'E8A7', done: 'E930', pin: 'E840', pinned: 'E841', plus: 'E710', x: 'E711', check: 'E73E',
+            search: 'E721', copyLine: 'E8C8' }
+const ic = (g, style = '') => `<i class="ic" style="${style}">&#x${G[g] || g};</i>`
+
+// One demo set for every scene: the same notes, tags and ages everywhere.
+const demo = {
+  cards: {
+    rediscover: { kind: 'idea', status: 'explore', age: { ru: '23 дн', en: '23 d' },
+      reason: { ru: 'Ты записал это 23 дня назад', en: 'You wrote this 23 days ago' },
+      body: { ru: 'Виджет погоды прямо на слое: утром прогноз на день, вечером его нет',
+              en: 'A weather widget right on the layer: the forecast in the morning, gone by evening' },
+      tags: ['ebb'] },
+    week: { kind: 'goal', title: { ru: 'Неделя', en: 'This week' }, age: { ru: '2 дн', en: '2 d' },
+      body: { ru: '- [x] Пробежка три раза\n- [x] Разобрать почту\n- [ ] Дочитать книгу о привычках\n- [ ] Позвонить родителям',
+              en: '- [x] Run three times\n- [x] Clear the inbox\n- [ ] Finish the book on habits\n- [ ] Call my parents' },
+      tags: [] },
+    prompt: { kind: 'prompt', title: { ru: 'Редактор', en: 'Editor' }, age: { ru: '3 дн', en: '3 d' },
+      body: { ru: 'Сократи {{текст}} до {{n}} предложений. Сохрани тон автора, убери повторы и канцелярит.',
+              en: 'Shorten {{text}} to {{n}} sentences. Keep the author\'s tone, cut repetition and filler.' },
+      tags: ['prompts', { ru: 'тексты', en: 'writing' }] },
+    link: { kind: 'link', age: { ru: '5 дн', en: '5 d' },
+      body: { ru: 'Про интервальные повторения https://example.net/spaced-repetition',
+              en: 'On spaced repetition https://example.net/spaced-repetition' },
+      domain: 'example.net', tags: [{ ru: 'учёба', en: 'learning' }] },
+    reference: { kind: 'reference', title: { ru: 'Тестовый сервер', en: 'Test server' }, age: { ru: '12 дн', en: '12 d' },
+      body: 'ssh demo@203.0.113.24\ncd /srv/app && git pull\ncurl -I https://example.net/health', mono: true, tags: [] },
+    reminder: { kind: 'reminder', due: { ru: '14 ноя', en: 'Nov 14' }, age: { ru: '1 ч', en: '1 h' },
+      body: { ru: 'Продлить подписку на облако', en: 'Renew the cloud subscription' }, tags: [] },
+    shopping: { kind: 'note', age: { ru: '4 ч', en: '4 h' },
+      body: { ru: 'Купить:\n- кофе в зёрнах\n- батарейки AA\n- лампочку E27',
+              en: 'To buy:\n- coffee beans\n- AA batteries\n- an E27 bulb' }, tags: [] },
+    podcast: { kind: 'idea', status: 'potential', age: { ru: '9 дн', en: '9 d' },
+      body: { ru: 'Подкаст из голосовых заметок: раз в неделю собирать их в один выпуск',
+              en: 'A podcast from voice memos: once a week, stitch them into one episode' }, tags: [] },
+    wifi: { kind: 'private', title: { ru: 'Wi-Fi на даче', en: 'Cabin Wi-Fi' }, age: { ru: '30 дн', en: '30 d' }, tags: [] },
+    site: { kind: 'goal', pinned: true, age: { ru: '41 дн', en: '41 d' },
+      body: { ru: 'Запустить личный сайт до конца года', en: 'Launch a personal site by the end of the year' }, tags: [] },
+    theme: { kind: 'idea', status: 'important', title: { ru: 'Тёмная тема слоя под цвет обоев', en: 'A dark layer theme that matches the wallpaper' },
+      age: { ru: '26 дн', en: '26 d' },
+      body: { ru: 'Брать акцент из обоев и подкрашивать им карточки', en: 'Take the accent from the wallpaper and tint the cards with it' }, tags: [] },
+    call: { kind: 'note', age: { ru: '1 дн', en: '1 d' },
+      body: { ru: 'Позвонить в сервис насчёт гарантии на чайник, чек в почте', en: 'Call the repair shop about the kettle warranty, the receipt is in the mail' }, tags: [] },
+  },
+  capture: { ru: 'идея: собрать голосовые заметки в подкаст\nраз в неделю, по пятницам #подкаст',
+             en: 'idea: turn voice memos into a podcast\nonce a week, on Fridays #podcast' },
+  captureTag: { ru: 'подкаст', en: 'podcast' },
+  query: { ru: 'идеи прошлого месяца слой', en: 'ideas last month layer' },
+  queryChips: { ru: ['Идея', 'прошлый месяц'], en: ['Idea', 'last month'] },
+  // Search hits: [kind, line1, line2, age], <m>…</m> marks the matched word.
+  hits: [
+    ['idea', { ru: 'Виджет погоды прямо на <m>слое</m>: утром прогноз на день, вечером его нет',
+               en: 'A weather widget right on the <m>layer</m>: the forecast in the morning, gone by evening' }, '', { ru: '23 дн', en: '23 d' }],
+    ['idea', { ru: 'Тёмная тема <m>слоя</m> под цвет обоев', en: 'A dark <m>layer</m> theme that matches the wallpaper' },
+             { ru: 'Брать акцент из обоев и подкрашивать им карточки на <m>слое</m>', en: 'Take the accent from the wallpaper and tint the cards on the <m>layer</m>' }, { ru: '26 дн', en: '26 d' }],
+    ['idea', { ru: 'Карточки на <m>слое</m> по времени суток', en: 'Cards on the <m>layer</m> by time of day' },
+             { ru: 'Утром цели, вечером то, что отложено на потом', en: 'Goals in the morning, the "later" pile in the evening' }, { ru: '1 мес', en: '1 mo' }],
+    ['idea', { ru: 'Таймер фокуса в углу <m>слоя</m>, без звука', en: 'A silent focus timer in the corner of the <m>layer</m>' }, '', { ru: '1 мес', en: '1 mo' }, true],
+    ['idea', { ru: 'Свернуть <m>слой</m> в полоску у края экрана', en: 'Fold the <m>layer</m> into a strip at the screen edge' },
+             { ru: 'Клик по полоске разворачивает обратно', en: 'A click on the strip unfolds it again' }, { ru: '1 мес', en: '1 mo' }],
+    ['idea', { ru: 'Отдельный <m>слой</m> для рабочих заметок', en: 'A separate <m>layer</m> for work notes' }, '', { ru: '1 мес', en: '1 mo' }],
+  ],
+}
+
+// --- primitives -----------------------------------------------------------
+
+function lineHtml(raw, c) {
+  let cls = '', pre = '', s = raw
+  if (/^- \[[xX]\] /.test(s)) { cls = 'done'; pre = `<span class="box" style="background:rgb(${tint[kindTint[c.kind]]})">${ic('check')}</span>`; s = s.slice(6) }
+  else if (/^- \[ \] /.test(s)) { cls = 'todo'; pre = '<span class="box"></span>'; s = s.slice(6) }
+  else if (/^- /.test(s)) { cls = 'bullet'; pre = '<span class="bul"></span>'; s = s.slice(2) }
+  let h = esc(s)
+  h = h.replace(/https?:\/\/\S+/g, u => `<span class="url">${u}</span>`)
+  if (c.kind === 'prompt') {
+    const a = tint[kindTint.prompt]
+    h = h.replace(/\{\{[^}]+\}\}/g, v => `<span class="var" style="color:rgb(${a});background:rgba(${a},.16)">${v}</span>`)
+  }
+  if (c.mono) { cls += ' mono'; if (c.hover) pre += `<span class="copy">${ic('copyLine')}</span>` }
+  return `<div class="ln ${cls}">${pre}${h}</div>`
+}
+
+function card(c, x, y, w, h) {
+  const t = tint[c.tint || kindTint[c.kind]]
+  const reach = Math.min(240, Math.max(w, h) * .75)
+  const glow = `<div class="glow" style="width:${reach}px;height:${reach}px;background:radial-gradient(circle ${reach}px at 0 0,
+    rgba(${t},.2) 0%, rgba(${t},.113) 25%, rgba(${t},.05) 50%, rgba(${t},.0125) 75%, rgba(${t},0) 100%)"></div>`
+  // A plain note shows its kind only on hover.
+  let mark = ''
+  if (c.kind !== 'note' || c.hover) {
+    const label = L(ui.kinds[c.kind]) + (c.due ? ` · ${L(c.due)}` : '')
+    mark = `<div class="mark" style="color:rgb(${t})"><span class="dot" style="background:rgb(${t})"></span>${esc(label)}</div>`
+  }
+  let right = ''
+  if (c.hover) {
+    const primary = { prompt: 'copy', reference: 'copy', private: 'copy', link: 'open', goal: 'done', reminder: 'done' }[c.kind]
+    const btn = (g, on) => `<span class="b${on ? ' on' : ''}">${ic(g)}</span>`
+    right = `<div class="pill">${primary ? `<span class="b" style="background:rgba(${t},.16);color:rgb(${t})">${ic(primary)}</span>` : ''}
+      ${btn('later', c.menu)}${primary === 'done' ? '' : btn('archive')}${btn('more')}</div>`
+  } else if (c.pinned) {
+    right = `<span class="pin ic" style="color:rgb(${t})">&#x${G.pin};</span>`
+  }
+  let body = ''
+  if (c.reason) body += `<div class="reason">${esc(L(c.reason))}</div>`
+  if (c.title) body += `<div class="h">${esc(L(c.title))}</div>`
+  if (c.kind === 'private') body += `<div class="t sub redacted">••••••••••</div>`
+  else body += `<div class="t${c.title ? ' sub' : ''}">${L(c.body).split('\n').map(l => lineHtml(l, c)).join('')}</div>`
+  if (c.domain) body += `<div class="domain">${esc(c.domain)}</div>`
+  // Footer: the idea's status always; tags and age only on hover.
+  let foot = ''
+  if (c.status) {
+    const s = tint[statusTint[c.status]]
+    foot += `<span class="chip status" style="--sc:rgba(${s},.6);--sc2:rgb(${s})">${esc(L(ui.status[c.status]))}</span>`
+  }
+  if (c.hover) {
+    foot += c.tags.map(g => `<span class="chip">#${esc(L(g))}<i class="ic x">&#x${G.x};</i></span>`).join('')
+    foot += `<span class="plus ic">&#x${G.plus};</span><span class="age">${esc(L(c.age))}</span>`
+  }
+  return `<div class="card${c.hover ? ' hover' : ''}" style="left:${x}px;top:${y}px;width:${w}px;height:${h}px">
+    ${glow}<div class="meta">${mark}${right}</div><div class="body">${body}</div><div class="foot">${foot}</div></div>`
+}
+
+// The Ebb logo, from paint_logo (a 140-unit square).
+function logo(size) {
+  const wave = y => { let d = ''; for (let i = 0; i <= 48; i++) { const x = 22 + i * 2; d += `${i ? 'L' : 'M'}${x} ${(y - 5 * Math.sin(Math.PI * (x - 22) / 24)).toFixed(2)}` } return d }
+  return `<svg width="${size}" height="${size}" viewBox="0 0 140 140">
+    <rect width="140" height="140" rx="32" fill="rgb(30,33,40)"/>
+    <rect x=".5" y=".5" width="139" height="139" rx="32" fill="none" stroke="rgba(255,255,255,.12)" stroke-width="1.2"/>
+    <rect x="42" y="26" width="56" height="44" rx="10" fill="rgb(52,211,153)"/>
+    <rect x="54" y="40" width="32" height="5" rx="2.5" fill="rgb(11,59,43)"/>
+    <rect x="54" y="51" width="20" height="5" rx="2.5" fill="rgb(11,59,43)"/>
+    <path d="${wave(90)}" fill="none" stroke="rgb(45,212,191)" stroke-width="6" stroke-linecap="round"/>
+    <path d="${wave(110)}" fill="none" stroke="rgba(45,212,191,.45)" stroke-width="6" stroke-linecap="round"/></svg>`
+}
+
+const desktop = (blur) => `<div class="wall${blur ? ' blur' : ''}"></div>`
+
+// --- scenes ---------------------------------------------------------------
+
+const C = demo.cards
+const on = (c, extra) => Object.assign({}, c, extra)
+// The layer's cards: x, y, w, h. Neighbours in a column sit flush (the magnet).
+const layout = [
+  [C.rediscover, 40, 80, 280, 152], [C.week, 40, 232, 280, 160], [C.site, 40, 408, 280, 112],
+  [on(C.prompt, { hover: true }), 336, 80, 300, 176], [C.link, 336, 272, 300, 128], [C.call, 336, 416, 300, 112],
+  [C.reference, 652, 80, 300, 144], [C.reminder, 652, 224, 300, 88], [C.theme, 652, 328, 300, 168],
+  [C.shopping, 968, 80, 272, 152], [C.podcast, 968, 248, 272, 130], [C.wifi, 968, 394, 272, 90],
+]
+
+// A crop of the monitor: the layer goes on below, empty.
+function layer() {
+  return `<div class="scene" style="width:1280px;height:592px">${desktop(true)}<div class="scrim"></div>
+    <div class="head">${logo(30)}<span style="white-space:pre">${esc(L(ui.header)(layout.length))}</span></div>
+    <div class="gbtn" style="right:120px">${ic('plus')}</div><div class="gbtn" style="right:72px">${ic('more')}</div>
+    ${layout.map(([c, x, y, w, h]) => card(c, x, y, w, h)).join('')}</div>`
+}
+
+function cards() {
+  // The reminder is hovered with "Позже" open: its pill is done, later, more, and
+  // the menu hangs under "Позже", right edges aligned (BOTTOM_END, gap 4).
+  const px = 380, py = 172, pw = 360
+  const laterRight = px + pw - 14 + 4 - 4 - 24 - 2
+  return `<div class="scene" style="width:780px;height:400px">${desktop(true)}<div class="scrim"></div>
+    ${card(C.prompt, 20, 24, 344, 160)}${card(C.week, 20, 184, 344, 160)}
+    ${card(C.reference, px, 24, pw, 148)}
+    ${card(on(C.reminder, { hover: true, menu: true }), px, py, pw, 92)}
+    <div class="menu" style="left:${laterRight - 170}px;top:${py + 10 + 10 + 13 + 4}px">
+      <div class="cap">${esc(L(ui.later))}</div>
+      ${L(ui.snooze).map((s, i) => `<div class="it${i === 2 ? ' hov' : ''}">${esc(s)}</div>`).join('')}</div></div>`
+}
+
+// A bar window at x, y: the blurred desktop behind it (acrylic), then window_fill(150).
+function barWindow(x, y, w, h, inner) {
+  return `<div class="win" style="left:${x}px;top:${y}px;width:${w}px;height:${h}px">
+    <div style="position:absolute;left:${-x}px;top:${-y}px;width:2000px;height:1200px">${desktop(true)}</div>
+    <div class="fill"></div>${inner}</div>`
+}
+
+function capture() {
+  const k = tint.yellow
+  const typed = esc(L(demo.capture)).replace(/\n/g, '<br>')
+  return `<div class="scene" style="width:720px;height:212px">${desktop(false)}<div class="scrim" style="background:rgba(0,0,0,.18)"></div>
+    ${barWindow(40, 40, 640, 132, `<div class="in" style="left:18px;right:18px;top:14px;bottom:14px">
+      <div style="display:flex;gap:8px;align-items:flex-start">
+        <span style="padding:5px 0 0 2px;font-size:16px;color:rgb(${k})">${ic('plus')}</span>
+        <span style="font-size:18px;line-height:1.4">${typed}<span class="caret"></span></span></div>
+      <div style="position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:6px;font-size:12px">
+        <span style="font-size:11px;color:rgb(${k})">${ic('idea')}</span>
+        <span style="color:var(--dim)">${esc(L(ui.kinds.idea))}</span>
+        <span style="color:var(--muted)">#${esc(L(demo.captureTag))}</span>
+        <span class="hint" style="margin-left:auto;white-space:pre">${esc(L(ui.capHint))}</span></div></div>`)}</div>`
+}
+
+function search() {
+  const hl = s => esc(L(s)).replace(/&lt;m&gt;(.*?)&lt;\/m&gt;/g, '<span class="hl">$1</span>')
+  const rows = demo.hits.map(([kind, l1, l2, age, archived], i) => {
+    const t = tint[kindTint[kind]]
+    const sel = i === 0
+    const second = sel
+      ? `<div class="acts">${L(ui.actions).map((a, j) => `<span class="${j === 0 ? 'on' : ''}">${esc(a)}</span>`).join('')}</div>`
+      : (l2 ? `<div class="l2" style="right:${archived ? 110 : 60}px">${hl(l2)}</div>` : '')
+    const badge = archived ? `<span class="badge" style="right:${lang === 'ru' ? 60 : 56}px">${lang === 'ru' ? 'архив' : 'archived'}</span>` : ''
+    return `<div class="row${sel ? ' sel' : ''}" style="top:${i * 54}px">
+      <span class="k ic" style="color:rgb(${t})">&#x${G[kind]};</span>
+      <div class="l1" style="right:${archived ? 130 : 60}px">${hl(l1)}</div>${second}${badge}<span class="ag">${esc(L(age))}</span></div>`
+  }).join('')
+  return `<div class="scene" style="width:760px;height:556px">${desktop(false)}<div class="scrim" style="background:rgba(0,0,0,.18)"></div>
+    ${barWindow(40, 40, 680, 476, `<div class="in" style="left:16px;right:16px;top:12px;bottom:12px">
+      <div style="height:34px;display:flex;align-items:center;gap:8px;padding-left:4px">
+        <span style="font-size:16px;color:var(--dim)">${ic('search')}</span>
+        <span style="font-size:18px">${esc(L(demo.query))}<span class="caret"></span></span></div>
+      <div style="margin-top:4px;height:22px;display:flex;align-items:center;gap:6px;padding-left:4px">
+        ${L(demo.queryChips).map(c => `<span class="qchip">${esc(c)}</span>`).join('')}
+        <span class="hint" style="margin-left:auto">${esc(L(ui.searchStats))}</span></div>
+      <div style="position:absolute;left:0;right:0;top:66px;bottom:26px">${rows}</div>
+      <div class="hint" style="position:absolute;left:4px;bottom:0;height:22px;display:flex;align-items:center">${esc(L(ui.searchHint))}</div>
+    </div>`)}</div>`
+}
+
+function social() {
+  const chips = ['Glass cards on a second monitor', 'Win+Alt+N capture', 'Instant search', 'Sticky Notes import']
+  return `<div class="scene" style="width:1280px;height:640px;background:radial-gradient(circle at 18% 28%, #123a35 0%, #0b1220 62%)">
+    <div style="position:absolute;left:64px;top:0;bottom:0;width:560px;display:flex;flex-direction:column;justify-content:center">
+      <div style="display:flex;align-items:center;gap:18px">${logo(64)}<span style="font:700 64px/1 var(--ui);letter-spacing:-1px">Ebb</span></div>
+      <div style="font:500 30px/1.3 var(--ui);color:#d0d6e0;margin-top:22px">Notes that ebb away and come back:<br>a calm second-screen layer for Windows.</div>
+      <div style="display:flex;gap:10px;margin-top:30px;flex-wrap:wrap;font:600 17px var(--ui)">
+        ${chips.map(t => `<span style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:999px;padding:7px 14px">${t}</span>`).join('')}</div>
+      <div style="font:500 19px var(--mono);color:var(--success);margin-top:34px">github.com/Gerrux/ebb</div>
+      <div style="font:400 16px var(--ui);color:var(--muted);margin-top:8px">Windows 10 / 11 · Rust · MIT</div>
+    </div>
+    <div style="position:absolute;right:48px;top:56px;width:560px;height:528px;border-radius:16px;overflow:hidden;
+         box-shadow:0 0 0 1px rgba(255,255,255,.1), 0 24px 64px rgba(0,0,0,.55)">
+      <div class="scene" style="width:560px;height:528px">${desktop(true)}<div class="scrim"></div>
+        ${card(C.rediscover, 24, 24, 252, 176)}${card(C.week, 24, 200, 252, 186)}${card(C.wifi, 24, 402, 252, 100)}
+        ${card(on(C.prompt, { hover: true }), 292, 24, 244, 214)}${card(C.link, 292, 254, 244, 150)}${card(C.reminder, 292, 420, 244, 84)}</div></div>
+  </div>`
+}
+
+const scenes = { layer, cards, capture, search, social }
+const scene = new URLSearchParams(location.search).get('scene') || 'layer'
+document.documentElement.lang = lang
+document.getElementById('root').innerHTML = (scenes[scene] || layer)()
+</script>
+</body>
+</html>
