@@ -10,6 +10,7 @@ use std::time::Duration;
 use egui::{Align, Layout, Rect, RichText, Ui, UiBuilder, vec2};
 
 use crate::card::Card;
+use crate::i18n;
 use crate::store::Store;
 use crate::sticky::{self, Plan, Stats};
 use crate::theme;
@@ -54,17 +55,6 @@ fn now() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-/// "1 заметка", "3 заметки", "11 заметок".
-fn notes(n: usize) -> String {
-    let word = match (n % 10, n % 100) {
-        (_, 11..=14) => "заметок",
-        (1, _) => "заметка",
-        (2..=4, _) => "заметки",
-        _ => "заметок",
-    };
-    format!("{n} {word}")
-}
-
 pub(crate) fn background_priority() {
     use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN};
     unsafe {
@@ -88,7 +78,7 @@ impl StickyImport {
     pub fn scan(&self, ctx: &egui::Context, store: &Store, layer: Option<isize>, manual: bool) {
         let delay = if manual { Duration::ZERO } else { Duration::from_secs(3) };
         let Some(path) = sticky::plum_path() else {
-            *self.state.lock().unwrap() = State::Failed("Sticky Notes не найдены на этом компьютере.".into());
+            *self.state.lock().unwrap() = State::Failed(i18n::s().library.sticky_not_found.into());
             ctx.request_repaint();
             return;
         };
@@ -129,14 +119,15 @@ impl StickyImport {
                         ));
                         match (plan.notes.is_empty(), manual) {
                             (false, _) => State::Offer(Offer { kept: keep.len(), replace, in_place, plan }),
-                            (true, true) => State::Failed(format!(
-                                "Нечего импортировать: {} изменены в Ebb и оставлены как есть, пустых {}, дубликатов {}.",
-                                plan.stats.already_imported, plan.stats.empty, plan.stats.duplicates
+                            (true, true) => State::Failed((i18n::s().library.sticky_nothing_new)(
+                                plan.stats.already_imported,
+                                plan.stats.empty,
+                                plan.stats.duplicates,
                             )),
                             (true, false) => State::Idle,
                         }
                     }
-                    Err(e) => State::Failed(format!("Не удалось прочитать Sticky Notes: {e}")),
+                    Err(e) => State::Failed((i18n::s().library.sticky_read_failed)(&e.to_string())),
                 };
                 *state.lock().unwrap() = next;
                 ctx.request_repaint();
@@ -168,7 +159,7 @@ impl StickyImport {
                 }
                 State::Done { batch, stats: offer.plan.stats.clone(), replaced: offer.replace.len() }
             }
-            Err(e) => State::Failed(format!("Импорт не удался: {e}")),
+            Err(e) => State::Failed((i18n::s().library.sticky_import_failed)(&e.to_string())),
         }
     }
 
@@ -224,43 +215,27 @@ impl StickyImport {
             let line = |ui: &mut Ui, text: String, color| {
                 ui.label(RichText::new(text).size(13.0).color(color));
             };
+            let t = &i18n::s().library;
             match &*state {
                 State::Offer(offer) => {
                     let s = &offer.plan.stats;
-                    title(ui, "Импорт из Sticky Notes");
-                    line(ui, format!("Нашлось {} для импорта из {}.", notes(s.importable), s.total), theme::text());
-                    line(
-                        ui,
-                        format!(
-                            "На слой: {} открытых, как на экране ({} на свои места, {} рядом).",
-                            s.on_layer,
-                            offer.in_place,
-                            s.on_layer - offer.in_place
-                        ),
-                        theme::dim(),
-                    );
-                    line(ui, format!("В архив: {} (давно не менялись: {}). Их найдёт поиск.", s.archived, s.old), theme::dim());
+                    title(ui, t.sticky_title);
+                    line(ui, (t.sticky_found)(s.importable, s.total), theme::text());
+                    line(ui, (t.sticky_to_layer)(s.on_layer, offer.in_place, s.on_layer - offer.in_place), theme::dim());
+                    line(ui, (t.sticky_to_archive)(s.archived, s.old), theme::dim());
                     let kinds: Vec<String> = s.by_kind.iter().map(|(k, n)| format!("{} {n}", k.label())).collect();
                     line(ui, kinds.join(" · "), theme::dim());
                     if s.colored > 0 {
-                        line(ui, format!("Цвета заметок сохраню: {}.", s.colored), theme::dim());
+                        line(ui, (t.sticky_colors)(s.colored), theme::dim());
                     }
-                    line(ui, format!("Пропущу: пустых {}, дубликатов {}.", s.empty, s.duplicates), theme::muted());
+                    line(ui, (t.sticky_skip)(s.empty, s.duplicates), theme::muted());
                     if !offer.replace.is_empty() || offer.kept > 0 {
-                        line(
-                            ui,
-                            format!(
-                                "Прошлый импорт: заменю {}, оставлю изменённые тобой ({}).",
-                                offer.replace.len(),
-                                offer.kept
-                            ),
-                            theme::muted(),
-                        );
+                        line(ui, (t.sticky_previous)(offer.replace.len(), offer.kept), theme::muted());
                     }
-                    line(ui, "Sticky Notes не меняются: читается копия базы.".into(), theme::muted());
+                    line(ui, t.sticky_readonly.into(), theme::muted());
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Импортировать").clicked() {
+                        if ui.button(t.sticky_import).clicked() {
                             let layer_monitor = layer.and_then(crate::win::monitor_of);
                             // Once, on the click: each note is sized by its own monitor's DPI.
                             let monitors: Vec<_> = crate::win::monitors()
@@ -278,11 +253,11 @@ impl StickyImport {
                             };
                             next = Some(Self::apply(offer, store, cards, &screen));
                         }
-                        if ui.button("Не сейчас").clicked() {
+                        if ui.button(t.sticky_not_now).clicked() {
                             next = Some(State::Idle);
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button("Не предлагать").clicked() {
+                            if ui.button(t.sticky_never).clicked() {
                                 let _ = store.set_setting(SETTING, "never");
                                 next = Some(State::Idle);
                             }
@@ -290,27 +265,23 @@ impl StickyImport {
                     });
                 }
                 State::Done { batch, stats, replaced } => {
-                    title(ui, "Sticky Notes импортированы");
-                    line(
-                        ui,
-                        format!("{}: {} на слое, {} в архиве.", notes(stats.importable), stats.on_layer, stats.archived),
-                        theme::text(),
-                    );
+                    title(ui, t.sticky_done_title);
+                    line(ui, (t.sticky_done_counts)(stats.importable, stats.on_layer, stats.archived), theme::text());
                     if *replaced > 0 {
-                        line(ui, format!("Заменено из прошлого импорта: {replaced}.",), theme::muted());
+                        line(ui, (t.sticky_replaced)(*replaced), theme::muted());
                     }
-                    line(ui, "Оригиналы в Sticky Notes остались на месте.".into(), theme::muted());
+                    line(ui, t.sticky_originals.into(), theme::muted());
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Разобрать").on_hover_text("Группы: пароли, ссылки, промпты, идеи… — решение одной кнопкой").clicked() {
+                        if ui.button(t.sticky_sort_out).on_hover_text(t.sticky_sort_out_hint).clicked() {
                             sort_out = true;
                             next = Some(State::Idle);
                         }
-                        if ui.button("Готово").clicked() {
+                        if ui.button(t.sticky_done_button).clicked() {
                             next = Some(State::Idle);
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button("Отменить импорт").clicked() {
+                            if ui.button(t.sticky_undo).clicked() {
                                 next = Some(match store.undo_import(*batch) {
                                     Ok(_) => {
                                         let _ = store.set_setting(SETTING, "undone");
@@ -319,17 +290,17 @@ impl StickyImport {
                                         }
                                         State::Idle
                                     }
-                                    Err(e) => State::Failed(format!("Отмена не удалась: {e}")),
+                                    Err(e) => State::Failed((t.sticky_undo_failed)(&e.to_string())),
                                 });
                             }
                         });
                     });
                 }
                 State::Failed(message) => {
-                    title(ui, "Импорт из Sticky Notes");
+                    title(ui, t.sticky_title);
                     line(ui, message.clone(), theme::dim());
                     ui.add_space(6.0);
-                    if ui.button("Закрыть").clicked() {
+                    if ui.button(t.close).clicked() {
                         next = Some(State::Idle);
                     }
                 }

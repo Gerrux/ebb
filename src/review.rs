@@ -119,13 +119,7 @@ pub fn handled(store: &Store) -> Option<i64> {
 /// "Разобрать 12 заметок · ~3 мин".
 pub fn invite_text(cards: usize) -> String {
     let minutes = (cards * SECONDS_PER_CARD).div_ceil(60).max(1);
-    let noun = match (cards % 100, cards % 10) {
-        (11..=14, _) => "заметок",
-        (_, 1) => "заметку",
-        (_, 2..=4) => "заметки",
-        _ => "заметок",
-    };
-    format!("Разобрать {cards} {noun} · ~{minutes} мин")
+    (crate::i18n::s().library.invite_text)(cards, minutes)
 }
 
 #[cfg(test)]
@@ -315,5 +309,15 @@ mod tests {
         assert_eq!(invite_text(21), "Разобрать 21 заметку · ~6 мин");
         assert_eq!(invite_text(22), "Разобрать 22 заметки · ~6 мин");
         assert_eq!(invite_text(15), "Разобрать 15 заметок · ~4 мин");
+    }
+
+    #[test]
+    fn invite_text_in_english() {
+        let en = &crate::i18n::strings(crate::i18n::Lang::En).library;
+        let text = |cards: usize| (en.invite_text)(cards, (cards * SECONDS_PER_CARD).div_ceil(60).max(1));
+        assert_eq!(text(1), "Sort out 1 note · ~1 min");
+        assert_eq!(text(2), "Sort out 2 notes · ~1 min");
+        assert_eq!(text(5), "Sort out 5 notes · ~2 min");
+        assert_eq!(text(21), "Sort out 21 notes · ~6 min");
     }
 }
