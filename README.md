@@ -4,6 +4,8 @@
 
 <p align="center">Заметки, которые уходят из головы и сами возвращаются.<br>Спокойный слой памяти на втором мониторе Windows.</p>
 
+<p align="center"><a href="https://gerrux.github.io/ebb/">gerrux.github.io/ebb</a></p>
+
 ---
 
 Ebb заменяет разбросанные Sticky Notes: идеи, prompts, ссылки, цели и напоминания лежат

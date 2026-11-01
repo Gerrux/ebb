@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 140 140">
+  <!-- The Ebb logo at small sizes (src/app/paint.rs: paint_logo, below ~24 px). -->
+  <rect width="140" height="140" rx="32" fill="#1e2128"/>
+  <rect x="34" y="22" width="72" height="56" rx="12" fill="#34d399"/>
+  <path d="M22 108 Q34 98 46 108 T70 108 T94 108 T118 108" fill="none" stroke="#2dd4bf" stroke-width="13" stroke-linecap="round"/>
+</svg>
