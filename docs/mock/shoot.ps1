@@ -1,10 +1,10 @@
 # Renders docs/screenshots/*.png from docs/mock/index.html with headless Chrome
 # (Edge as a fallback). Run from anywhere:
 #   powershell -File docs\mock\shoot.ps1            # every scene
-#   powershell -File docs\mock\shoot.ps1 layer      # one scene, both languages
+#   powershell -File docs\mock\shoot.ps1 layer      # some scenes, both languages
 # Russian: <name>.png, English: <name>-en.png; social.png is English only.
 
-param([string[]]$Only)
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Only)
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -25,6 +25,9 @@ $scenes = @(
     @('cards',   780,  400, 2,   @('ru', 'en')),
     @('capture', 720,  212, 2,   @('ru', 'en')),
     @('search',  760,  556, 2,   @('ru', 'en')),
+    @('styles',  1280, 764, 2,   @('ru', 'en')),
+    @('styles-light', 1280, 764, 2, @('ru', 'en')),
+    @('import',  1352, 498, 2,   @('ru', 'en')),
     @('social',  1280, 640, 1,   @('en'))
 )
 
