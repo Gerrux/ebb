@@ -45,12 +45,6 @@ impl Shared {
     /// open on the layer, stays open in the card's window.
     pub(super) fn pull(&mut self, card: i64, grab: Vec2, editor: Option<(i64, String)>) {
         self.handoff = Some(Handoff::new(card, grab));
-        self.carry_editor(card, editor);
-    }
-
-    /// The card's editor, open on the layer, goes along into its window: closed
-    /// on the way, a new note with nothing typed yet would be discarded.
-    pub(super) fn carry_editor(&mut self, card: i64, editor: Option<(i64, String)>) {
         if let Some(editor) = editor.filter(|(id, _)| *id == card) {
             self.editing = Some(editor);
         }
@@ -811,20 +805,6 @@ mod tests {
         // Without an editor open on the layer there is none in the window either.
         let mut shared = Shared::default();
         shared.pull(7, vec2(10.0, 5.0), None);
-        assert!(shared.editing.is_none());
-    }
-
-    #[test]
-    fn card_put_on_desktop_keeps_its_editor_without_a_drag() {
-        // "Вынести на рабочий стол" with the editor open: it goes along, and
-        // there's no hand-off for the window to take a drag over from.
-        let mut shared = Shared::default();
-        shared.carry_editor(7, Some((7, "черновик".to_owned())));
-        assert_eq!(shared.editing, Some((7, "черновик".to_owned())));
-        assert!(shared.handoff.is_none());
-        // Another card's editor stays where it is.
-        let mut shared = Shared::default();
-        shared.carry_editor(7, Some((8, String::new())));
         assert!(shared.editing.is_none());
     }
 
