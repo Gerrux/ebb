@@ -45,6 +45,12 @@ impl Shared {
     /// open on the layer, stays open in the card's window.
     pub(super) fn pull(&mut self, card: i64, grab: Vec2, editor: Option<(i64, String)>) {
         self.handoff = Some(Handoff::new(card, grab));
+        self.carry_editor(card, editor);
+    }
+
+    /// The card's editor, open on the layer, goes along into its window: closed
+    /// on the way, a new note with nothing typed yet would be discarded.
+    pub(super) fn carry_editor(&mut self, card: i64, editor: Option<(i64, String)>) {
         if let Some(editor) = editor.filter(|(id, _)| *id == card) {
             self.editing = Some(editor);
         }
@@ -83,7 +89,8 @@ impl Handoff {
 }
 
 enum Event {
-    /// The window was let go of here; over the layer, which takes it back.
+    /// The window was let go of here; and whether the layer takes it back
+    /// (see `back_onto_layer`).
     Dropped(i64, Pos2, bool),
     Resized(i64, Pos2, Vec2),
     Action(i64, Action),
@@ -100,22 +107,43 @@ fn window_title(card: i64) -> String {
     format!("Ebb Note {card}")
 }
 
-/// Where the window is let go of, and whether that's over the layer. `offset`:
-/// where the card is in the window (see `menu_room`).
-fn dropped(ui: &Ui, card: &Card, layer: Option<Rect>, offset: Vec2) -> Option<Event> {
+/// Where the window is let go of, and whether the layer takes it back. `offset`:
+/// where the card is in the window (see `menu_room`). `from`: where on screen
+/// the card was before this move; None while it's being pulled off the layer.
+fn dropped(
+    ui: &Ui,
+    card: &Card,
+    layer: Option<Rect>,
+    offset: Vec2,
+    from: Option<Pos2>,
+) -> Option<Event> {
     let (rect, scale) = ui.input(|i| {
         i.viewport()
             .outer_rect
             .zip(i.viewport().native_pixels_per_point)
     })?;
-    let safe = win::clamp_to_work_area(
-        Rect::from_min_size(rect.min + offset, card.shown_size()),
-        scale,
-    );
-    let over_layer = layer.is_some_and(|target| {
-        target.contains(Rect::from_min_size(safe, card.shown_size()).center())
+    let size = card.shown_size();
+    let safe = win::clamp_to_work_area(Rect::from_min_size(rect.min + offset, size), scale);
+    // Where its window was, as `reclamp_floating` puts it.
+    let from = from.map(|p| win::clamp_to_work_area(Rect::from_min_size(p, size), scale));
+    let back = layer.is_some_and(|layer| {
+        back_onto_layer(
+            layer,
+            from.map(|p| Rect::from_min_size(p, size)),
+            Rect::from_min_size(safe, size),
+        )
     });
-    Some(Event::Dropped(card.id, safe, over_layer))
+    Some(Event::Dropped(card.id, safe, back))
+}
+
+/// A card's window let go of at `to` goes back onto the layer when it was
+/// carried onto the layer from elsewhere (another monitor), or is let go of
+/// there while still being pulled off it (`from` None). One that was over the
+/// layer already is only moved about on top of it: with one monitor the layer
+/// is the whole screen, and a card put on the desktop from its menu would
+/// otherwise fall back onto the layer the first time it's moved.
+fn back_onto_layer(layer: Rect, from: Option<Rect>, to: Rect) -> bool {
+    layer.contains(to.center()) && !from.is_some_and(|from| layer.contains(from.center()))
 }
 
 /// The window while one of the card's menus is open, in card coordinates; None
@@ -456,7 +484,7 @@ impl EbbApp {
                 let _ = self.store.save(&card);
                 self.cards.push(card);
             }
-            Action::Detach { .. } => {}
+            Action::Detach { .. } | Action::ToDesktop => {}
         }
     }
 
@@ -519,6 +547,8 @@ fn card_window(
     let hwnd = win::find_own_window_title(title);
     let full = ui.max_rect();
     let original_size = card.size;
+    // Where it is on screen; inside its own window it's at the corner.
+    let on_screen = card.pos;
     let mut card = card.clone();
     card.pos = Pos2::ZERO;
     let id = card.id;
@@ -669,7 +699,7 @@ fn card_window(
     }
     if handoff_done {
         shared.lock().unwrap().handoff.take_if(|h| h.card == id);
-        if let Some(event) = dropped(ui, &card, layer, offset) {
+        if let Some(event) = dropped(ui, &card, layer, offset, None) {
             to_layer(ui, event);
         }
     }
@@ -729,7 +759,7 @@ fn card_window(
     for action in actions {
         match action {
             Action::WindowDragStopped => {
-                if let Some(event) = dropped(ui, &card, layer, offset) {
+                if let Some(event) = dropped(ui, &card, layer, offset, Some(on_screen)) {
                     to_layer(ui, event);
                 }
             }
@@ -782,5 +812,34 @@ mod tests {
         let mut shared = Shared::default();
         shared.pull(7, vec2(10.0, 5.0), None);
         assert!(shared.editing.is_none());
+    }
+
+    #[test]
+    fn card_put_on_desktop_keeps_its_editor_without_a_drag() {
+        // "Вынести на рабочий стол" with the editor open: it goes along, and
+        // there's no hand-off for the window to take a drag over from.
+        let mut shared = Shared::default();
+        shared.carry_editor(7, Some((7, "черновик".to_owned())));
+        assert_eq!(shared.editing, Some((7, "черновик".to_owned())));
+        assert!(shared.handoff.is_none());
+        // Another card's editor stays where it is.
+        let mut shared = Shared::default();
+        shared.carry_editor(7, Some((8, String::new())));
+        assert!(shared.editing.is_none());
+    }
+
+    #[test]
+    fn only_a_card_carried_onto_the_layer_goes_back() {
+        let layer = Rect::from_min_size(pos2(0.0, 0.0), vec2(1920.0, 1080.0));
+        let card = |x: f32, y: f32| Rect::from_min_size(pos2(x, y), vec2(240.0, 160.0));
+        // One monitor: a card put on the desktop is moved about over the layer.
+        assert!(!back_onto_layer(layer, Some(card(100.0, 100.0)), card(600.0, 400.0)));
+        // From another monitor onto the layer.
+        assert!(back_onto_layer(layer, Some(card(2000.0, 100.0)), card(600.0, 400.0)));
+        // Still being pulled off the layer, let go of over it.
+        assert!(back_onto_layer(layer, None, card(600.0, 400.0)));
+        // Let go of elsewhere.
+        assert!(!back_onto_layer(layer, None, card(2000.0, 100.0)));
+        assert!(!back_onto_layer(layer, Some(card(100.0, 100.0)), card(2000.0, 100.0)));
     }
 }

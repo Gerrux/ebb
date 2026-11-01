@@ -919,6 +919,25 @@ impl EbbApp {
                         self.editing = editor;
                     }
                 }
+                Action::ToDesktop => {
+                    if detach.is_some() {
+                        continue;
+                    }
+                    // Where it is on screen now: the layer is under the other
+                    // windows, the card's window comes up over them in its place.
+                    let editor = self.editing.take_if(|(eid, _)| *eid == id);
+                    let c = &mut self.cards[idx];
+                    let was = (c.pos, c.placement);
+                    c.pos = desktop_origin + c.pos.to_vec2();
+                    c.placement = Placement::Desktop;
+                    if self.save(idx) {
+                        detach = Some(id);
+                        self.floating_shared.lock().unwrap().carry_editor(id, editor);
+                    } else {
+                        (self.cards[idx].pos, self.cards[idx].placement) = was;
+                        self.editing = editor;
+                    }
+                }
                 Action::Duplicate => {
                     let src = self.cards[idx].clone();
                     let pos = card::beside(&self.cards, &src, area);
