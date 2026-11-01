@@ -144,16 +144,14 @@ fn main() -> eframe::Result {
     i18n::set(i18n::system());
     store::migrate_legacy_data();
     let fail = |what: &str, e: rusqlite::Error| -> ! {
-        win::error_box(&format!(
-            "Не удалось {what}:\n{e}\n\n{}\n\nЗаметки не тронуты. Проверь, что диск доступен и на нём есть место, и запусти Ebb снова.",
-            store::db_path().display()
-        ));
+        let l = &i18n::s().layer;
+        win::error_box(&(l.startup_error)(&(i18n::s().common.failed)(what), &e.to_string(), &store::db_path().display().to_string()));
         std::process::exit(1)
     };
-    let store = Store::open().unwrap_or_else(|e| fail("открыть базу заметок", e));
+    let store = Store::open().unwrap_or_else(|e| fail(i18n::s().layer.do_open_db, e));
     // The day's Rediscover pick isn't made here: on 10k notes it takes ~40 ms.
     // The app runs it on a background thread shortly after the first frame.
-    let cards = store.load().unwrap_or_else(|e| fail("прочитать заметки", e));
+    let cards = store.load().unwrap_or_else(|e| fail(i18n::s().layer.do_read_notes, e));
 
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

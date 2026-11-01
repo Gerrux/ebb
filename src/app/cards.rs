@@ -8,6 +8,7 @@ use egui::{
 };
 
 use crate::card::{self, Card, Kind, Placement};
+use crate::i18n;
 use crate::resurface;
 use crate::rich_text;
 use crate::theme;
@@ -77,7 +78,7 @@ pub(super) fn tag_field(ui: &mut Ui, input: &mut TagInput, suggestions: &[String
                     ui.set_width(200.0);
                     let field = egui::TextEdit::singleline(&mut input.text)
                         .id(Id::new("tag-input-field"))
-                        .hint_text("новый тег")
+                        .hint_text(i18n::s().layer.new_tag_hint)
                         .desired_width(f32::INFINITY);
                     let resp = ui.add(field);
                     if !input.focused {
@@ -287,7 +288,7 @@ impl EbbApp {
             if empty {
                 // Emptied in the editor: the old value must not stay behind to show or copy.
                 let cleared = self.store.clear_secret(id);
-                self.report(cleared, "стереть секрет");
+                self.report(cleared, i18n::s().layer.do_erase_secret);
             }
             // Out of the database only the label stays in memory.
             c.body.clear();
@@ -299,7 +300,7 @@ impl EbbApp {
         if buf.is_empty() && c.title.is_empty() && c.body.is_empty() {
             let discarded = self.store.discard_empty(id);
             // Not deleted: the database has text this copy doesn't; left as it is there.
-            return self.report(discarded, "убрать пустую заметку") != Some(true);
+            return self.report(discarded, i18n::s().layer.do_discard_empty) != Some(true);
         }
         // Saved as written; an old separate title becomes the first line of the text.
         c.title.clear();
@@ -376,7 +377,8 @@ impl EbbApp {
                 (false, placement, review_at);
             return false;
         }
-        let text = if done { "Сделано, карточка в архиве" } else { "Карточка в архиве" };
+        let l = &i18n::s().layer;
+        let text = if done { l.done_archived } else { l.archived };
         self.toast = Some(Toast::new(text, Some(Undo::Unarchive(id))));
         true
     }
@@ -412,7 +414,7 @@ impl EbbApp {
     }
 
     /// An empty note at `pos` (layer coordinates), its editor open: the "+"
-    /// button, the menu's "Новая заметка" and a double-click on the layer.
+    /// button, the menu's "New note" and a double-click on the layer.
     /// Closed with nothing typed, it's discarded (see `commit_edit`).
     pub(super) fn new_note(&mut self, pos: Pos2) {
         // Not onto a layer that's rolled away or rolling: nothing would show it.
@@ -427,7 +429,7 @@ impl EbbApp {
             tags: vec![],
         };
         let inserted = self.store.insert(&parsed, pos);
-        let Some(c) = self.report(inserted, "создать заметку") else {
+        let Some(c) = self.report(inserted, i18n::s().layer.do_create_note) else {
             return;
         };
         // Inserted on top of the others (z), so it goes last here too.
@@ -534,7 +536,7 @@ impl EbbApp {
                         ui.set_width(width - 24.0);
                         ui.add(
                             egui::Label::new(
-                                RichText::new("Подставить в prompt")
+                                RichText::new(i18n::s().layer.fill_prompt)
                                     .size(12.0)
                                     .color(theme::muted()),
                             )
@@ -576,8 +578,8 @@ impl EbbApp {
                         }
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
-                            copy |= ui.button(RichText::new("Копировать").size(14.0)).clicked();
-                            cancel |= ui.button(RichText::new("Отмена").size(14.0)).clicked();
+                            copy |= ui.button(RichText::new(i18n::s().layer.copy).size(14.0)).clicked();
+                            cancel |= ui.button(RichText::new(i18n::s().layer.cancel).size(14.0)).clicked();
                         });
                     });
             });
@@ -618,14 +620,14 @@ impl EbbApp {
         }
         // The store splits the text into label and secret, or joins them back.
         let changed = self.store.set_kind(id, kind);
-        if self.report(changed, "сменить тип").is_none() {
+        if self.report(changed, i18n::s().layer.do_change_kind).is_none() {
             return;
         }
         if let Ok(Some(stored)) = self.store.card(id) {
             let c = &mut self.cards[idx];
             (c.kind, c.title, c.body) = (stored.kind, stored.title, stored.body);
         }
-        let text = format!("Тип: {} → {}", old.label(), kind.label());
+        let text = (i18n::s().layer.kind_changed)(old.label(), kind.label());
         self.toast = Some(Toast::new(text, Some(Undo::Kind(id, old))));
         self.library.lock().unwrap().invalidate();
         self.bar.lock().unwrap().invalidate();
@@ -937,7 +939,7 @@ impl EbbApp {
                         tags: src.tags,
                     };
                     let inserted = self.store.insert(&parsed, pos);
-                    if let Some(mut copy) = self.report(inserted, "создать копию") {
+                    if let Some(mut copy) = self.report(inserted, i18n::s().layer.do_make_copy) {
                         copy.size = src.size;
                         copy.tint = src.tint;
                         self.appearing.push((copy.id, Instant::now()));
@@ -957,13 +959,10 @@ impl EbbApp {
                         continue;
                     };
                     let deleted = self.store.delete(self.cards[idx].id);
-                    if self.report(deleted, "убрать в корзину").is_none() {
+                    if self.report(deleted, i18n::s().layer.do_trash).is_none() {
                         continue;
                     }
-                    let text = format!(
-                        "Карточка в корзине, {} дней можно вернуть",
-                        crate::store::TRASH_DAYS
-                    );
+                    let text = (i18n::s().layer.trashed)(crate::store::TRASH_DAYS);
                     self.toast = Some(Toast::new(text, Some(Undo::Restore(id))));
                     remove = Some(id);
                 }
@@ -999,7 +998,7 @@ impl EbbApp {
                     self.cards[idx].placement = Placement::Manual;
                     let _ = self.store.touch(self.cards[idx].id);
                     self.save(idx);
-                    self.toast = Some(Toast::new("Останется на слое", None));
+                    self.toast = Some(Toast::new(i18n::s().layer.stays_on_layer, None));
                 }
                 Action::ToggleCheck(line) => {
                     let _ = self.retag(idx, |text| card::toggle_check(text, line));
@@ -1011,7 +1010,7 @@ impl EbbApp {
                         self.retag(idx, |text| card::without_tag(text, &tag))
                     {
                         self.toast = Some(Toast::new(
-                            format!("Тег #{tag} убран"),
+                            (i18n::s().layer.tag_removed)(&tag),
                             Some(Undo::Text(id, title, body)),
                         ));
                     }
@@ -1028,7 +1027,7 @@ impl EbbApp {
                 }
                 Action::SetIdeaStatus(status) => {
                     let set = self.store.set_idea_status(self.cards[idx].id, status);
-                    if self.report(set, "поменять статус идеи").is_some() {
+                    if self.report(set, i18n::s().layer.do_change_status).is_some() {
                         self.cards[idx].idea_status = status;
                     }
                 }
@@ -1042,9 +1041,9 @@ impl EbbApp {
                         .report(
                             set,
                             if collapsed {
-                                "свернуть карточку"
+                                i18n::s().layer.do_collapse
                             } else {
-                                "развернуть карточку"
+                                i18n::s().layer.do_expand
                             },
                         )
                         .is_some()
@@ -1066,11 +1065,11 @@ impl EbbApp {
                         days,
                     );
                     let snoozed = self.store.snooze(id, until);
-                    let Some(snapshot) = self.report(snoozed, "отложить карточку")
+                    let Some(snapshot) = self.report(snoozed, i18n::s().layer.do_snooze)
                     else {
                         continue;
                     };
-                    let text = format!("Вернётся {}", resurface::snooze_label(days));
+                    let text = (i18n::s().layer.snoozed_until)(&resurface::snooze_label(days));
                     self.toast = Some(Toast::new(text, Some(Undo::Snooze(snapshot))));
                     remove = Some(id);
                 }

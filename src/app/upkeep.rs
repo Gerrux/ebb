@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use egui::{Rect, RichText, Ui, UiBuilder, vec2};
 
+use crate::i18n;
 use crate::resurface;
 use crate::review::{self, Invite};
 use crate::store::{Store, backup_dir};
@@ -171,7 +172,7 @@ impl Upkeep {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("\u{E787}").font(theme::icons(15.0)).color(theme::dim()));
                 ui.label(
-                    RichText::new("Еженедельный обзор")
+                    RichText::new(i18n::s().layer.weekly_review)
                         .font(theme::semibold(15.0))
                         .color(theme::text()),
                 );
@@ -184,10 +185,10 @@ impl Upkeep {
             );
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if ui.button("Начать").clicked() {
+                if ui.button(i18n::s().layer.start).clicked() {
                     choice = Choice::Start;
                 }
-                if ui.button("Не сейчас").clicked() {
+                if ui.button(i18n::s().layer.not_now).clicked() {
                     dismissed = true;
                 }
             });

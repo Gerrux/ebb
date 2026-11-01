@@ -402,7 +402,7 @@ impl EbbApp {
         }
         let pos = card::free_slot(&self.cards, area);
         let inserted = self.store.insert(&parsed, pos);
-        match self.report(inserted, "сохранить заметку, текст остался в окне захвата")
+        match self.report(inserted, i18n::s().layer.do_save_capture)
         {
             Some(c) => {
                 self.tag_counts = None;
@@ -420,7 +420,7 @@ impl EbbApp {
             Ok(v) => Some(v),
             Err(e) => {
                 eprintln!("{what}: {e}");
-                self.toast = Some(Toast::new(format!("Не удалось {what}"), None));
+                self.toast = Some(Toast::new((i18n::s().common.failed)(what), None));
                 None
             }
         }
@@ -429,13 +429,13 @@ impl EbbApp {
     /// Whether the card's change reached the database.
     fn save(&mut self, idx: usize) -> bool {
         let saved = self.store.save(&self.cards[idx]);
-        self.report(saved, "сохранить изменения").is_some()
+        self.report(saved, i18n::s().layer.do_save_changes).is_some()
     }
 
     /// `save` for a card that isn't (or isn't only) on the layer.
     fn save_card(&mut self, card: &Card) -> bool {
         let saved = self.store.save(card);
-        self.report(saved, "сохранить изменения").is_some()
+        self.report(saved, i18n::s().layer.do_save_changes).is_some()
     }
 
     fn layer_settings(&self) -> library::LayerSettings {
@@ -538,7 +538,7 @@ impl EbbApp {
             });
             if let Some(other) = holder {
                 let mut lib = self.library.lock().unwrap();
-                lib.hotkey_errors[action.index()] = Some(format!("Уже занято действием «{}»", other.label()));
+                lib.hotkey_errors[action.index()] = Some((i18n::s().layer.hotkey_taken_by)(other.label()));
                 ctx.request_repaint_of(library::viewport_id());
                 return;
             }
@@ -558,7 +558,7 @@ impl EbbApp {
             self.hotkey_config[action.index()] = wanted;
         }
         let mut lib = self.library.lock().unwrap();
-        lib.hotkey_errors[action.index()] = (!ok).then(|| "Занято другой программой".to_owned());
+        lib.hotkey_errors[action.index()] = (!ok).then(|| i18n::s().layer.hotkey_taken_other.to_owned());
         lib.settings.hotkeys = self.shell.hotkeys().unwrap_or_default();
         lib.settings.hotkey_config = self.hotkey_config;
         ctx.request_repaint_of(library::viewport_id());
@@ -1053,7 +1053,7 @@ impl eframe::App for EbbApp {
                 },
             );
             self.toast = Some(Toast::new(
-                format!("Вид карточек: {} (F4 — дальше)", next.label()),
+                (i18n::s().layer.card_style_toast)(next.label()),
                 None,
             ));
         }
