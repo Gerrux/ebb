@@ -6,6 +6,7 @@
 //! ending first ("онбординга" → "онбординг*"), a cheap stand-in for stemming.
 
 use crate::card::Kind;
+use crate::i18n::bar::Bar;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Query {
@@ -15,8 +16,43 @@ pub struct Query {
     pub terms: Vec<String>,
     pub tags: Vec<String>,
     pub kind: Option<Kind>,
-    /// `[from, to)` in Unix seconds, on `created_at`, with a label for the UI.
-    pub range: Option<(i64, i64, String)>,
+    /// `[from, to)` in Unix seconds, on `created_at`, with the period it was read as.
+    pub range: Option<(i64, i64, Period)>,
+}
+
+/// The date filter a query was read as; the UI names it in its own language.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Period {
+    Today,
+    Yesterday,
+    ThisWeek,
+    LastWeek,
+    ThisMonth,
+    LastMonth,
+    ThisYear,
+    LastYear,
+    /// "за неделю": the last N days.
+    LastDays(i64),
+    /// A year typed as a number.
+    Year(i64),
+}
+
+impl Period {
+    fn label(self, bar: &Bar) -> String {
+        let fixed = match self {
+            Period::Today => 0,
+            Period::Yesterday => 1,
+            Period::ThisWeek => 2,
+            Period::LastWeek => 3,
+            Period::ThisMonth => 4,
+            Period::LastMonth => 5,
+            Period::ThisYear => 6,
+            Period::LastYear => 7,
+            Period::LastDays(n) => return (bar.last_days)(n),
+            Period::Year(y) => return y.to_string(),
+        };
+        bar.periods[fixed].to_owned()
+    }
 }
 
 impl Query {
@@ -30,12 +66,18 @@ impl Query {
 
     /// Understood filters, shown as chips so the user sees how the query was read.
     pub fn chips(&self) -> Vec<String> {
+        let s = crate::i18n::s();
+        self.chips_in(&s.bar, &s.common.kinds)
+    }
+
+    /// [`Self::chips`] in the given language: its bar table and kind names.
+    fn chips_in(&self, bar: &Bar, kinds: &[&'static str; 8]) -> Vec<String> {
         let mut chips = Vec::new();
         if let Some(kind) = self.kind {
-            chips.push(kind.label().to_owned());
+            chips.push(crate::i18n::name_of(&Kind::ALL, kind, kinds).to_owned());
         }
-        if let Some((_, _, label)) = &self.range {
-            chips.push(label.clone());
+        if let Some((_, _, period)) = &self.range {
+            chips.push(period.label(bar));
         }
         chips.extend(self.tags.iter().map(|t| format!("#{t}")));
         chips
@@ -46,7 +88,7 @@ const STOP_WORDS: &[&str] = &[
     "что", "я", "мы", "мне", "мой", "мои", "моих", "писал", "писала", "писали", "записывал", "записывала", "про",
     "о", "об", "обо", "для", "по", "все", "всё", "где", "как", "это", "было", "были", "найди", "найти", "покажи",
     "заметки", "заметку", "заметок", "заметка", "the", "about", "my", "notes", "note", "find", "show", "за", "на",
-    "в", "во", "с", "и", "or", "and", "in", "for", "of",
+    "в", "во", "с", "и", "or", "and", "in", "for", "of", "from",
 ];
 
 fn kind_word(w: &str) -> Option<Kind> {
@@ -103,8 +145,8 @@ pub fn local_offset_secs() -> i64 {
     }
 }
 
-/// Recognizes a date phrase at `words[i..]`; returns (words consumed, range in local days, label).
-fn date_phrase(words: &[&str], i: usize, today: i64) -> Option<(usize, i64, i64, String)> {
+/// Recognizes a date phrase at `words[i..]`; returns (words consumed, range in local days, period).
+fn date_phrase(words: &[&str], i: usize, today: i64) -> Option<(usize, i64, i64, Period)> {
     let w = words[i];
     let next = words.get(i + 1).copied().unwrap_or("");
     let (y, m, _) = civil_from_days(today);
@@ -131,23 +173,23 @@ fn date_phrase(words: &[&str], i: usize, today: i64) -> Option<(usize, i64, i64,
         }
     };
     match w {
-        "сегодня" | "today" => return Some((1, today, today + 1, "сегодня".into())),
-        "вчера" | "yesterday" => return Some((1, today - 1, today, "вчера".into())),
+        "сегодня" | "today" => return Some((1, today, today + 1, Period::Today)),
+        "вчера" | "yesterday" => return Some((1, today - 1, today, Period::Yesterday)),
         _ => {}
     }
     if let (Some(last), Some(u)) = (this_or_last(w), unit(next)) {
-        let (from, to, label) = match (u, last) {
-            ('w', false) => (monday, today + 1, "эта неделя"),
-            ('w', true) => (monday - 7, monday, "прошлая неделя"),
-            ('m', false) => (month_start(y, m), today + 1, "этот месяц"),
+        let (from, to, period) = match (u, last) {
+            ('w', false) => (monday, today + 1, Period::ThisWeek),
+            ('w', true) => (monday - 7, monday, Period::LastWeek),
+            ('m', false) => (month_start(y, m), today + 1, Period::ThisMonth),
             ('m', true) => {
                 let (py, pm) = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
-                (month_start(py, pm), month_start(y, m), "прошлый месяц")
+                (month_start(py, pm), month_start(y, m), Period::LastMonth)
             }
-            ('y', false) => (days_from_civil(y, 1, 1), today + 1, "этот год"),
-            (_, _) => (days_from_civil(y - 1, 1, 1), days_from_civil(y, 1, 1), "прошлый год"),
+            ('y', false) => (days_from_civil(y, 1, 1), today + 1, Period::ThisYear),
+            (_, _) => (days_from_civil(y - 1, 1, 1), days_from_civil(y, 1, 1), Period::LastYear),
         };
-        return Some((2, from, to, label.into()));
+        return Some((2, from, to, period));
     }
     // "за неделю" / "за месяц": the last 7 / 30 days (the "за" is a stop word).
     if let Some(u) = unit(w).filter(|_| i > 0 && words[i - 1] == "за") {
@@ -156,12 +198,12 @@ fn date_phrase(words: &[&str], i: usize, today: i64) -> Option<(usize, i64, i64,
             'm' => 30,
             _ => 365,
         };
-        return Some((1, today - days + 1, today + 1, format!("последние {days} дн")));
+        return Some((1, today - days + 1, today + 1, Period::LastDays(days)));
     }
     if w.len() == 4 && w.chars().all(|c| c.is_ascii_digit()) {
         let year: i64 = w.parse().ok()?;
         if (2000..=2099).contains(&year) {
-            return Some((1, days_from_civil(year, 1, 1), days_from_civil(year + 1, 1, 1), w.into()));
+            return Some((1, days_from_civil(year, 1, 1), days_from_civil(year + 1, 1, 1), Period::Year(year)));
         }
     }
     None
@@ -252,8 +294,8 @@ fn parse_with(input: &str, now: i64, utc_offset: i64, midnight: &dyn Fn(i64) -> 
             continue;
         }
         if q.range.is_none() {
-            if let Some((n, from, to, label)) = date_phrase(&words, i, today) {
-                q.range = Some((midnight(from), midnight(to), label));
+            if let Some((n, from, to, period)) = date_phrase(&words, i, today) {
+                q.range = Some((midnight(from), midnight(to), period));
                 i += n;
                 continue;
             }
@@ -414,6 +456,50 @@ mod tests {
         assert!(q.terms.is_empty());
         let (from, to, _) = q.range.unwrap();
         assert_eq!((from, to), (day(2026, 8, 1), day(2026, 9, 1)));
+    }
+
+    /// The example queries the search fields suggest are read as filters only, in both
+    /// languages: no leftover word that every note would have to contain.
+    #[test]
+    fn hint_examples_are_pure_filters() {
+        use crate::i18n::{Lang, strings};
+        let quoted = |hint: &str, open: char, close: char| -> String {
+            let start = hint.find(open).expect(hint) + open.len_utf8();
+            let end = hint[start..].find(close).expect(hint) + start;
+            hint[start..end].to_owned()
+        };
+        let (ru, en) = (strings(Lang::Ru), strings(Lang::En));
+        for (hint, open, close, kind, period) in [
+            (ru.bar.search_hint, '«', '»', Kind::Idea, Period::LastMonth),
+            (ru.library.search_archive, '«', '»', Kind::Link, Period::LastYear),
+            (en.bar.search_hint, '“', '”', Kind::Idea, Period::LastMonth),
+            (en.library.search_archive, '“', '”', Kind::Link, Period::LastYear),
+        ] {
+            let example = quoted(hint, open, close);
+            let q = parse(&example, NOW, MSK);
+            assert_eq!(q.kind, Some(kind), "{example}");
+            assert_eq!(q.range.map(|r| r.2), Some(period), "{example}");
+            assert!(q.terms.is_empty(), "{example}: leftover terms {:?}", q.terms);
+        }
+    }
+
+    #[test]
+    fn chips_follow_the_language() {
+        use crate::i18n::{Lang, strings};
+        let (ru, en) = (strings(Lang::Ru), strings(Lang::En));
+        let q = parse("идеи прошлого месяца", NOW, MSK);
+        assert_eq!(q.chips_in(&ru.bar, &ru.common.kinds), ["Идея", "прошлый месяц"]);
+        assert_eq!(q.chips_in(&en.bar, &en.common.kinds), ["Idea", "last month"]);
+        let q = parse("ideas last month #vpn", NOW, MSK);
+        assert_eq!(q.chips_in(&en.bar, &en.common.kinds), ["Idea", "last month", "#vpn"]);
+        let q = parse("pricing за неделю", NOW, MSK);
+        assert_eq!(q.chips_in(&ru.bar, &ru.common.kinds), ["последние 7 дн"]);
+        assert_eq!(q.chips_in(&en.bar, &en.common.kinds), ["last 7 d"]);
+        let q = parse("vpn 2024 вчера", NOW, MSK);
+        assert_eq!(q.chips_in(&en.bar, &en.common.kinds), ["2024"]);
+        assert_eq!(parse("вчера", NOW, MSK).chips_in(&en.bar, &en.common.kinds), ["yesterday"]);
+        // The default language is Russian.
+        assert_eq!(parse("идеи прошлого месяца", NOW, MSK).chips(), ["Идея", "прошлый месяц"]);
     }
 
     #[test]

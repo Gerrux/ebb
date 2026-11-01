@@ -10,6 +10,7 @@ use egui::{
 };
 
 use crate::card::{self, Card, Kind, MIN_SIZE, Placement, Sides};
+use crate::i18n;
 use crate::resurface;
 use crate::theme;
 
@@ -95,12 +96,7 @@ fn age_label(created_at: i64) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
     let mins = (now - created_at).max(0) / 60;
-    match mins {
-        0 => "сейчас".into(),
-        m if m < 60 => format!("{m} мин"),
-        m if m < 60 * 24 => format!("{} ч", m / 60),
-        m => format!("{} дн", m / (60 * 24)),
-    }
+    (i18n::s().common.age_minutes)(mins)
 }
 
 /// An idea's statuses, and none.
@@ -122,7 +118,7 @@ fn idea_status_menu(
                 .map(Some)
                 .chain(std::iter::once(None));
             for status in options {
-                let label = status.map_or("Без статуса", card::IdeaStatus::label);
+                let label = status.map_or(i18n::s().layer.no_status, card::IdeaStatus::label);
                 let button = egui::Button::new(RichText::new(label).size(14.0))
                     .selected(status == current)
                     .min_size(vec2(ui.available_width(), 0.0));
@@ -135,18 +131,19 @@ fn idea_status_menu(
 
 /// The action a kind is for: first in the hover pill, in the kind's color.
 fn primary_action(card: &Card) -> Option<(&'static str, &'static str, Action)> {
+    let l = &i18n::s().layer;
     if card.placement == Placement::Rediscover {
-        return Some(("\u{E8FB}", "Оставить на слое", Action::Keep));
+        return Some(("\u{E8FB}", l.keep_on_layer, Action::Keep));
     }
     match card.kind {
-        Kind::Prompt => Some(("\u{E77F}", "Копировать prompt", Action::Copy)),
-        Kind::Reference => Some(("\u{E77F}", "Копировать текст", Action::Copy)),
-        Kind::Private => Some(("\u{E77F}", "Скопировать, не показывая", Action::Copy)),
+        Kind::Prompt => Some(("\u{E77F}", l.copy_prompt, Action::Copy)),
+        Kind::Reference => Some(("\u{E77F}", l.copy_text, Action::Copy)),
+        Kind::Private => Some(("\u{E77F}", l.copy_hidden, Action::Copy)),
         Kind::Link if card::first_url(&card.body).is_some() => {
-            Some(("\u{E8A7}", "Открыть ссылку", Action::OpenLink))
+            Some(("\u{E8A7}", l.open_link, Action::OpenLink))
         }
         Kind::Goal | Kind::Reminder if !card.pinned => {
-            Some(("\u{E930}", "Сделано: в архив", Action::Done))
+            Some(("\u{E930}", l.done_archive, Action::Done))
         }
         _ => None,
     }
@@ -187,32 +184,33 @@ fn more_menu(
                 ui.add(egui::Button::new(job).min_size(vec2(ui.available_width(), 0.0)))
                     .clicked()
             };
+            let l = &i18n::s().layer;
             let (glyph, label) = if locked {
-                ("\u{E77A}", "Открепить")
+                ("\u{E77A}", l.unpin)
             } else {
-                ("\u{E718}", "Закрепить на месте")
+                ("\u{E718}", l.pin_in_place)
             };
             if item(ui, glyph, label, theme::dim()) {
                 out.push(Action::TogglePin);
             }
-            if with_copy && item(ui, "\u{E77F}", "Копировать текст", theme::dim()) {
+            if with_copy && item(ui, "\u{E77F}", l.copy_text, theme::dim()) {
                 out.push(Action::Copy);
             }
             ui.separator();
-            if item(ui, "\u{E70E}", "Свернуть в строку", theme::dim()) {
+            if item(ui, "\u{E70E}", l.collapse_to_line, theme::dim()) {
                 out.push(Action::ToggleCollapse);
             }
-            if item(ui, "\u{E8C8}", "Дублировать", theme::dim()) {
+            if item(ui, "\u{E8C8}", l.duplicate, theme::dim()) {
                 out.push(Action::Duplicate);
             }
             if locked {
                 return;
             }
-            if on_layer && item(ui, "\u{E7F4}", "Вынести на рабочий стол", theme::dim()) {
+            if on_layer && item(ui, "\u{E7F4}", l.to_desktop, theme::dim()) {
                 out.push(Action::ToDesktop);
             }
             ui.separator();
-            if item(ui, "\u{E74D}", "Удалить", theme::muted()) {
+            if item(ui, "\u{E74D}", l.delete, theme::muted()) {
                 out.push(Action::Delete);
             }
         });
@@ -229,7 +227,7 @@ fn snooze_menu(anchor: &egui::Response, popup: Id, out: &mut Vec<Action>) {
             ui.spacing_mut().button_padding = vec2(8.0, 5.0);
             ui.add(
                 egui::Label::new(
-                    RichText::new("Убрать и вернуть")
+                    RichText::new(i18n::s().layer.put_away_until)
                         .size(12.0)
                         .color(theme::muted()),
                 )
@@ -300,7 +298,7 @@ fn kind_menu(anchor: &egui::Response, card: &Card, out: &mut Vec<Action>, below:
             }
             ui.separator();
             ui.add(
-                egui::Label::new(RichText::new("Цвет").size(12.0).color(theme::muted()))
+                egui::Label::new(RichText::new(i18n::s().layer.color).size(12.0).color(theme::muted()))
                     .selectable(false),
             );
             ui.horizontal_wrapped(|ui| {
@@ -322,7 +320,7 @@ fn kind_menu(anchor: &egui::Response, card: &Card, out: &mut Vec<Action>, below:
                     } else if resp.hovered() {
                         p.circle_stroke(rect.center(), 9.5, Stroke::new(1.0, theme::muted()));
                     }
-                    let label = tint.map_or("По типу", card::Tint::label);
+                    let label = tint.map_or(i18n::s().layer.by_kind, card::Tint::label);
                     resp.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label)
                     });
@@ -337,9 +335,9 @@ fn kind_menu(anchor: &egui::Response, card: &Card, out: &mut Vec<Action>, below:
             });
             ui.separator();
             let (glyph, label) = if card.collapsed {
-                ("\u{E70D}", "Развернуть")
+                ("\u{E70D}", i18n::s().layer.expand)
             } else {
-                ("\u{E70E}", "Свернуть в строку")
+                ("\u{E70E}", i18n::s().layer.collapse_to_line)
             };
             let mut job = egui::text::LayoutJob::default();
             let format = |font: FontId, color: Color32| egui::TextFormat {
@@ -763,25 +761,26 @@ pub(super) fn card_ui(
                 .layout(Layout::right_to_left(Align::Center)),
             |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
+                let l = &i18n::s().layer;
                 if card.collapsed {
-                    if icon_button(ui, "\u{E70D}", "Развернуть", theme::dim()).clicked() {
+                    if icon_button(ui, "\u{E70D}", l.expand, theme::dim()).clicked() {
                         out.push(Action::ToggleCollapse);
                     }
                     return;
                 }
-                let more = icon_button(ui, "\u{E712}", "Ещё", theme::dim());
+                let more = icon_button(ui, "\u{E712}", l.more, theme::dim());
                 more_menu(&more, more_popup, locked, !primary_is_copy, !window_drag, &mut out);
                 if !locked {
                     if !primary_is_done
-                        && icon_button(ui, "\u{E7B8}", "В архив", theme::dim()).clicked()
+                        && icon_button(ui, "\u{E7B8}", l.archive, theme::dim()).clicked()
                     {
                         out.push(Action::Archive);
                     }
-                    let later = icon_button(ui, "\u{E708}", "Позже", theme::dim());
+                    let later = icon_button(ui, "\u{E708}", l.later, theme::dim());
                     snooze_menu(&later, snooze_popup, &mut out);
                 }
                 if card.kind == Kind::Private
-                    && icon_button(ui, "\u{E890}", "Показать на 5 секунд", theme::dim()).clicked()
+                    && icon_button(ui, "\u{E890}", l.reveal_5s, theme::dim()).clicked()
                 {
                     out.push(Action::Reveal);
                 }
@@ -798,7 +797,7 @@ pub(super) fn card_ui(
                 if let Some((glyph, tip, action)) = primary {
                     let is_copy = matches!(action, Action::Copy);
                     let (glyph, tip, color) = if is_copy && copied.is_some() {
-                        ("\u{E73E}", "Текст скопирован", theme::SUCCESS)
+                        ("\u{E73E}", l.text_copied, theme::SUCCESS)
                     } else {
                         (glyph, tip, pill_accent)
                     };
@@ -871,7 +870,7 @@ pub(super) fn card_ui(
         egui::WidgetInfo::labeled(
             egui::WidgetType::Button,
             true,
-            format!("Тип: {}", card.kind.label()),
+            (i18n::s().layer.kind_aria)(card.kind.label()),
         )
     });
     let menu_open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&kind));
@@ -897,7 +896,7 @@ pub(super) fn card_ui(
     }
     let kind = if mark_shown > 0.5 {
         kind.on_hover_cursor(CursorIcon::PointingHand)
-            .on_hover_text(format!("{} — сменить тип", card.kind.label()))
+            .on_hover_text((i18n::s().layer.change_kind_tip)(card.kind.label()))
     } else {
         kind
     };
@@ -987,7 +986,7 @@ pub(super) fn card_ui(
         if shown > 0.0 {
             let (text, color) = match card.idea_status {
                 Some(s) => (s.label(), s.color()),
-                None => ("Статус", theme::card_muted()),
+                None => (i18n::s().layer.status, theme::card_muted()),
             };
             let galley =
                 ui.painter()
@@ -1009,7 +1008,7 @@ pub(super) fn card_ui(
                 egui::WidgetInfo::labeled(
                     egui::WidgetType::Button,
                     true,
-                    format!("Статус идеи: {text}"),
+                    (i18n::s().layer.idea_status_aria)(text),
                 )
             });
             let mut p = ui.painter().with_clip_rect(footer);
@@ -1088,12 +1087,12 @@ pub(super) fn card_ui(
                 egui::WidgetInfo::labeled(
                     egui::WidgetType::Button,
                     true,
-                    format!("Убрать тег #{tag}"),
+                    (i18n::s().layer.remove_tag_aria)(tag),
                 )
             });
             if resp
                 .on_hover_cursor(CursorIcon::PointingHand)
-                .on_hover_text("Убрать тег")
+                .on_hover_text(i18n::s().layer.remove_tag)
                 .clicked()
             {
                 out.push(Action::RemoveTag(tag.clone()));
@@ -1121,11 +1120,11 @@ pub(super) fn card_ui(
             theme::card_dim(),
         );
         resp.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Добавить тег")
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, i18n::s().layer.add_tag)
         });
         if resp
             .on_hover_cursor(CursorIcon::PointingHand)
-            .on_hover_text("Добавить тег")
+            .on_hover_text(i18n::s().layer.add_tag)
             .clicked()
         {
             out.push(Action::AddTag(plus.left_bottom()));
@@ -1173,7 +1172,7 @@ pub(super) fn card_ui(
             theme::card_text(),
         );
         bg.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Свёрнута: {line}"))
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, (i18n::s().layer.collapsed_aria)(&line))
         });
         card.size = full_size;
     }

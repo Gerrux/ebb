@@ -268,15 +268,7 @@ impl ImportGroup {
     pub const ALL: [Self; 7] = [Self::Secrets, Self::Links, Self::Prompts, Self::Ideas, Self::Reference, Self::Old, Self::Other];
 
     pub fn label(self) -> &'static str {
-        match self {
-            Self::Secrets => "Похоже на пароли и доступы",
-            Self::Links => "Ссылки",
-            Self::Prompts => "Промпты",
-            Self::Ideas => "Идеи",
-            Self::Reference => "Справка: команды, хосты, пути",
-            Self::Old => "Давно не менялись",
-            Self::Other => "Остальное",
-        }
+        crate::i18n::name_of(&Self::ALL, self, &crate::i18n::s().library.import_groups)
     }
 
     /// The kind "accept" gives the group's cards; none for groups that aren't a kind.

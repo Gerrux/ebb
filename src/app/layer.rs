@@ -12,6 +12,7 @@ use std::sync::atomic::Ordering;
 
 use crate::card;
 use crate::hotkey::Action;
+use crate::i18n;
 use crate::library::Tab;
 use crate::shell::Event;
 use crate::theme;
@@ -109,12 +110,7 @@ impl EbbApp {
             {
                 let keys = self.shell.hotkeys();
                 let label = |action| keys.map_or_else(|| "…".to_owned(), |k| k.get(action).short());
-                format!(
-                    "{} карточек  ·  {} — записать  ·  {} — найти  ·  F1 — debug",
-                    self.cards.len(),
-                    label(Action::Capture),
-                    label(Action::Search),
-                )
+                (i18n::s().layer.header_line)(self.cards.len(), &label(Action::Capture), &label(Action::Search))
             },
             FontId::proportional(13.0),
             theme::muted(),
@@ -152,11 +148,11 @@ impl EbbApp {
     fn new_note_button(&mut self, ui: &mut Ui, menu: Rect) {
         let rect = menu.translate(vec2(-(menu.width() + 8.0), 0.0));
         let button = ui.interact(rect, Id::new("layer-new-note"), Sense::click());
-        button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Новая заметка"));
+        button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, i18n::s().layer.new_note));
         let t = hover_t(ui, button.id, button.hovered());
         glass_button(ui, rect.expand(t * 1.5), 10.0, t);
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, "\u{E710}", theme::icons(16.0), theme::dim().lerp_to_gamma(theme::text(), t));
-        let button = button.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Новая заметка");
+        let button = button.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(i18n::s().layer.new_note);
         if button.clicked() {
             self.new_note(card::free_slot(&self.cards, self.area(ui)));
         }
@@ -168,7 +164,7 @@ impl EbbApp {
         let rect = Rect::from_min_size(pos2(full.right() - 32.0 - 40.0, full.top() + 16.0), vec2(40.0, 36.0));
         self.new_note_button(ui, rect);
         let button = ui.interact(rect, Id::new("layer-menu"), Sense::click());
-        button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Меню"));
+        button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, i18n::s().layer.menu));
         let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&button));
         let t = hover_t(ui, button.id, open || button.hovered());
         glass_button(ui, rect.expand(t * 1.5), 10.0, t);
@@ -179,7 +175,8 @@ impl EbbApp {
         let key_text = |action| keys.bound(action).map(|c| c.to_string()).unwrap_or_default();
         let (capture_key, search_key, library_key) =
             (key_text(Action::Capture), key_text(Action::Search), key_text(Action::Library));
-        let dismiss_label = if self.dismiss_hides { "Скрыть слой" } else { "Убрать на фон" };
+        let l = &i18n::s().layer;
+        let dismiss_label = if self.dismiss_hides { l.hide_layer } else { l.send_to_background };
         let mut chosen = None;
         egui::Popup::menu(&button)
             .align(egui::RectAlign::BOTTOM_END)
@@ -193,18 +190,18 @@ impl EbbApp {
                         chosen = Some(event);
                     }
                 };
-                item(ui, "Новая заметка", "", MenuItem::NewNote);
-                item(ui, "Записать мысль", &capture_key, MenuItem::Capture);
-                item(ui, "Найти", &search_key, MenuItem::Search);
-                item(ui, "Архив и корзина", &library_key, MenuItem::Library);
-                item(ui, "Еженедельный обзор", "", MenuItem::Review);
+                item(ui, l.new_note, "", MenuItem::NewNote);
+                item(ui, Action::Capture.label(), &capture_key, MenuItem::Capture);
+                item(ui, l.find, &search_key, MenuItem::Search);
+                item(ui, Action::Library.label(), &library_key, MenuItem::Library);
+                item(ui, l.weekly_review, "", MenuItem::Review);
                 ui.separator();
-                item(ui, "Импорт из Sticky Notes…", "", MenuItem::Import);
-                item(ui, "Настройки…", "", MenuItem::Settings);
+                item(ui, l.import_sticky, "", MenuItem::Import);
+                item(ui, l.settings, "", MenuItem::Settings);
                 ui.separator();
-                item(ui, if self.curtain_top { "Свернуть вверх" } else { "Свернуть вниз" }, "", MenuItem::Collapse);
+                item(ui, if self.curtain_top { l.collapse_up } else { l.collapse_down }, "", MenuItem::Collapse);
                 item(ui, dismiss_label, "Esc", MenuItem::Dismiss);
-                item(ui, "Выход", "", MenuItem::Exit);
+                item(ui, l.exit, "", MenuItem::Exit);
             });
 
         let Some(chosen) = chosen else { return };
@@ -249,7 +246,7 @@ impl EbbApp {
         let center = pos2(full.center().x, y);
         // The hit area is the handle's hovered size, so it doesn't jitter as the handle grows.
         let resp = ui.interact(Rect::from_center_size(center, vec2(96.0, 28.0)), Id::new("layer-curtain"), Sense::click_and_drag());
-        let label = if top { "Свернуть вверх" } else { "Свернуть вниз" };
+        let label = if top { i18n::s().layer.collapse_up } else { i18n::s().layer.collapse_down };
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
         // At rest a slim pill; on hover it widens and the arrow nudges toward the edge.
         let t = hover_t(ui, resp.id, resp.hovered() || resp.dragged());
@@ -354,7 +351,7 @@ impl EbbApp {
     pub(super) fn tab_ui(&mut self, ui: &mut Ui) {
         let full = ui.max_rect();
         let resp = ui.interact(full, Id::new("layer-tab"), Sense::click());
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Развернуть Ebb"));
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, i18n::s().layer.expand_ebb));
         let hovered = resp.hovered();
         let t = hover_t(ui, resp.id, hovered);
         let p = ui.painter();
@@ -408,18 +405,15 @@ impl EbbApp {
                     });
                 });
             };
-            row(ui, "Первый кадр от старта процесса", format!("{proc_ms:.0} мс"));
-            row(ui, "Первый кадр от main()", format!("{main_ms:.0} мс"));
-            row(
-                ui,
-                "Хоткей → кадр окна захвата",
-                latency.map_or("—".into(), |l| format!("{l:.0} мс")),
-            );
-            row(ui, "Память: working set / private", format!("{ws:.1} / {private:.1} MiB"));
-            row(ui, "Кадров отрисовано", self.frames.to_string());
-            row(ui, "Фон (F2) / монитор (F3)", self.backdrop.key().to_owned());
+            let l = &i18n::s().layer;
+            row(ui, l.dbg_first_frame_process, (l.ms)(proc_ms));
+            row(ui, l.dbg_first_frame_main, (l.ms)(main_ms));
+            row(ui, l.dbg_hotkey_latency, latency.map_or("—".into(), |v| (l.ms)(v)));
+            row(ui, l.dbg_memory, format!("{ws:.1} / {private:.1} MiB"));
+            row(ui, l.dbg_frames, self.frames.to_string());
+            row(ui, l.dbg_backdrop_monitor, self.backdrop.key().to_owned());
             ui.add_space(4.0);
-            settings_clicked = ui.button("Настройки…").clicked();
+            settings_clicked = ui.button(l.settings).clicked();
         });
         if settings_clicked {
             self.library.lock().unwrap().open(Tab::Settings);

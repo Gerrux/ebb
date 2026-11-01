@@ -140,8 +140,8 @@ const L = v => (v && typeof v === 'object' && 'ru' in v) ? v[lang] : v
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
 // Interface strings: the app's own (src/card.rs, src/app/card_ui.rs, src/bar.rs,
-// src/search.rs, src/resurface.rs). The English column is a translation for posts:
-// the app itself speaks Russian.
+// src/search.rs, src/resurface.rs). The English column matches the app's English string
+// table (src/i18n/).
 const ui = {
   kinds: {
     note: { ru: 'Заметка', en: 'Note' }, idea: { ru: 'Идея', en: 'Idea' }, prompt: 'Prompt',

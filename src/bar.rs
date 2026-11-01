@@ -22,7 +22,7 @@ use egui::{
 use crate::card::{Kind, Placement, parse_capture_with};
 use crate::commands::{self, Arg, BarTarget, CommandId, Ctx, Match};
 use crate::search::{self, MARK_END, MARK_START};
-use crate::store::{Hit, STORE_FAILED, Store};
+use crate::store::{Hit, Store};
 use crate::theme;
 use crate::win;
 
@@ -278,7 +278,7 @@ fn capture_ui(ui: &mut Ui, st: &mut BarState) -> bool {
             edit_resp = Some(
                 ui.add(
                     egui::TextEdit::multiline(&mut st.text)
-                        .hint_text("Запиши мысль…")
+                        .hint_text(crate::i18n::s().bar.capture_hint)
                         .font(FontId::proportional(18.0))
                         .text_color(theme::text())
                         .frame(egui::Frame::NONE)
@@ -294,7 +294,7 @@ fn capture_ui(ui: &mut Ui, st: &mut BarState) -> bool {
                 if detected {
                     let off = ui
                         .add(egui::Label::new(RichText::new("\u{E711}").font(theme::icons(10.0)).color(theme::dim())).sense(Sense::click()))
-                        .on_hover_text("Похоже на секрет. Сохранить обычной заметкой");
+                        .on_hover_text(crate::i18n::s().bar.secret_hover);
                     if off.hovered() {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
@@ -308,8 +308,8 @@ fn capture_ui(ui: &mut Ui, st: &mut BarState) -> bool {
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let hint = match st.latency_ms {
-                        Some(l) => format!("Enter — сохранить · Shift+Enter — строка · Esc   ·   {l:.0} мс"),
-                        None => "Enter — сохранить · Shift+Enter — строка · Esc".into(),
+                        Some(l) => (crate::i18n::s().bar.capture_keys_ms)(l),
+                        None => crate::i18n::s().bar.capture_keys.into(),
                     };
                     ui.label(RichText::new(hint).size(11.5).color(theme::muted()));
                 });
@@ -344,12 +344,13 @@ enum ActionKind {
 }
 
 fn actions(hit: &Hit) -> [(ActionKind, &'static str); 5] {
+    let t = &crate::i18n::s().bar;
     [
-        (ActionKind::Open, "На слой"),
-        (ActionKind::Copy, "Копировать"),
-        (ActionKind::Pin, if hit.pinned { "Открепить" } else { "Закрепить" }),
-        (ActionKind::Archive, if hit.archived { "Вернуть на слой" } else { "В архив" }),
-        (ActionKind::Delete, "В корзину"),
+        (ActionKind::Open, t.act_open),
+        (ActionKind::Copy, t.act_copy),
+        (ActionKind::Pin, if hit.pinned { t.act_unpin } else { t.act_pin }),
+        (ActionKind::Archive, if hit.archived { t.act_unarchive } else { t.act_archive }),
+        (ActionKind::Delete, t.act_delete),
     ]
 }
 
@@ -357,7 +358,7 @@ fn open_store(st: &mut BarState) {
     if st.store.is_none() {
         st.store = Store::open().ok();
         if st.store.is_none() {
-            st.notice = Some((STORE_FAILED.into(), Instant::now()));
+            st.notice = Some((crate::i18n::s().common.store_failed.into(), Instant::now()));
         }
     }
 }
@@ -390,9 +391,10 @@ fn run_search(st: &mut BarState) {
 fn perform(ui: &Ui, st: &mut BarState, kind: ActionKind) -> bool {
     let Some(hit) = st.hits.get(st.selected).cloned() else { return false };
     let Some(store) = st.store.as_ref() else {
-        st.notice = Some((STORE_FAILED.into(), Instant::now()));
+        st.notice = Some((crate::i18n::s().common.store_failed.into(), Instant::now()));
         return false;
     };
+    let t = &crate::i18n::s().bar;
     match kind {
         ActionKind::Open => {
             st.outbox.push(Outbox::Open(hit.id));
@@ -402,13 +404,13 @@ fn perform(ui: &Ui, st: &mut BarState, kind: ActionKind) -> bool {
             if let Ok(Some(card)) = store.card(hit.id) {
                 let notice = if card.kind == Kind::Private {
                     match store.secret(card.id) {
-                        Ok(Some(secret)) if win::copy_private(&secret) => "Скопировано, очистится через 30 с",
-                        _ => "Не удалось скопировать",
+                        Ok(Some(secret)) if win::copy_private(&secret) => t.copied_secret,
+                        _ => t.copy_failed,
                     }
                 } else {
                     let text = if card.title.is_empty() { card.body } else { format!("{}\n{}", card.title, card.body) };
                     ui.ctx().copy_text(text);
-                    "Скопировано"
+                    t.copied
                 };
                 st.notice = Some((notice.into(), Instant::now()));
             }
@@ -422,7 +424,7 @@ fn perform(ui: &Ui, st: &mut BarState, kind: ActionKind) -> bool {
                 store.save(&card)
             });
             if saved.is_err() {
-                st.notice = Some(("Не удалось закрепить".into(), Instant::now()));
+                st.notice = Some((t.pin_failed.into(), Instant::now()));
             }
             st.outbox.push(Outbox::Changed);
             st.searched = None;
@@ -430,11 +432,11 @@ fn perform(ui: &Ui, st: &mut BarState, kind: ActionKind) -> bool {
         ActionKind::Archive => {
             if hit.archived {
                 st.outbox.push(Outbox::Open(hit.id));
-                st.notice = Some(("Возвращено на слой".into(), Instant::now()));
+                st.notice = Some((t.returned_to_layer.into(), Instant::now()));
             } else {
                 let notice = match store.set_archived(hit.id, true) {
-                    Ok(()) => "Убрано в архив",
-                    Err(_) => "Не удалось убрать в архив",
+                    Ok(()) => t.archived,
+                    Err(_) => t.archive_failed,
                 };
                 st.outbox.push(Outbox::Changed);
                 st.notice = Some((notice.into(), Instant::now()));
@@ -443,8 +445,8 @@ fn perform(ui: &Ui, st: &mut BarState, kind: ActionKind) -> bool {
         }
         ActionKind::Delete => {
             let notice = match store.delete(hit.id) {
-                Ok(()) => "В корзине",
-                Err(_) => "Не удалось удалить",
+                Ok(()) => t.trashed,
+                Err(_) => t.delete_failed,
             };
             st.outbox.push(Outbox::Changed);
             st.notice = Some((notice.into(), Instant::now()));
@@ -480,10 +482,9 @@ fn refresh_commands(st: &mut BarState) {
 
 /// Enter (or a double click) on a command. True when the bar should close.
 fn run_match(st: &mut BarState, m: &Match) -> bool {
-    let Some(command) = commands::command(m.id) else { return false };
     if m.needs_arg {
         // Not run: the name goes into the query for the number to be typed after it.
-        st.query = format!(">{} ", command.title);
+        st.query = format!(">{} ", commands::base_title(m.id));
         (st.caret_end, st.request_focus, st.commands_for) = (true, true, None);
         return false;
     }
@@ -537,11 +538,11 @@ fn command_list(ui: &mut Ui, st: &mut BarState, inner: Rect, query_rect: Rect, k
     let header = Rect::from_min_size(pos2(inner.left(), query_rect.bottom() + 4.0), vec2(inner.width(), 22.0));
     ui.scope_builder(UiBuilder::new().max_rect(header).layout(Layout::left_to_right(Align::Center)), |ui| {
         ui.add_space(4.0);
-        ui.label(RichText::new("Команды").size(12.0).color(theme::muted()));
+        ui.label(RichText::new(crate::i18n::s().bar.commands_header).size(12.0).color(theme::muted()));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let stats = match st.notice.as_ref().filter(|(_, t)| t.elapsed() < Duration::from_millis(1500)) {
                 Some((text, _)) => text.clone(),
-                None => format!("{} · {:.2} мс", n, st.search_ms),
+                None => (crate::i18n::s().bar.palette_stats)(n, st.search_ms),
             };
             ui.label(RichText::new(stats).size(11.5).color(theme::muted()));
         });
@@ -565,7 +566,7 @@ fn command_list(ui: &mut Ui, st: &mut BarState, inner: Rect, query_rect: Rect, k
         st.first_row = if wheel < 0.0 { (st.first_row + 1).min(max_first) } else { st.first_row.saturating_sub(1) };
     }
     if n == 0 {
-        ui.painter().text(list.center_top() + vec2(0.0, 40.0), Align2::CENTER_TOP, "Такой команды нет", FontId::proportional(14.0), theme::muted());
+        ui.painter().text(list.center_top() + vec2(0.0, 40.0), Align2::CENTER_TOP, crate::i18n::s().bar.no_command, FontId::proportional(14.0), theme::muted());
     }
     let (mut clicked, mut double) = (None, None);
     for (row, idx) in (st.first_row..n.min(st.first_row + visible_rows)).enumerate() {
@@ -585,6 +586,7 @@ fn command_list(ui: &mut Ui, st: &mut BarState, inner: Rect, query_rect: Rect, k
         // The format of the number the command takes, on the right.
         let mut right = r.right() - 14.0;
         if let Some(Arg::Number { hint, .. }) = commands::command(m.id).map(|c| c.arg) {
+            let hint = commands::hint_text(hint);
             let hint = match m.arg {
                 Some(n) => format!("{hint}: {n}"),
                 None => hint.to_owned(),
@@ -609,7 +611,7 @@ fn command_list(ui: &mut Ui, st: &mut BarState, inner: Rect, query_rect: Rect, k
     ui.painter().text(
         pos2(inner.left() + 4.0, inner.bottom() - footer_h / 2.0),
         Align2::LEFT_CENTER,
-        "↑↓ выбор · Enter — выполнить · Esc · стереть > — к заметкам",
+        crate::i18n::s().bar.palette_footer,
         FontId::proportional(11.5),
         theme::muted(),
     );
@@ -662,7 +664,7 @@ fn search_ui(ui: &mut Ui, st: &mut BarState) -> bool {
             ui.add(
                 egui::TextEdit::singleline(&mut st.query)
                     .id(query_id())
-                    .hint_text("Найти заметку: текст, #тег, «идеи прошлого месяца»")
+                    .hint_text(crate::i18n::s().bar.search_hint)
                     .font(FontId::proportional(18.0))
                     .text_color(theme::text())
                     .frame(egui::Frame::NONE)
@@ -741,7 +743,7 @@ fn search_ui(ui: &mut Ui, st: &mut BarState) -> bool {
         ui.add_space(4.0);
         let chips = st.parsed.chips();
         if st.query.trim().is_empty() {
-            ui.label(RichText::new("Недавние").size(12.0).color(theme::muted()));
+            ui.label(RichText::new(crate::i18n::s().bar.recent).size(12.0).color(theme::muted()));
         }
         for chip in chips {
             let galley = ui.painter().layout_no_wrap(chip, FontId::proportional(12.0), theme::dim());
@@ -752,8 +754,8 @@ fn search_ui(ui: &mut Ui, st: &mut BarState) -> bool {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let stats = match (st.notice.as_ref().filter(|(_, t)| t.elapsed() < Duration::from_millis(1500)), st.latency_ms) {
                 (Some((text, _)), _) => text.clone(),
-                (None, Some(l)) => format!("{} · {:.1} мс · открыто за {l:.0} мс", n, st.search_ms),
-                (None, None) => format!("{} · {:.1} мс", n, st.search_ms),
+                (None, Some(l)) => (crate::i18n::s().bar.stats_opened)(n, st.search_ms, l),
+                (None, None) => (crate::i18n::s().bar.stats)(n, st.search_ms),
             };
             ui.label(RichText::new(stats).size(11.5).color(theme::muted()));
         });
@@ -778,7 +780,8 @@ fn search_ui(ui: &mut Ui, st: &mut BarState) -> bool {
     }
 
     if n == 0 {
-        let msg = if st.query.trim().is_empty() { "Заметок пока нет" } else { "Ничего не нашлось. Попробуй часть слова или #тег." };
+        let t = &crate::i18n::s().bar;
+        let msg = if st.query.trim().is_empty() { t.no_notes } else { t.nothing_found };
         ui.painter().text(list.center_top() + vec2(0.0, 40.0), Align2::CENTER_TOP, msg, FontId::proportional(14.0), theme::muted());
     }
 
@@ -809,9 +812,9 @@ fn search_ui(ui: &mut Ui, st: &mut BarState) -> bool {
 
     // Footer.
     let hint = if st.action.is_some() {
-        "←→ действие · Enter — выполнить · Tab или Esc — назад"
+        crate::i18n::s().bar.keys_actions
     } else {
-        "↑↓ выбор · Enter — на слой · Ctrl+C — копировать · Tab — действия · Esc"
+        crate::i18n::s().bar.keys_results
     };
     ui.painter().text(
         pos2(inner.left() + 4.0, inner.bottom() - footer_h / 2.0),
@@ -862,7 +865,7 @@ fn hit_row(ui: &Ui, r: Rect, hit: &Hit, q: &search::Query, selected: bool, hover
     let age = painter.text(pos2(right, r.top() + 13.0), Align2::RIGHT_TOP, age(hit.updated_at), FontId::proportional(11.5), theme::muted());
     right = age.left() - 8.0;
     if hit.archived {
-        let g = painter.layout_no_wrap("архив".into(), FontId::proportional(11.0), theme::dim());
+        let g = painter.layout_no_wrap(crate::i18n::s().bar.archived_badge.into(),FontId::proportional(11.0), theme::dim());
         let chip = Rect::from_min_size(pos2(right - g.size().x - 10.0, r.top() + 11.0), g.size() + vec2(10.0, 4.0));
         painter.rect_filled(chip, CornerRadius::same(6), theme::chip_fill());
         painter.galley(chip.min + vec2(5.0, 2.0), g, theme::dim());
@@ -905,13 +908,7 @@ fn hit_row(ui: &Ui, r: Rect, hit: &Hit, q: &search::Query, selected: bool, hover
 pub(crate) fn age(ts: i64) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
     let days = (now - ts).max(0) / 86_400;
-    match days {
-        0 => "сегодня".into(),
-        1 => "вчера".into(),
-        d if d < 30 => format!("{d} дн"),
-        d if d < 365 => format!("{} мес", d / 30),
-        d => format!("{} г", d / 365),
-    }
+    (crate::i18n::s().common.age_days)(days)
 }
 
 #[cfg(test)]

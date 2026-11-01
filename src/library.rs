@@ -14,17 +14,18 @@ use egui::{
 };
 
 use crate::autostart;
-use crate::bar::{age, highlighted};
+use crate::bar::highlighted;
 use crate::card::{Card, Kind};
 use crate::hotkey::{self, Action, Combo, Config, Wanted};
-use crate::resurface::{self, DAY, days_word};
+use crate::i18n;
+use crate::resurface::{self, DAY};
 use crate::review;
 use crate::rich_text;
 use crate::search;
 use crate::shell::{self, Binding, Hotkeys};
 use crate::sticky::ImportGroup;
 use crate::store::{
-    Hit, ImportAction, ImportItem, ImportSnapshot, ReviewAction, ReviewSnapshot, STORE_FAILED,
+    Hit, ImportAction, ImportItem, ImportSnapshot, ReviewAction, ReviewSnapshot,
     Scope, Store, TRASH_DAYS, backup_dir, latest_backup,
 };
 use crate::theme;
@@ -35,23 +36,14 @@ pub const SETTINGS_SIZE: Vec2 = vec2(600.0, 680.0);
 const ROW_H: f32 = 58.0;
 const HEADER_H: f32 = 52.0;
 const RESULTS: usize = 200;
-const WEEKDAYS: [&str; 7] = [
-    "Понедельник",
-    "Вторник",
-    "Среда",
-    "Четверг",
-    "Пятница",
-    "Суббота",
-    "Воскресенье",
-];
-/// Review buttons, in key order: label, action, what the summary calls it.
-const REVIEW_ACTIONS: [(&str, ReviewAction, &str); 6] = [
-    ("← Оставить", ReviewAction::Keep, "оставлено"),
-    ("→ В архив", ReviewAction::Archive, "в архиве"),
-    ("↓ Позже", ReviewAction::Snooze, "отложено"),
-    ("↑ Закрепить", ReviewAction::Pin, "закреплено"),
-    ("G  Сделать целью", ReviewAction::Goal, "стали целями"),
-    ("Del  В корзину", ReviewAction::Trash, "в корзине"),
+/// Review actions in key order; the table's `review_actions` and `review_outcomes` follow it.
+const REVIEW_ACTIONS: [ReviewAction; 6] = [
+    ReviewAction::Keep,
+    ReviewAction::Archive,
+    ReviewAction::Snooze,
+    ReviewAction::Pin,
+    ReviewAction::Goal,
+    ReviewAction::Trash,
 ];
 
 pub fn viewport_id() -> ViewportId {
@@ -91,6 +83,8 @@ pub struct LayerSettings {
     /// How cards show their kind on the layer.
     pub card_style: crate::card::CardStyle,
     pub theme_mode: theme::ThemeMode,
+    /// `None`: as in Windows.
+    pub language: Option<i18n::Lang>,
 }
 
 impl Default for LayerSettings {
@@ -109,6 +103,7 @@ impl Default for LayerSettings {
             hide_from_capture: true,
             card_style: crate::card::CardStyle::default(),
             theme_mode: theme::ThemeMode::System,
+            language: None,
         }
     }
 }
@@ -130,6 +125,8 @@ pub enum Request {
     SetHideFromCapture(bool),
     SetCardStyle(crate::card::CardStyle),
     SetTheme(theme::ThemeMode),
+    /// `None`: as in Windows.
+    SetLanguage(Option<i18n::Lang>),
     /// Bind the action's hotkey as asked; the root answers through
     /// [`LibraryState::hotkey_errors`] and `settings.hotkeys`.
     SetHotkey(Action, Wanted),
@@ -492,8 +489,8 @@ fn record_hotkey(ui: &Ui, st: &mut LibraryState) {
             st.hotkey_errors[slot] = None;
             st.outbox.push(Request::SetHotkey(action, Wanted::Custom(combo)));
         }
-        Some(_) => st.hotkey_errors[slot] = Some("Нужен Win или два из Ctrl, Alt, Shift".into()),
-        None => st.hotkey_errors[slot] = Some("Эту клавишу нельзя использовать".into()),
+        Some(_) => st.hotkey_errors[slot] = Some(i18n::s().library.hotkey_needs_modifiers.into()),
+        None => st.hotkey_errors[slot] = Some(i18n::s().library.hotkey_key_unavailable.into()),
     }
 }
 
@@ -512,10 +509,11 @@ fn header(ui: &mut Ui, st: &mut LibraryState) -> bool {
             .max_rect(bar.shrink2(vec2(20.0, 10.0)))
             .layout(Layout::left_to_right(Align::Center)),
         |ui| {
+            let t = &i18n::s().library;
             let title = match (st.settings_only, st.welcome) {
-                (false, _) => "Библиотека",
-                (true, false) => "Настройки Ebb",
-                (true, true) => "Добро пожаловать в Ebb",
+                (false, _) => t.title_library,
+                (true, false) => t.title_settings,
+                (true, true) => t.title_welcome,
             };
             ui.label(
                 RichText::new(title)
@@ -528,14 +526,14 @@ fn header(ui: &mut Ui, st: &mut LibraryState) -> bool {
                 Vec::new()
             } else {
                 let mut tabs = vec![
-                    (Tab::Archive, format!("Архив {archived}")),
-                    (Tab::Trash, format!("Корзина {trashed}")),
-                    (Tab::Review, "Обзор".to_owned()),
+                    (Tab::Archive, (t.tab_archive)(archived)),
+                    (Tab::Trash, (t.tab_trash)(trashed)),
+                    (Tab::Review, t.tab_review.to_owned()),
                 ];
                 if st.import_left > 0 || st.tab == Tab::Import {
-                    tabs.push((Tab::Import, format!("Импорт {}", st.import_left)));
+                    tabs.push((Tab::Import, (t.tab_import)(st.import_left)));
                 }
-                tabs.push((Tab::Settings, "Настройки".to_owned()));
+                tabs.push((Tab::Settings, t.tab_settings.to_owned()));
                 tabs
             };
             for (tab, label) in tabs {
@@ -570,7 +568,7 @@ fn header(ui: &mut Ui, st: &mut LibraryState) -> bool {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let (r, resp) = ui.allocate_exact_size(vec2(32.0, 28.0), Sense::click());
                 resp.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Закрыть")
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, t.close)
                 });
                 if resp.hovered() {
                     ui.painter().rect_filled(
@@ -586,7 +584,7 @@ fn header(ui: &mut Ui, st: &mut LibraryState) -> bool {
                     theme::icons(11.0),
                     theme::text(),
                 );
-                close = resp.on_hover_text("Закрыть (Esc)").clicked();
+                close = resp.on_hover_text(t.close_hint).clicked();
             });
         },
     );
@@ -609,7 +607,7 @@ fn refresh(st: &mut LibraryState) {
         st.store = Store::open().ok();
     }
     let Some(store) = st.store.as_ref() else {
-        st.notice = Some((STORE_FAILED.into(), Instant::now()));
+        st.notice = Some((i18n::s().common.store_failed.into(), Instant::now()));
         return;
     };
     let now = std::time::SystemTime::now()
@@ -749,29 +747,27 @@ fn review_tab(ui: &mut Ui, st: &mut LibraryState) {
         review_apply(st, action);
     }
 
+    let t = &i18n::s().library;
     let (done, total) = (st.review.history.len(), st.review.cards.len());
     if total == 0 {
-        review_message(
-            ui,
-            "Для обзора пока нет карточек",
-            "Старые и отложенные мысли появятся здесь позже.",
-        );
+        review_message(ui, t.review_empty_title, t.review_empty_text);
         return;
     }
     if done == total {
         let count = |a: ReviewAction| st.review.history.iter().filter(|(_, x)| *x == a).count();
         let summary = REVIEW_ACTIONS
             .iter()
-            .map(|(_, a, outcome)| (count(*a), outcome))
+            .zip(t.review_outcomes)
+            .map(|(a, outcome)| (count(*a), outcome))
             .filter(|(n, _)| *n > 0)
             .map(|(n, outcome)| format!("{outcome}: {n}"))
             .collect::<Vec<_>>()
             .join(" · ");
-        review_message(ui, "Обзор завершён", &summary);
+        review_message(ui, t.review_done_title, &summary);
         ui.vertical_centered(|ui| {
             ui.add_space(16.0);
             ui.label(
-                RichText::new("Ctrl+Z — вернуть последнюю карточку")
+                RichText::new(t.review_undo_hint)
                     .size(12.0)
                     .color(theme::dim()),
             );
@@ -782,17 +778,14 @@ fn review_tab(ui: &mut Ui, st: &mut LibraryState) {
 
     let now = resurface::unix_now();
     let why = if card.review_at.is_some_and(|at| at <= now) {
-        "Напоминание"
+        t.review_why_reminder
     } else if card.archived {
         // Only imported notes never opened reach the review from the archive.
-        "Импорт, ещё не открывал"
+        t.review_why_import
     } else {
-        "Давно не открывали"
+        t.review_why_old
     };
-    let age = match (now - card.created_at).max(0) / DAY {
-        0 => "записано сегодня".to_owned(),
-        n => format!("записано {n} {} назад", days_word(n)),
-    };
+    let age = (t.written_ago)((now - card.created_at).max(0) / DAY);
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(card.kind.label())
@@ -806,7 +799,7 @@ fn review_tab(ui: &mut Ui, st: &mut LibraryState) {
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(
-                RichText::new(format!("{} из {total}", done + 1))
+                RichText::new((t.review_position)(done + 1, total))
                     .size(12.5)
                     .color(theme::muted()),
             );
@@ -845,15 +838,14 @@ fn review_tab(ui: &mut Ui, st: &mut LibraryState) {
 
     let mut action = None;
     ui.horizontal_wrapped(|ui| {
-        for (label, a, _) in REVIEW_ACTIONS {
+        for (a, label) in REVIEW_ACTIONS.into_iter().zip(t.review_actions) {
             if ui.button(label).clicked() {
                 action = Some(a);
             }
         }
     });
     ui.add_space(10.0);
-    let hint = "«Оставить» не спросит о карточке 8 недель, «Позже» — 2 недели · Ctrl+Z — отменить";
-    ui.label(RichText::new(hint).size(11.5).color(theme::dim()));
+    ui.label(RichText::new(t.review_hint).size(11.5).color(theme::dim()));
     if let Some(action) = action {
         review_apply(st, action);
     }
@@ -871,7 +863,7 @@ fn ensure_import(st: &mut LibraryState) {
         st.store = Store::open().ok();
     }
     let Some(store) = st.store.as_ref() else {
-        st.notice = Some((STORE_FAILED.into(), Instant::now()));
+        st.notice = Some((i18n::s().common.store_failed.into(), Instant::now()));
         return;
     };
     let started = Instant::now();
@@ -902,7 +894,7 @@ fn import_apply(st: &mut LibraryState, ids: Vec<i64>, action: ImportAction, done
             st.import.history.push(snapshots);
             st.import_left = st.import.items.len();
             st.counts = store.counts().unwrap_or(st.counts);
-            st.notice = Some((format!("{done} · Ctrl+Z — отменить"), Instant::now()));
+            st.notice = Some(((i18n::s().library.with_undo_hint)(&done), Instant::now()));
             st.outbox.push(Request::Changed);
             if action == ImportAction::SetKind(Kind::Private) {
                 // The text is encrypted now; wipe the copies SQLite keeps in freed
@@ -917,7 +909,7 @@ fn import_apply(st: &mut LibraryState, ids: Vec<i64>, action: ImportAction, done
                     });
             }
         }
-        Err(_) => st.notice = Some(("Не получилось, ничего не изменено".into(), Instant::now())),
+        Err(_) => st.notice = Some((i18n::s().library.import_apply_failed.into(), Instant::now())),
     }
 }
 
@@ -929,26 +921,15 @@ fn import_undo(st: &mut LibraryState) {
         return;
     };
     let notice = match store.undo_import_review(&snapshots) {
-        Ok(()) => format!("Отменено: {}", notes_word(snapshots.len())),
+        Ok(()) => (i18n::s().library.import_undone)(snapshots.len()),
         Err(_) => {
             st.import.history.push(snapshots);
-            "Отменить не получилось".to_owned()
+            i18n::s().library.import_undo_failed.to_owned()
         }
     };
     st.notice = Some((notice, Instant::now()));
     st.import.loaded = false;
     st.outbox.push(Request::Changed);
-}
-
-/// "1 заметка", "3 заметки", "11 заметок".
-fn notes_word(n: usize) -> String {
-    let word = match (n % 10, n % 100) {
-        (_, 11..=14) => "заметок",
-        (1, _) => "заметка",
-        (2..=4, _) => "заметки",
-        _ => "заметок",
-    };
-    format!("{n} {word}")
 }
 
 fn import_tab(ui: &mut Ui, st: &mut LibraryState) {
@@ -966,19 +947,14 @@ fn import_tab(ui: &mut Ui, st: &mut LibraryState) {
     if notice.is_some() {
         ui.ctx().request_repaint_after(Duration::from_millis(4000));
     }
+    let t = &i18n::s().library;
     let left = st.import.items.len();
     ui.horizontal(|ui| {
-        let text = notice.unwrap_or_else(|| {
-            if left == 0 {
-                String::new()
-            } else {
-                format!("Из Sticky Notes осталось разобрать {}. Решение для группы — одной кнопкой, Ctrl+Z отменяет.", notes_word(left))
-            }
-        });
+        let text = notice.unwrap_or_else(|| if left == 0 { String::new() } else { (t.import_left)(left) });
         ui.label(RichText::new(text).size(12.5).color(theme::muted()));
         if !st.import.history.is_empty() {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Отменить последнее").clicked() {
+                if ui.button(t.import_undo_last).clicked() {
                     import_undo(st);
                 }
             });
@@ -986,11 +962,7 @@ fn import_tab(ui: &mut Ui, st: &mut LibraryState) {
     });
     ensure_import(st);
     if st.import.items.is_empty() {
-        review_message(
-            ui,
-            "Импорт разобран",
-            "Все заметки из Sticky Notes на своих местах. Их найдёт поиск.",
-        );
+        review_message(ui, t.import_sorted_title, t.import_sorted_text);
         return;
     }
     ui.add_space(6.0);
@@ -1013,14 +985,14 @@ fn import_tab(ui: &mut Ui, st: &mut LibraryState) {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(group.label()).font(theme::semibold(15.0)).color(theme::text()));
-                        let count = if on_layer > 0 { format!("{} · {on_layer} на слое", items.len()) } else { items.len().to_string() };
+                        let count = if on_layer > 0 { (t.import_count_on_layer)(items.len(), on_layer) } else { items.len().to_string() };
                         ui.label(RichText::new(count).size(13.0).color(theme::muted()));
                     });
                     let hint = match group {
-                        ImportGroup::Secrets => "Станут Private: значение зашифруется и пропадёт из поиска, останется подпись.".to_owned(),
-                        ImportGroup::Old => "Не менялись больше года. В архиве их по-прежнему найдёт поиск.".to_owned(),
-                        ImportGroup::Other => "Обычные заметки. Оставь как есть или убери в архив.".to_owned(),
-                        _ => format!("Похоже на тип «{}».", group.kind().map_or("", |k| k.label())),
+                        ImportGroup::Secrets => t.import_hint_secrets.to_owned(),
+                        ImportGroup::Old => t.import_hint_old.to_owned(),
+                        ImportGroup::Other => t.import_hint_other.to_owned(),
+                        _ => (t.import_hint_kind)(group.kind().map_or("", |k| k.label())),
                     };
                     ui.label(RichText::new(hint).size(12.0).color(theme::dim()));
                     ui.add_space(4.0);
@@ -1029,22 +1001,22 @@ fn import_tab(ui: &mut Ui, st: &mut LibraryState) {
                     }
                     ui.add_space(6.0);
                     ui.horizontal_wrapped(|ui| {
-                        let n = notes_word(ids.len());
+                        let n = (i18n::s().common.notes)(ids.len());
                         if let Some(kind) = group.kind() {
-                            if ui.button(format!("Принять: {}", kind.label())).clicked() {
+                            if ui.button((t.import_accept)(kind.label())).clicked() {
                                 request = Some((ids.clone(), ImportAction::SetKind(kind), format!("{n} → {}", kind.label())));
                             }
-                        } else if ui.button("Оставить как есть").clicked() {
-                            request = Some((ids.clone(), ImportAction::Keep, format!("{n} оставлены как есть")));
+                        } else if ui.button(t.import_keep).clicked() {
+                            request = Some((ids.clone(), ImportAction::Keep, (t.import_kept)(&n)));
                         }
-                        if ui.button("Всё в архив").clicked() {
-                            request = Some((ids.clone(), ImportAction::Archive, format!("{n} в архиве")));
+                        if ui.button(t.import_archive_all).clicked() {
+                            request = Some((ids.clone(), ImportAction::Archive, (t.import_archived)(&n)));
                         }
-                        if ui.button("Всё в корзину").clicked() {
-                            request = Some((ids.clone(), ImportAction::Trash, format!("{n} в корзине, {TRASH_DAYS} дней можно вернуть")));
+                        if ui.button(t.import_trash_all).clicked() {
+                            request = Some((ids.clone(), ImportAction::Trash, (t.import_trashed)(&n, TRASH_DAYS)));
                         }
                         let expanded = st.import.expanded == Some(group);
-                        if ui.button(if expanded { "Свернуть" } else { "Посмотреть" }).clicked() {
+                        if ui.button(if expanded { t.import_collapse } else { t.import_expand }).clicked() {
                             st.import.expanded = if expanded { None } else { Some(group) };
                         }
                     });
@@ -1063,12 +1035,9 @@ fn import_tab(ui: &mut Ui, st: &mut LibraryState) {
                                         }
                                     });
                                 if picked != item.kind {
-                                    request = Some((vec![item.card_id], ImportAction::SetKind(picked), format!("Тип: {}", picked.label())));
+                                    request = Some((vec![item.card_id], ImportAction::SetKind(picked), (t.import_kind_set)(picked.label())));
                                 }
-                                let age = match (now - item.updated_at).max(0) / DAY {
-                                    0 => "сегодня".to_owned(),
-                                    d => format!("{d} {} назад", days_word(d)),
-                                };
+                                let age = (t.import_item_age)((now - item.updated_at).max(0) / DAY);
                                 ui.label(RichText::new(&item.preview).size(13.0).color(theme::text()));
                                 ui.label(RichText::new(age).size(11.5).color(theme::muted()));
                             });
@@ -1096,36 +1065,31 @@ fn act(st: &mut LibraryState, primary: bool) {
         return;
     };
     let Some(store) = st.store.as_ref() else {
-        st.notice = Some((STORE_FAILED.into(), Instant::now()));
+        st.notice = Some((i18n::s().common.store_failed.into(), Instant::now()));
         return;
     };
+    let t = &i18n::s().library;
     match (st.tab, primary) {
         (Tab::Archive, true) => {
             st.outbox.push(Request::Open(hit.id));
-            st.notice = Some(("Возвращено на слой".into(), Instant::now()));
+            st.notice = Some((t.returned_to_layer.into(), Instant::now()));
         }
         (Tab::Archive, false) => {
             let notice = match store.delete(hit.id) {
-                Ok(()) => "Перемещено в корзину",
-                Err(_) => "Не удалось переместить в корзину",
+                Ok(()) => t.moved_to_trash,
+                Err(_) => t.move_to_trash_failed,
             };
             st.outbox.push(Request::Changed);
             st.notice = Some((notice.into(), Instant::now()));
         }
         (Tab::Trash, true) => {
             let notice = match store.restore(hit.id) {
-                Ok(()) => format!(
-                    "Восстановлено {}",
-                    if hit.archived {
-                        "в архив"
-                    } else {
-                        "на слой"
-                    }
-                ),
-                Err(_) => "Не удалось восстановить".into(),
+                Ok(()) if hit.archived => t.restored_to_archive,
+                Ok(()) => t.restored_to_layer,
+                Err(_) => t.restore_failed,
             };
             st.outbox.push(Request::Changed);
-            st.notice = Some((notice, Instant::now()));
+            st.notice = Some((notice.into(), Instant::now()));
         }
         (Tab::Trash, false) => {
             if st.confirm != Some(Confirm::Purge(hit.id)) {
@@ -1133,8 +1097,8 @@ fn act(st: &mut LibraryState, primary: bool) {
                 return;
             }
             let notice = match store.purge(hit.id) {
-                Ok(()) => "Удалено навсегда",
-                Err(_) => "Не удалось удалить",
+                Ok(()) => t.purged,
+                Err(_) => t.purge_failed,
             };
             st.notice = Some((notice.into(), Instant::now()));
             st.confirm = None;
@@ -1155,6 +1119,7 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
     });
     let area = ui.max_rect();
     let trash = st.tab == Tab::Trash;
+    let t = &i18n::s().library;
 
     // Query row + trash controls.
     let top = Rect::from_min_size(area.min, vec2(area.width(), 36.0));
@@ -1170,11 +1135,7 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
                     .color(theme::dim()),
             );
             ui.add_space(6.0);
-            let hint = if trash {
-                "Найти в корзине"
-            } else {
-                "Найти в архиве: текст, #тег, «ссылки прошлого года»"
-            };
+            let hint = if trash { t.search_trash } else { t.search_archive };
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut st.query)
                     .hint_text(hint)
@@ -1198,9 +1159,9 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
             if trash {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let label = if st.confirm == Some(Confirm::EmptyTrash) {
-                        "Точно очистить? Нажми ещё раз"
+                        t.empty_trash_confirm
                     } else {
-                        "Очистить корзину"
+                        t.empty_trash
                     };
                     empty_clicked = ui
                         .add_enabled(st.counts.2 > 0, egui::Button::new(label))
@@ -1216,11 +1177,7 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
                 .as_ref()
                 .is_some_and(|store| store.empty_trash().is_ok());
             st.confirm = None;
-            let notice = if emptied {
-                "Корзина очищена"
-            } else {
-                "Не удалось очистить корзину"
-            };
+            let notice = if emptied { t.trash_emptied } else { t.trash_empty_failed };
             st.notice = Some((notice.into(), Instant::now()));
             st.searched = None;
         } else {
@@ -1263,17 +1220,11 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
     let chips = st.parsed.chips().join(" · ");
     let total = if trash { st.counts.2 } else { st.counts.1 };
     let found = if st.query.trim().is_empty() {
-        format!(
-            "{total} {}",
-            if trash {
-                "в корзине"
-            } else {
-                "в архиве"
-            }
-        )
+        if trash { (t.count_in_trash)(total) } else { (t.count_in_archive)(total) }
     } else {
         format!(
-            "найдено {n} из {total}{}",
+            "{}{}",
+            (t.found)(n, total),
             if chips.is_empty() {
                 String::new()
             } else {
@@ -1283,7 +1234,7 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
     };
     let text = match notice {
         Some(n) => n,
-        None if trash => format!("{found} · удалённое хранится {TRASH_DAYS} дней"),
+        None if trash => format!("{found} · {}", (t.trash_keeps)(TRASH_DAYS)),
         None => found,
     };
     ui.painter().text(
@@ -1312,9 +1263,9 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
     }
     if n == 0 {
         let msg = match (trash, st.query.trim().is_empty()) {
-            (true, true) => "Корзина пуста",
-            (false, true) => "В архиве пусто. Сюда уходят карточки со слоя и импорт.",
-            _ => "Ничего не нашлось",
+            (true, true) => t.trash_is_empty,
+            (false, true) => t.archive_is_empty,
+            _ => t.nothing_found,
         };
         ui.painter().text(
             list.center_top() + vec2(0.0, 60.0),
@@ -1369,11 +1320,7 @@ fn list_tab(ui: &mut Ui, st: &mut LibraryState) {
         act(st, primary);
     }
 
-    let hint = if trash {
-        "↑↓ выбор · Enter — восстановить · Delete — удалить навсегда · Ctrl+Tab — вкладка · Esc — закрыть"
-    } else {
-        "↑↓ выбор · Enter — на слой · Delete — в корзину · Ctrl+Tab — вкладка · Esc — закрыть"
-    };
+    let hint = if trash { t.list_hint_trash } else { t.list_hint_archive };
     ui.painter().text(
         pos2(area.left(), area.bottom() - footer_h / 2.0),
         Align2::LEFT_CENTER,
@@ -1412,23 +1359,17 @@ fn row_ui(
     );
 
     // Buttons on the selected or hovered row, age otherwise.
+    let t = &i18n::s().library;
     let mut clicked = None;
     let mut right = r.right() - 10.0;
     if selected || hovered {
         let labels = if trash {
             [
-                (
-                    false,
-                    if confirm {
-                        "Точно? Ещё раз"
-                    } else {
-                        "Удалить навсегда"
-                    },
-                ),
-                (true, "Восстановить"),
+                (false, if confirm { t.purge_confirm_button } else { t.purge_button }),
+                (true, t.restore_button),
             ]
         } else {
-            [(false, "В корзину"), (true, "На слой")]
+            [(false, t.delete_button), (true, t.to_layer_button)]
         };
         for (primary, label) in labels {
             let galley =
@@ -1460,17 +1401,9 @@ fn row_ui(
     } else {
         let label = if trash {
             let deleted = hit.deleted_at.map_or(0, days_ago);
-            format!(
-                "удалено {} · ещё {} дн",
-                if deleted == 0 {
-                    "сегодня".into()
-                } else {
-                    format!("{deleted} дн назад")
-                },
-                (TRASH_DAYS - deleted).max(0)
-            )
+            (t.trash_row_age)(deleted, (TRASH_DAYS - deleted).max(0))
         } else {
-            age(hit.updated_at)
+            (i18n::s().common.age_days)(days_ago(hit.updated_at))
         };
         let g = painter.text(
             pos2(right, r.top() + 12.0),
@@ -1502,11 +1435,7 @@ fn row_ui(
         theme::text(),
     );
     let second = if line2.is_empty() && trash {
-        if hit.archived {
-            "был в архиве".to_owned()
-        } else {
-            "был на слое".to_owned()
-        }
+        if hit.archived { t.was_in_archive.to_owned() } else { t.was_on_layer.to_owned() }
     } else {
         line2
     };
@@ -1567,7 +1496,7 @@ fn monitor_map(ui: &mut Ui, monitors: &[win::Monitor], current: Option<&str>) ->
         let max = offset + vec2((m.rect.right - l) as f32, (m.rect.bottom - t) as f32) * scale;
         let rect = Rect::from_min_max(min, max).shrink(3.0);
         let (pw, ph) = (m.rect.right - m.rect.left, m.rect.bottom - m.rect.top);
-        let name = format!("Монитор {}", i + 1);
+        let name = (i18n::s().library.monitor_name)(i + 1);
         let on = current.is_some_and(|d| m.matches_device(d));
         let resp = ui.interact(rect, Id::new(("monitor", i)), Sense::click());
         resp.widget_info(|| {
@@ -1603,7 +1532,7 @@ fn monitor_map(ui: &mut Ui, monitors: &[win::Monitor], current: Option<&str>) ->
         let detail = format!(
             "{pw}×{ph}{}",
             if m.primary {
-                " · основной"
+                i18n::s().library.monitor_primary
             } else {
                 ""
             }
@@ -1626,11 +1555,12 @@ fn monitor_map(ui: &mut Ui, monitors: &[win::Monitor], current: Option<&str>) ->
 /// and a picker.
 fn background_picker(ui: &mut Ui, background: &mut theme::CardBackground) {
     use theme::CardBackground as B;
+    let t = &i18n::s().library;
     ui.horizontal_wrapped(|ui| {
-        ui.radio_value(background, B::Theme, "По теме");
-        ui.radio_value(background, B::Taskbar, "Как панель задач");
+        ui.radio_value(background, B::Theme, t.bg_theme);
+        ui.radio_value(background, B::Taskbar, t.bg_taskbar);
         let custom = matches!(background, B::Custom(_));
-        if ui.radio(custom, "Свой цвет").clicked() && !custom {
+        if ui.radio(custom, t.bg_custom).clicked() && !custom {
             *background = B::Custom(theme::PAPER[0]);
         }
     });
@@ -1664,15 +1594,9 @@ fn background_picker(ui: &mut Ui, background: &mut theme::CardBackground) {
                 ui.add_space(6.0);
                 egui::widgets::color_picker::color_edit_button_srgb(ui, rgb);
             });
-            note(
-                ui,
-                "Цвет текста подбирается сам: тёмный на светлом фоне, светлый на тёмном.",
-            );
+            note(ui, t.bg_custom_note);
         }
-        B::Taskbar => note(
-            ui,
-            "Берётся из «Параметры → Персонализация → Цвета» и меняется вместе с Windows.",
-        ),
+        B::Taskbar => note(ui, t.bg_taskbar_note),
         B::Theme => {}
     }
 }
@@ -1683,7 +1607,7 @@ fn preset_tile(ui: &mut Ui, preset: &crate::card::Preset, on: bool) -> egui::Res
     use crate::card::Kind;
     let (rect, resp) = ui.allocate_exact_size(vec2(172.0, 112.0), Sense::click());
     resp.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, preset.name)
+        egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, preset.name())
     });
     let fill = match (on, resp.hovered()) {
         (true, _) => theme::highlight(40),
@@ -1783,19 +1707,19 @@ fn preset_tile(ui: &mut Ui, preset: &crate::card::Preset, on: bool) -> egui::Res
     ui.painter().text(
         pos2(rect.left() + 10.0, rect.bottom() - 34.0),
         Align2::LEFT_TOP,
-        preset.name,
+        preset.name(),
         theme::semibold(13.0),
         theme::text(),
     );
     ui.painter().text(
         pos2(rect.left() + 10.0, rect.bottom() - 17.0),
         Align2::LEFT_TOP,
-        preset.hint,
+        preset.hint(),
         FontId::proportional(10.5),
         theme::muted(),
     );
     resp.on_hover_cursor(CursorIcon::PointingHand)
-        .on_hover_text(preset.hint)
+        .on_hover_text(preset.hint())
 }
 
 /// One hotkey: its name, the combination as a button that records a new one,
@@ -1804,14 +1728,15 @@ fn hotkey_row(ui: &mut Ui, st: &mut LibraryState, action: Action) {
     let slot = action.index();
     let recording = st.recording == Some(action);
     let wanted = st.settings.hotkey_config[slot];
+    let t = &i18n::s().library;
     let text = if recording {
-        "Нажмите сочетание…".to_owned()
+        t.hotkey_press.to_owned()
     } else {
         match st.settings.hotkeys.get(action) {
             Binding::Bound(c) => c.to_string(),
-            Binding::Off => "выключено".to_owned(),
-            Binding::Taken(Some(c)) => format!("занято: {c}"),
-            Binding::Taken(None) => "нет свободного сочетания".to_owned(),
+            Binding::Off => t.hotkey_off.to_owned(),
+            Binding::Taken(Some(c)) => (t.hotkey_taken)(&c.to_string()),
+            Binding::Taken(None) => t.hotkey_none_free.to_owned(),
         }
     };
     // Without defaults (the layer) "off" and "default" are the same thing.
@@ -1843,12 +1768,12 @@ fn hotkey_row(ui: &mut Ui, st: &mut LibraryState, action: Action) {
                 st.hotkey_errors[slot] = None;
             }
         }
-        if !is_default && ui.small_button("Сбросить").on_hover_text("Вернуть стандартное сочетание").clicked() {
+        if !is_default && ui.small_button(t.hotkey_reset).on_hover_text(t.hotkey_reset_hint).clicked() {
             st.stop_recording();
             st.hotkey_errors[slot] = None;
             st.outbox.push(Request::SetHotkey(action, Wanted::Default));
         }
-        if !is_off && ui.small_button("Выключить").clicked() {
+        if !is_off && ui.small_button(t.hotkey_turn_off).clicked() {
             st.stop_recording();
             st.hotkey_errors[slot] = None;
             st.outbox.push(Request::SetHotkey(action, Wanted::Off));
@@ -1886,60 +1811,70 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
     }
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 6.0;
+        let t = &i18n::s().library;
 
         if st.welcome {
-            ui.label(
-                RichText::new("Ebb кладёт заметки на отдельный экран — под окнами, как обои. Выберите, где им лежать; остальное можно не трогать.")
-                    .size(13.5)
-                    .color(theme::dim()),
-            );
-            note(ui, "Настройки всегда открываются из меню значка Ebb в трее.");
+            ui.label(RichText::new(t.welcome_text).size(13.5).color(theme::dim()));
+            note(ui, t.welcome_note);
         }
 
-        section(ui, "Экран слоя");
+        section(ui, t.section_screen);
         if let Some(device) = monitor_map(ui, &st.monitors, st.settings.monitor_device.as_deref()) {
             st.settings.monitor_device = Some(device.clone());
             st.outbox.push(Request::SetMonitor(device));
         }
-        note(ui, "Кликните по монитору — слой переедет туда сразу.");
+        note(ui, t.screen_note);
 
-        section(ui, "Слой");
+        section(ui, t.section_layer);
         let mut above = !st.settings.pin_bottom;
-        if ui.checkbox(&mut above, "Показывать заметки поверх окон").changed() {
+        if ui.checkbox(&mut above, t.on_top).changed() {
             st.settings.pin_bottom = !above;
             st.outbox.push(Request::SetPinBottom(!above));
         }
-        note(ui, "Когда выключено, заметки лежат под окнами как обои. Включите, чтобы работать с ними прямо на экране.");
-        ui.label(RichText::new("Esc и повторный клик в трее").size(13.0).color(theme::dim()));
+        note(ui, t.on_top_note);
+        ui.label(RichText::new(t.esc_caption).size(13.0).color(theme::dim()));
         let mut hides = st.settings.dismiss_hides;
-        let a = ui.radio_value(&mut hides, false, "Убрать слой на фон");
-        let b = ui.radio_value(&mut hides, true, "Скрыть слой");
+        let a = ui.radio_value(&mut hides, false, t.esc_background);
+        let b = ui.radio_value(&mut hides, true, t.esc_hide);
         if (a.changed() || b.changed()) && hides != st.settings.dismiss_hides {
             st.settings.dismiss_hides = hides;
             st.outbox.push(Request::SetDismissHides(hides));
         }
-        ui.label(RichText::new("Свернуть слой к краю").size(13.0).color(theme::dim()));
+        ui.label(RichText::new(t.collapse_caption).size(13.0).color(theme::dim()));
         let mut top = st.settings.curtain_top;
-        let a = ui.radio_value(&mut top, true, "Сверху — чёлкой у края экрана");
-        let b = ui.radio_value(&mut top, false, "Снизу — плашкой над панелью задач");
+        let a = ui.radio_value(&mut top, true, t.collapse_top);
+        let b = ui.radio_value(&mut top, false, t.collapse_bottom);
         if (a.changed() || b.changed()) && top != st.settings.curtain_top {
             st.settings.curtain_top = top;
             st.outbox.push(Request::SetCurtainTop(top));
         }
-        note(ui, "Ручка на краю слоя сворачивает его, и рабочий стол под ним снова доступен; клик по свёрнутому слою возвращает его.");
+        note(ui, t.collapse_note);
 
-        section(ui, "Оформление");
+        section(ui, t.section_appearance);
         use crate::card::{IconSpot, Marker, PRESETS};
         let mut mode = st.settings.theme_mode;
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Тема").size(13.0).color(theme::dim()));
+            ui.label(RichText::new(t.theme).size(13.0).color(theme::dim()));
             for m in theme::ThemeMode::ALL {
                 ui.radio_value(&mut mode, m, m.label());
             }
         });
+        let mut language = st.settings.language;
+        ui.horizontal_wrapped(|ui| {
+            let s = &i18n::s().library;
+            ui.label(RichText::new(s.language).size(13.0).color(theme::dim()));
+            ui.radio_value(&mut language, None, s.language_system);
+            for l in i18n::Lang::ALL {
+                ui.radio_value(&mut language, Some(l), l.name());
+            }
+        });
+        if language != st.settings.language {
+            st.settings.language = language;
+            st.outbox.push(Request::SetLanguage(language));
+        }
 
         ui.add_space(4.0);
-        ui.label(RichText::new("Вид карточек").size(13.0).color(theme::dim()));
+        ui.label(RichText::new(t.card_looks).size(13.0).color(theme::dim()));
         let mut style = st.settings.card_style;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
@@ -1950,13 +1885,13 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
             }
         });
         if !PRESETS.iter().any(|p| p.style == style) {
-            note(ui, "Свой вариант: настроен вручную.");
+            note(ui, t.custom_style_note);
         }
 
-        egui::CollapsingHeader::new(RichText::new("Настроить вручную").size(13.0).color(theme::dim()))
+        egui::CollapsingHeader::new(RichText::new(t.customize).size(13.0).color(theme::dim()))
             .id_salt("card-style-manual")
             .show(ui, |ui| {
-                ui.label(RichText::new("Цвет типа на карточке").size(13.0).color(theme::dim()));
+                ui.label(RichText::new(t.marker_caption).size(13.0).color(theme::dim()));
                 ui.horizontal_wrapped(|ui| {
                     for m in Marker::ALL {
                         ui.radio_value(&mut style.marker, m, m.label());
@@ -1964,13 +1899,13 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
                 });
                 if style.marker != Marker::None {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Интенсивность").size(13.0).color(theme::dim()));
+                        ui.label(RichText::new(t.intensity).size(13.0).color(theme::dim()));
                         ui.add(egui::Slider::new(&mut style.strength, 5..=100).suffix(" %"));
                     });
                 }
                 if matches!(style.marker, Marker::StripTop | Marker::StripLeft) {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Толщина полосы").size(13.0).color(theme::dim()));
+                        ui.label(RichText::new(t.strip_width).size(13.0).color(theme::dim()));
                         ui.add(egui::Slider::new(&mut style.strip, 2..=10).suffix(" pt"));
                     });
                 }
@@ -1980,10 +1915,10 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
                         ui.add(widget);
                     });
                 };
-                slider(ui, "Скругление углов", egui::Slider::new(&mut style.radius, 0..=20).suffix(" pt"));
-                slider(ui, "Тень", egui::Slider::new(&mut style.shadow, 0..=100).suffix(" %"));
-                slider(ui, "Непрозрачность фона", egui::Slider::new(&mut style.opacity, 30..=100).suffix(" %"));
-                ui.label(RichText::new("Шрифт текста").size(13.0).color(theme::dim()));
+                slider(ui, t.corner_radius, egui::Slider::new(&mut style.radius, 0..=20).suffix(" pt"));
+                slider(ui, t.shadow, egui::Slider::new(&mut style.shadow, 0..=100).suffix(" %"));
+                slider(ui, t.opacity, egui::Slider::new(&mut style.opacity, 30..=100).suffix(" %"));
+                ui.label(RichText::new(t.text_font).size(13.0).color(theme::dim()));
                 ui.horizontal_wrapped(|ui| {
                     for f in theme::CardFont::ALL {
                         ui.radio_value(&mut style.font, f, f.label());
@@ -1991,17 +1926,17 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
                 });
                 slider(
                     ui,
-                    "Размер текста",
+                    t.text_size,
                     egui::Slider::new(&mut style.text, 22..=40).custom_formatter(|v, _| format!("{:.1} pt", v / 2.0)),
                 );
-                ui.label(RichText::new("Метка типа").size(13.0).color(theme::dim()));
+                ui.label(RichText::new(t.icon_caption).size(13.0).color(theme::dim()));
                 ui.horizontal_wrapped(|ui| {
                     for i in IconSpot::ALL {
                         ui.radio_value(&mut style.icon, i, i.label());
                     }
                 });
-                ui.checkbox(&mut style.bold_icon, "Крупный значок");
-                ui.label(RichText::new("Фон карточек").size(13.0).color(theme::dim()));
+                ui.checkbox(&mut style.bold_icon, t.big_icon);
+                ui.label(RichText::new(t.card_background).size(13.0).color(theme::dim()));
                 background_picker(ui, &mut style.background);
             });
 
@@ -2013,36 +1948,37 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
             st.settings.theme_mode = mode;
             st.outbox.push(Request::SetTheme(mode));
         }
-        note(ui, "Слой меняется сразу. F4 на слое перебирает варианты цвета. Клик по метке типа на карточке меняет тип и цвет.");
+        note(ui, t.appearance_note);
 
-        section(ui, "Карточки");
+        section(ui, t.section_cards);
         let mut snap = st.settings.snap;
-        if ui.checkbox(&mut snap, "Магнит: прилипать к краям соседних карточек").changed() {
+        if ui.checkbox(&mut snap, t.snap).changed() {
             st.settings.snap = snap;
             st.outbox.push(Request::SetSnap(snap));
         }
-        note(ui, "Удерживайте Alt при перетаскивании, чтобы поставить карточку свободно.");
+        note(ui, t.snap_note);
 
-        section(ui, "Private");
+        section(ui, t.section_private);
         let mut hide = st.settings.hide_from_capture;
-        if ui.checkbox(&mut hide, "Скрывать от записи экрана").changed() {
+        if ui.checkbox(&mut hide, t.hide_from_capture).changed() {
             st.settings.hide_from_capture = hide;
             st.outbox.push(Request::SetHideFromCapture(hide));
         }
-        note(ui, "Пока секрет показан, слой не попадает в скриншоты, запись и демонстрацию экрана.");
+        note(ui, t.hide_from_capture_note);
 
-        section(ui, "Обзор");
+        section(ui, t.section_review);
+        let weekdays = i18n::s().common.weekdays;
         let mut changed = ui
-            .checkbox(&mut st.review_on, "Приглашать к обзору раз в неделю")
+            .checkbox(&mut st.review_on, t.review_invite)
             .changed();
         if st.review_on {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Когда").size(13.0).color(theme::dim()));
+                ui.label(RichText::new(t.review_when).size(13.0).color(theme::dim()));
                 egui::ComboBox::from_id_salt("review-day")
-                    .selected_text(WEEKDAYS[usize::from(st.review_day)])
+                    .selected_text(weekdays[usize::from(st.review_day)])
                     .width(130.0)
                     .show_ui(ui, |ui| {
-                        for (i, name) in WEEKDAYS.iter().enumerate() {
+                        for (i, name) in weekdays.iter().enumerate() {
                             changed |= ui.selectable_value(&mut st.review_day, i as u8, *name).changed();
                         }
                     });
@@ -2058,7 +1994,7 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
                     });
             });
         }
-        note(ui, "На слое появится приглашение разобрать заметки. Через три дня оно уходит само; если разбирать почти нечего, не появляется.");
+        note(ui, t.review_invite_note);
         if changed && let Some(store) = st.store.as_ref() {
             let _ = store.set_setting(review::SET_INVITE, if st.review_on { "1" } else { "0" });
             let _ = store.set_setting(review::SET_DAY, &st.review_day.to_string());
@@ -2066,9 +2002,9 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
             st.outbox.push(Request::ReviewSchedule);
         }
 
-        section(ui, "Запуск");
+        section(ui, t.section_startup);
         let mut on_launch = st.settings.settings_on_launch;
-        if ui.checkbox(&mut on_launch, "Открывать это окно при запуске Ebb из ярлыка").changed() {
+        if ui.checkbox(&mut on_launch, t.open_on_launch).changed() {
             st.settings.settings_on_launch = on_launch;
             st.outbox.push(Request::SetSettingsOnLaunch(on_launch));
         }
@@ -2082,39 +2018,39 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
             let (mut on, detail, stale) = match &*state {
                 AutostartUi::Known(Ok(autostart::Status::On { current_exe, command })) => (
                     true,
-                    (!current_exe).then(|| format!("Запускается другая копия: {command}")),
+                    (!current_exe).then(|| (t.autostart_other_copy)(command)),
                     !current_exe,
                 ),
-                AutostartUi::Known(Err(e)) => (false, Some(format!("Не удалось узнать: {e}")), false),
+                AutostartUi::Known(Err(e)) => (false, Some((t.autostart_unknown)(e)), false),
                 _ => (false, None, false),
             };
             let busy = matches!(*state, AutostartUi::Busy | AutostartUi::Unknown);
             drop(state);
-            if ui.add_enabled(!busy, egui::Checkbox::new(&mut on, "Запускать при входе в Windows")).changed() {
+            if ui.add_enabled(!busy, egui::Checkbox::new(&mut on, t.autostart)).changed() {
                 autostart_job(&st.autostart, ui.ctx(), Some(on));
             }
-            note(ui, "Через Планировщик заданий: стартует сразу после входа, без задержки автозагрузки.");
+            note(ui, t.autostart_note);
             if let Some(detail) = detail {
                 ui.horizontal_wrapped(|ui| {
                     note(ui, &detail);
                     // The exe moved (or an old install is left): re-point the task at this one.
-                    if stale && ui.add_enabled(!busy, egui::Button::new("Исправить")).on_hover_text("Перенастроить задание на эту копию").clicked() {
+                    if stale && ui.add_enabled(!busy, egui::Button::new(t.autostart_fix)).on_hover_text(t.autostart_fix_hint).clicked() {
                         autostart_job(&st.autostart, ui.ctx(), Some(true));
                     }
                 });
             }
         }
 
-        section(ui, "Внешний вид");
-        ui.label(RichText::new("Фон").size(13.0).color(theme::dim()));
+        section(ui, t.section_backdrop);
+        ui.label(RichText::new(t.backdrop_caption).size(13.0).color(theme::dim()));
         for backdrop in Backdrop::ALL {
-            if ui.radio(st.settings.backdrop == backdrop, backdrop.title()).clicked() && st.settings.backdrop != backdrop {
+            if ui.radio(st.settings.backdrop == backdrop, i18n::name_of(&Backdrop::ALL, backdrop, &i18n::s().common.backdrops)).clicked() && st.settings.backdrop != backdrop {
                 st.settings.backdrop = backdrop;
                 st.outbox.push(Request::SetBackdrop(backdrop));
             }
         }
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Затемнение").size(13.0).color(theme::dim()));
+            ui.label(RichText::new(t.dimming).size(13.0).color(theme::dim()));
             let mut tint = st.settings.tint;
             if ui.add(egui::Slider::new(&mut tint, 0..=220).show_value(false)).changed() {
                 st.settings.tint = tint;
@@ -2122,18 +2058,18 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
             }
         });
 
-        section(ui, "Горячие клавиши");
+        section(ui, t.section_hotkeys);
         for action in Action::ALL {
             hotkey_row(ui, st, action);
         }
-        note(ui, "Нажмите на сочетание и введите новое: нужен Win или два из Ctrl, Alt, Shift; Esc отменяет. Пока сочетание не выбрано, берётся первое свободное из стандартных.");
+        note(ui, t.hotkeys_note);
 
-        section(ui, "Импорт");
+        section(ui, t.section_import);
         ui.horizontal(|ui| {
-            if ui.button("Импорт из Sticky Notes…").clicked() {
+            if ui.button(t.import_sticky).clicked() {
                 st.outbox.push(Request::ImportSticky);
             }
-            if st.import_left > 0 && ui.button(format!("Разобрать импорт ({})", st.import_left)).clicked() {
+            if st.import_left > 0 && ui.button((t.sort_out_import)(st.import_left)).clicked() {
                 // From the settings window: grow into the full library.
                 st.settings_only = false;
                 st.welcome = false;
@@ -2141,15 +2077,15 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
                 ui.ctx().send_viewport_cmd(ViewportCommand::InnerSize(SIZE));
             }
         });
-        note(ui, "Открытые заметки встанут на слой как на экране, остальные уйдут в архив. Повторный импорт заменит прошлый, изменённые тобой карточки останутся.");
+        note(ui, t.import_note);
 
-        section(ui, "Данные");
+        section(ui, t.section_data);
         let (layer, archived, trashed) = st.counts;
-        note(ui, &format!("На слое {layer}, в архиве {archived}, в корзине {trashed}."));
+        note(ui, &(t.data_counts)(layer, archived, trashed));
         let path = crate::store::db_path();
         ui.horizontal(|ui| {
             note(ui, &path.display().to_string());
-            if ui.small_button("Открыть папку").clicked() {
+            if ui.small_button(t.open_folder).clicked() {
                 if let Some(dir) = path.parent() {
                     let _ = std::process::Command::new("explorer.exe").arg(dir).spawn();
                 }
@@ -2163,26 +2099,26 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
         };
         ui.label(
             RichText::new(match &last {
-                Some(date) => format!("Последняя копия: {date}"),
-                None => "Последняя копия: ещё не делалась".to_owned(),
+                Some(date) => (t.last_backup)(date),
+                None => t.no_backup_yet.to_owned(),
             })
             .size(13.0)
             .color(theme::dim()),
         );
-        note(ui, "Раз в неделю, хранятся 4 последние. Значения Private в копии читаются только под этим профилем Windows.");
+        note(ui, t.backup_note);
         ui.horizontal(|ui| {
-            if ui.add_enabled(!busy, egui::Button::new("Сделать копию сейчас")).clicked() {
+            if ui.add_enabled(!busy, egui::Button::new(t.backup_now)).clicked() {
                 backup_job(&st.backup, ui.ctx());
             }
-            if ui.button("Показать копии").clicked() {
+            if ui.button(t.show_backups).clicked() {
                 let dir = backup_dir();
                 let _ = std::fs::create_dir_all(&dir);
                 let _ = std::process::Command::new("explorer.exe").arg(dir).spawn();
             }
             match &result {
-                Some(Ok(())) => note(ui, "Копия сохранена"),
-                Some(Err(e)) => note(ui, &format!("Не удалось: {e}")),
-                None if busy => note(ui, "Копирую…"),
+                Some(Ok(())) => note(ui, t.backup_saved),
+                Some(Err(e)) => note(ui, &(t.backup_failed)(e)),
+                None if busy => note(ui, t.backup_busy),
                 None => {}
             }
         });

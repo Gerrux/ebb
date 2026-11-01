@@ -39,13 +39,7 @@ impl Action {
     }
 
     pub fn label(self) -> &'static str {
-        match self {
-            Action::Capture => "Записать мысль",
-            Action::Search => "Поиск",
-            Action::Library => "Архив и корзина",
-            Action::Layer => "Показать / скрыть слой",
-            Action::Palette => "Команды",
-        }
+        crate::i18n::s().common.hotkey_actions[self.index()]
     }
 
     /// Combinations tried in order when the action is on its default. The first

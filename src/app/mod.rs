@@ -29,6 +29,7 @@ use std::sync::atomic::Ordering;
 use crate::bar::{self, BarState, Mode, Outbox, Press};
 use crate::card::{self, Card, MIN_SIZE, Placement};
 use crate::hotkey::{self, Action, Wanted};
+use crate::i18n;
 use crate::import_ui::StickyImport;
 use crate::library::{self, LibraryState, Request, Tab};
 use crate::resurface;
@@ -66,6 +67,8 @@ const SET_SNAP: &str = "cards.snap";
 const SET_HIDE_FROM_CAPTURE: &str = "private.hide_from_capture";
 const SET_CARD_STYLE: &str = "cards.style";
 const SET_THEME: &str = "app.theme";
+/// `ru`, `en`; absent: the Windows UI language.
+const SET_LANGUAGE: &str = "app.language";
 
 pub struct EbbApp {
     store: Store,
@@ -106,6 +109,8 @@ pub struct EbbApp {
     hide_from_capture: bool,
     card_style: card::CardStyle,
     theme_mode: theme::ThemeMode,
+    /// `None`: as in Windows.
+    language: Option<i18n::Lang>,
     /// Started by the user (not at logon): bring the layer up, maybe open settings.
     manual_start: bool,
     library: Arc<Mutex<LibraryState>>,
@@ -172,6 +177,8 @@ impl EbbApp {
         autostarted: bool,
     ) -> Self {
         theme::install(&cc.egui_ctx);
+        let language = store.setting(SET_LANGUAGE).and_then(|v| i18n::Lang::from_key(&v));
+        i18n::set(i18n::resolve(language));
         let card_style = store
             .setting(SET_CARD_STYLE)
             .map_or_else(card::CardStyle::default, |v| {
@@ -281,6 +288,7 @@ impl EbbApp {
             hide_from_capture,
             card_style,
             theme_mode,
+            language,
             manual_start,
             library: Arc::default(),
             editing: None,
@@ -394,7 +402,7 @@ impl EbbApp {
         }
         let pos = card::free_slot(&self.cards, area);
         let inserted = self.store.insert(&parsed, pos);
-        match self.report(inserted, "сохранить заметку, текст остался в окне захвата")
+        match self.report(inserted, i18n::s().layer.do_save_capture)
         {
             Some(c) => {
                 self.tag_counts = None;
@@ -412,7 +420,7 @@ impl EbbApp {
             Ok(v) => Some(v),
             Err(e) => {
                 eprintln!("{what}: {e}");
-                self.toast = Some(Toast::new(format!("Не удалось {what}"), None));
+                self.toast = Some(Toast::new((i18n::s().common.failed)(what), None));
                 None
             }
         }
@@ -421,13 +429,13 @@ impl EbbApp {
     /// Whether the card's change reached the database.
     fn save(&mut self, idx: usize) -> bool {
         let saved = self.store.save(&self.cards[idx]);
-        self.report(saved, "сохранить изменения").is_some()
+        self.report(saved, i18n::s().layer.do_save_changes).is_some()
     }
 
     /// `save` for a card that isn't (or isn't only) on the layer.
     fn save_card(&mut self, card: &Card) -> bool {
         let saved = self.store.save(card);
-        self.report(saved, "сохранить изменения").is_some()
+        self.report(saved, i18n::s().layer.do_save_changes).is_some()
     }
 
     fn layer_settings(&self) -> library::LayerSettings {
@@ -448,6 +456,7 @@ impl EbbApp {
             hide_from_capture: self.hide_from_capture,
             card_style: self.card_style,
             theme_mode: self.theme_mode,
+            language: self.language,
         }
     }
 
@@ -529,7 +538,7 @@ impl EbbApp {
             });
             if let Some(other) = holder {
                 let mut lib = self.library.lock().unwrap();
-                lib.hotkey_errors[action.index()] = Some(format!("Уже занято действием «{}»", other.label()));
+                lib.hotkey_errors[action.index()] = Some((i18n::s().layer.hotkey_taken_by)(other.label()));
                 ctx.request_repaint_of(library::viewport_id());
                 return;
             }
@@ -549,7 +558,7 @@ impl EbbApp {
             self.hotkey_config[action.index()] = wanted;
         }
         let mut lib = self.library.lock().unwrap();
-        lib.hotkey_errors[action.index()] = (!ok).then(|| "Занято другой программой".to_owned());
+        lib.hotkey_errors[action.index()] = (!ok).then(|| i18n::s().layer.hotkey_taken_other.to_owned());
         lib.settings.hotkeys = self.shell.hotkeys().unwrap_or_default();
         lib.settings.hotkey_config = self.hotkey_config;
         ctx.request_repaint_of(library::viewport_id());
@@ -614,6 +623,18 @@ impl EbbApp {
                 self.theme_mode = mode;
                 let _ = self.store.set_setting(SET_THEME, mode.key());
                 self.refresh_theme(ctx);
+            }
+            Request::SetLanguage(language) => {
+                self.language = language;
+                let _ = match language {
+                    Some(l) => self.store.set_setting(SET_LANGUAGE, l.key()),
+                    None => self.store.delete_setting(SET_LANGUAGE),
+                };
+                i18n::set(i18n::resolve(language));
+                // The picker is in the library; it and the bar draw their own frames.
+                ctx.request_repaint();
+                ctx.request_repaint_of(library::viewport_id());
+                ctx.request_repaint_of(bar::viewport_id());
             }
             Request::ImportSticky => {
                 self.set_layer_visible(ctx, true);
@@ -1035,7 +1056,7 @@ impl eframe::App for EbbApp {
                 },
             );
             self.toast = Some(Toast::new(
-                format!("Вид карточек: {} (F4 — дальше)", next.label()),
+                (i18n::s().layer.card_style_toast)(next.label()),
                 None,
             ));
         }

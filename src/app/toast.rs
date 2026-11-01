@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use egui::{Align2, CornerRadius, CursorIcon, FontId, Id, Rect, Sense, Ui, pos2, vec2};
 
 use crate::card::{self, Kind};
+use crate::i18n;
 use crate::rich_text;
 use crate::store::ReviewSnapshot;
 use crate::theme;
@@ -20,7 +21,7 @@ pub(super) enum Undo {
     Restore(i64),
     /// Back to the kind a card had.
     Kind(i64, Kind),
-    /// Back on the layer as it was before "Позже".
+    /// Back on the layer as it was before "Later".
     Snooze(ReviewSnapshot),
     /// A card's title and text as they were before a tag change.
     Text(i64, String, String),
@@ -72,10 +73,10 @@ impl EbbApp {
             if let Some(action) = toast.undo.clone() {
                 let button = Rect::from_min_size(pos2(rect.right() - undo_w - 8.0, rect.top() + 8.0), vec2(undo_w, 28.0));
                 let resp = ui.interact(button, Id::new("toast-undo"), Sense::click());
-                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Отменить"));
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, i18n::s().layer.undo));
                 let fill = if resp.hovered() { theme::highlight(90) } else { theme::chip_fill() };
                 ui.painter().rect_filled(button, CornerRadius::same(8), fill);
-                ui.painter().text(button.center(), Align2::CENTER_CENTER, "Отменить", FontId::proportional(13.5), theme::text());
+                ui.painter().text(button.center(), Align2::CENTER_CENTER, i18n::s().layer.undo, FontId::proportional(13.5), theme::text());
                 if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                     undo = Some(action);
                 }
@@ -99,7 +100,7 @@ impl EbbApp {
                     None => Ok(()),
                 },
             };
-            self.report(undone, "отменить");
+            self.report(undone, i18n::s().layer.do_undo);
             self.reload_cards();
             self.bar.lock().unwrap().invalidate();
             self.library.lock().unwrap().invalidate();

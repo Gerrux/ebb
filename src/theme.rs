@@ -32,11 +32,7 @@ impl ThemeMode {
     }
 
     pub fn label(self) -> &'static str {
-        match self {
-            ThemeMode::System => "Как в Windows",
-            ThemeMode::Dark => "Тёмная",
-            ThemeMode::Light => "Светлая",
-        }
+        crate::i18n::name_of(&ThemeMode::ALL, self, &crate::i18n::s().common.theme_modes)
     }
 }
 
@@ -353,7 +349,7 @@ impl CardFont {
             CardFont::System => "Segoe UI",
             CardFont::Calibri => "Calibri",
             CardFont::Georgia => "Georgia",
-            CardFont::SegoePrint => "Segoe Print (рукописный)",
+            CardFont::SegoePrint => crate::i18n::s().common.font_segoe_print,
             CardFont::Consolas => "Consolas",
             CardFont::Bahnschrift => "Bahnschrift",
         }

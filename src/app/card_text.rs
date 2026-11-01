@@ -10,6 +10,7 @@ use egui::{
 };
 
 use crate::card::{self, Card, Kind};
+use crate::i18n;
 use crate::rich_text;
 use crate::theme;
 use crate::win;
@@ -45,11 +46,10 @@ pub(super) enum BodyHit {
 /// Room at the right of a Reference's text for the copy buttons of its lines.
 const COPY_GUTTER: f32 = 26.0;
 
-/// The date of a reminder, short: "29 сен".
+/// The date of a reminder, short: "29 сен" / "Sep 29".
 pub(super) fn short_date(unix: i64) -> String {
-    const MONTHS: [&str; 12] = ["янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
     let (_, m, d) = crate::search::civil_from_days((unix + crate::search::local_offset_secs()).div_euclid(86_400));
-    format!("{d} {}", MONTHS[(m - 1).clamp(0, 11) as usize])
+    (i18n::s().common.short_date)(m as u32, d as u32)
 }
 
 /// Text of a card, or its editor. `details`: how far the hover details are shown.
@@ -387,7 +387,7 @@ pub(super) fn card_body(
         let button = Rect::from_center_size(pos2(clip.right() - COPY_GUTTER / 2.0, cursor.center().y), vec2(22.0, 20.0));
         let copy = ui.interact(button, click_id.with(("copy-line", i)), Sense::click());
         let copy_id = copy.id;
-        copy.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Копировать строку: {line}")));
+        copy.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, (i18n::s().layer.copy_line_aria)(line)));
         let copied = ui.data(|d| d.get_temp::<Instant>(copy.id)).filter(|t| t.elapsed() < COPIED_FOR);
         if let Some(t) = copied {
             ui.ctx().request_repaint_after(COPIED_FOR.saturating_sub(t.elapsed()));
@@ -404,7 +404,7 @@ pub(super) fn card_body(
             let (glyph, c) = if copied.is_some() { ("\u{E73E}", theme::SUCCESS) } else { ("\u{E8C8}", theme::card_dim()) };
             p.text(button.center(), Align2::CENTER_CENTER, glyph, theme::icons(11.0), c);
         }
-        if copy.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Копировать строку").clicked() {
+        if copy.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(i18n::s().layer.copy_line).clicked() {
             ui.ctx().copy_text(line.clone());
             ui.data_mut(|d| d.insert_temp(copy_id, Instant::now()));
             hit = Some(BodyHit::Copied);
@@ -496,21 +496,22 @@ fn rich_format(font: FontId, color: Color32, style: rich_text::Style) -> egui::T
 /// typing at the cursor gets it.
 pub(super) fn format_toolbar(ui: &mut Ui, editor_id: Id, buf: &mut String) {
     use rich_text::Action as A;
-    const BUTTONS: [(&str, &str, A); 7] = [
-        ("\u{E8DD}", "Жирный (Ctrl+B)", A::Bold),
-        ("\u{E8DB}", "Курсив (Ctrl+I)", A::Italic),
-        ("\u{E8DC}", "Подчёркивание (Ctrl+U)", A::Underline),
-        ("\u{EDE0}", "Зачёркивание (Ctrl+Shift+S)", A::Strikethrough),
-        ("\u{E7E6}", "Выделение маркером (Ctrl+Shift+H)", A::Highlight),
-        ("\u{E943}", "Моноширинный код (Ctrl+Shift+K)", A::Code),
-        ("\u{E75C}", "Снять форматирование", A::Clear),
+    let tips = &i18n::s().layer.format_tips;
+    let buttons: [(&str, &str, A); 7] = [
+        ("\u{E8DD}", tips[0], A::Bold),
+        ("\u{E8DB}", tips[1], A::Italic),
+        ("\u{E8DC}", tips[2], A::Underline),
+        ("\u{EDE0}", tips[3], A::Strikethrough),
+        ("\u{E7E6}", tips[4], A::Highlight),
+        ("\u{E943}", tips[5], A::Code),
+        ("\u{E75C}", tips[6], A::Clear),
     ];
     let (plain, mut styles) = rich_text::parse(buf);
     let (selection, typing) = format_state(ui, editor_id);
     let at_cursor = typing.unwrap_or_else(|| rich_text::style_at(&styles, selection.start));
     ui.spacing_mut().item_spacing.x = 1.0;
     let mut clicked = None;
-    for (glyph, tip, action) in BUTTONS {
+    for (glyph, tip, action) in buttons {
         let active = action != A::Clear
             && if selection.is_empty() { at_cursor.has(action) } else { rich_text::all_have(&styles, selection.clone(), action) };
         let (rect, resp) = ui.allocate_exact_size(vec2(24.0, 22.0), Sense::click());
@@ -669,7 +670,7 @@ fn private_editor(ui: &mut Ui, editor_id: Id, click_id: Id, buf: &mut String, ba
             .id(label_id)
             .font(theme::card_bold(base + 0.5))
             .text_color(theme::card_text())
-            .hint_text(hint("Метка — видна на карточке"))
+            .hint_text(hint(i18n::s().layer.private_label_hint))
             .frame(egui::Frame::NONE)
             .desired_width(f32::INFINITY),
     );
@@ -679,7 +680,7 @@ fn private_editor(ui: &mut Ui, editor_id: Id, click_id: Id, buf: &mut String, ba
             .id(secret_id)
             .font(theme::card_font(base))
             .text_color(theme::card_text())
-            .hint_text(hint("Секрет — хранится зашифрованным"))
+            .hint_text(hint(i18n::s().layer.private_secret_hint))
             .frame(egui::Frame::NONE)
             .desired_width(f32::INFINITY)
             .desired_rows(3),

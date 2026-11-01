@@ -39,9 +39,7 @@ fn user_version(conn: &Connection) -> rusqlite::Result<i64> {
 fn too_new(version: i64) -> rusqlite::Error {
     rusqlite::Error::SqliteFailure(
         rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
-        Some(format!(
-            "база заметок создана более новой версией Ebb (схема {version}, эта версия знает до {LATEST}). Обнови Ebb."
-        )),
+        Some((crate::i18n::s().layer.db_too_new)(version, LATEST)),
     )
 }
 
