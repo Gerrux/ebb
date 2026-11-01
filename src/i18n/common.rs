@@ -39,6 +39,8 @@ pub struct Common {
     pub short_date: fn(u32, u32) -> String,
     /// An action that failed, from its verb phrase: "Не удалось {what}".
     pub failed: fn(&str) -> String,
+    /// Shown when a window can't open its own connection to the database.
+    pub store_failed: &'static str,
 }
 
 pub(crate) fn ru_days(n: i64) -> &'static str {
@@ -118,6 +120,7 @@ pub const RU: Common = Common {
         format!("{d} {}", MONTHS[(m.clamp(1, 12) - 1) as usize])
     },
     failed: |what| format!("Не удалось {what}"),
+    store_failed: "База заметок недоступна",
 };
 
 pub const EN: Common = Common {
@@ -181,6 +184,7 @@ pub const EN: Common = Common {
         format!("{} {d}", MONTHS[(m.clamp(1, 12) - 1) as usize])
     },
     failed: |what| format!("Couldn't {what}"),
+    store_failed: "The notes database is unavailable",
 };
 
 #[cfg(test)]

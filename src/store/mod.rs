@@ -216,9 +216,6 @@ fn now() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-/// Shown when a window can't open its own connection to the database.
-pub const STORE_FAILED: &str = "База заметок недоступна";
-
 /// The database every connection opens: `%LOCALAPPDATA%\Ebb\ebb.db`, or the
 /// former name's database while it couldn't be moved yet (see
 /// `migrate_legacy_data`), so an empty new one never shadows the user's notes.

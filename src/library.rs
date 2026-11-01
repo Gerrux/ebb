@@ -25,7 +25,7 @@ use crate::search;
 use crate::shell::{self, Binding, Hotkeys};
 use crate::sticky::ImportGroup;
 use crate::store::{
-    Hit, ImportAction, ImportItem, ImportSnapshot, ReviewAction, ReviewSnapshot, STORE_FAILED,
+    Hit, ImportAction, ImportItem, ImportSnapshot, ReviewAction, ReviewSnapshot,
     Scope, Store, TRASH_DAYS, backup_dir, latest_backup,
 };
 use crate::theme;
@@ -615,7 +615,7 @@ fn refresh(st: &mut LibraryState) {
         st.store = Store::open().ok();
     }
     let Some(store) = st.store.as_ref() else {
-        st.notice = Some((STORE_FAILED.into(), Instant::now()));
+        st.notice = Some((i18n::s().common.store_failed.into(), Instant::now()));
         return;
     };
     let now = std::time::SystemTime::now()
@@ -877,7 +877,7 @@ fn ensure_import(st: &mut LibraryState) {
         st.store = Store::open().ok();
     }
     let Some(store) = st.store.as_ref() else {
-        st.notice = Some((STORE_FAILED.into(), Instant::now()));
+        st.notice = Some((i18n::s().common.store_failed.into(), Instant::now()));
         return;
     };
     let started = Instant::now();
@@ -1102,7 +1102,7 @@ fn act(st: &mut LibraryState, primary: bool) {
         return;
     };
     let Some(store) = st.store.as_ref() else {
-        st.notice = Some((STORE_FAILED.into(), Instant::now()));
+        st.notice = Some((i18n::s().common.store_failed.into(), Instant::now()));
         return;
     };
     match (st.tab, primary) {

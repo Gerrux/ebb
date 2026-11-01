@@ -22,7 +22,7 @@ use egui::{
 use crate::card::{Kind, Placement, parse_capture_with};
 use crate::commands::{self, Arg, BarTarget, CommandId, Ctx, Match};
 use crate::search::{self, MARK_END, MARK_START};
-use crate::store::{Hit, STORE_FAILED, Store};
+use crate::store::{Hit, Store};
 use crate::theme;
 use crate::win;
 
@@ -357,7 +357,7 @@ fn open_store(st: &mut BarState) {
     if st.store.is_none() {
         st.store = Store::open().ok();
         if st.store.is_none() {
-            st.notice = Some((STORE_FAILED.into(), Instant::now()));
+            st.notice = Some((crate::i18n::s().common.store_failed.into(), Instant::now()));
         }
     }
 }
@@ -390,7 +390,7 @@ fn run_search(st: &mut BarState) {
 fn perform(ui: &Ui, st: &mut BarState, kind: ActionKind) -> bool {
     let Some(hit) = st.hits.get(st.selected).cloned() else { return false };
     let Some(store) = st.store.as_ref() else {
-        st.notice = Some((STORE_FAILED.into(), Instant::now()));
+        st.notice = Some((crate::i18n::s().common.store_failed.into(), Instant::now()));
         return false;
     };
     match kind {
