@@ -136,8 +136,8 @@ impl Binding {
     pub fn short(self) -> String {
         match self {
             Binding::Bound(c) => c.to_string(),
-            Binding::Off => "хоткей выключен".to_owned(),
-            Binding::Taken(_) => "хоткей занят".to_owned(),
+            Binding::Off => crate::i18n::s().bar.hotkey_off.to_owned(),
+            Binding::Taken(_) => crate::i18n::s().bar.hotkey_taken.to_owned(),
         }
     }
 }
@@ -577,20 +577,22 @@ unsafe fn tray_menu(hwnd: HWND, pt: POINT) {
     let autostart_on = matches!(autostart::status(), Ok(autostart::Status::On { .. }));
     let check = |on: bool| if on { MF_STRING | MF_CHECKED } else { MF_STRING };
 
+    // Built on the tray thread: the table is read-only and the language an atomic.
+    let t = &crate::i18n::s().bar;
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let items: [(_, usize, Option<String>); 11] = [
-            (MF_STRING, LAYER, Some(with_hotkey(if visible { "Скрыть слой" } else { "Показать слой" }, keys.bound(Action::Layer)))),
-            (MF_STRING, CAPTURE, Some(with_hotkey("Записать мысль", keys.bound(Action::Capture)))),
-            (MF_STRING, SEARCH, Some(with_hotkey("Найти", keys.bound(Action::Search)))),
-            (MF_STRING, LIBRARY, Some(with_hotkey("Архив и корзина…", keys.bound(Action::Library)))),
+            (MF_STRING, LAYER, Some(with_hotkey(if visible { t.hide_layer } else { t.show_layer }, keys.bound(Action::Layer)))),
+            (MF_STRING, CAPTURE, Some(with_hotkey(t.tray_capture, keys.bound(Action::Capture)))),
+            (MF_STRING, SEARCH, Some(with_hotkey(t.tray_search, keys.bound(Action::Search)))),
+            (MF_STRING, LIBRARY, Some(with_hotkey(t.tray_library, keys.bound(Action::Library)))),
             (MF_SEPARATOR, 0, None),
-            (check(bottom), BOTTOM, Some("Слой под окнами".into())),
-            (check(autostart_on), AUTOSTART, Some("Запускать при входе в Windows".into())),
-            (MF_STRING, IMPORT, Some("Импорт из Sticky Notes…".into())),
-            (MF_STRING, SETTINGS, Some("Настройки…".into())),
+            (check(bottom), BOTTOM, Some(t.tray_bottom.into())),
+            (check(autostart_on), AUTOSTART, Some(t.tray_autostart.into())),
+            (MF_STRING, IMPORT, Some(t.tray_import.into())),
+            (MF_STRING, SETTINGS, Some(t.tray_settings.into())),
             (MF_SEPARATOR, 0, None),
-            (MF_STRING, EXIT, Some("Выход".into())),
+            (MF_STRING, EXIT, Some(t.tray_exit.into())),
         ];
         for (flags, id, text) in items {
             let text = text.map(|t| wide(&t));

@@ -8,6 +8,8 @@
 //! a word, a whole-word match beats a prefix. The registry is a few dozen
 //! entries, so every keystroke may scan all of it.
 
+use crate::i18n::bar::Bar;
+
 /// How many recently used commands lead the list for an empty query.
 pub const RECENT_MAX: usize = 5;
 
@@ -73,14 +75,24 @@ impl CommandId {
             CommandId::NewNote => BarTarget::Capture,
             CommandId::Search => BarTarget::Search(""),
             // Type filters are plain words in a query (see `search`).
-            CommandId::ShowIdeas => BarTarget::Search("идеи "),
-            CommandId::ShowPrompts => BarTarget::Search("промпты "),
-            CommandId::ShowGoals => BarTarget::Search("цели "),
-            CommandId::ShowReminders => BarTarget::Search("напоминания "),
-            CommandId::ShowLinks => BarTarget::Search("ссылки "),
+            // The words are in the current language; the parser reads both.
+            CommandId::ShowIdeas => BarTarget::Search(crate::i18n::s().bar.filter_words[0]),
+            CommandId::ShowPrompts => BarTarget::Search(crate::i18n::s().bar.filter_words[1]),
+            CommandId::ShowGoals => BarTarget::Search(crate::i18n::s().bar.filter_words[2]),
+            CommandId::ShowReminders => BarTarget::Search(crate::i18n::s().bar.filter_words[3]),
+            CommandId::ShowLinks => BarTarget::Search(crate::i18n::s().bar.filter_words[4]),
             _ => return None,
         })
     }
+}
+
+/// The command's name without the current state, in the current language.
+pub fn base_title(id: CommandId) -> &'static str {
+    base_title_in(&crate::i18n::s().bar, id)
+}
+
+fn base_title_in(bar: &Bar, id: CommandId) -> &'static str {
+    bar.command_titles[CommandId::ALL.iter().position(|a| *a == id).unwrap_or(0)]
 }
 
 /// A mode of the bar a command can open, with the search text it starts with.
@@ -95,13 +107,26 @@ pub enum BarTarget {
 pub enum Arg {
     None,
     /// A whole number in `min..=max`; `hint` tells the user what it is.
-    Number { hint: &'static str, min: i64, max: i64 },
+    Number { hint: NumberHint, min: i64, max: i64 },
+}
+
+/// What a command's number is, shown next to the command (see [`hint_text`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NumberHint {
+    Monitor,
+    Percent,
+}
+
+/// The hint's text in the current language.
+pub fn hint_text(hint: NumberHint) -> &'static str {
+    match hint {
+        NumberHint::Monitor => crate::i18n::s().bar.monitor_hint,
+        NumberHint::Percent => "0–100",
+    }
 }
 
 pub struct Command {
     pub id: CommandId,
-    /// Russian name, without the current state.
-    pub title: &'static str,
     /// Other words the command is found by, Russian and English.
     pub synonyms: &'static [&'static str],
     pub arg: Arg,
@@ -114,139 +139,116 @@ const MONITORS_MAX: i64 = 16;
 static COMMANDS: [Command; 23] = [
     Command {
         id: CommandId::NewNote,
-        title: "Новая заметка",
         synonyms: &["записать мысль", "захват", "добавить", "создать", "capture", "new note"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::Search,
-        title: "Поиск заметок",
         synonyms: &["найти", "искать", "find", "search"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::ShowIdeas,
-        title: "Показать идеи",
         synonyms: &["идеи", "ideas"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::ShowPrompts,
-        title: "Показать промпты",
         synonyms: &["промпты", "prompts"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::ShowGoals,
-        title: "Показать цели",
         synonyms: &["цели", "goals"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::ShowReminders,
-        title: "Показать напоминания",
-        synonyms: &["напоминания", "напомнить", "reminders"],
+        synonyms: &["напоминания", "напомнить", "reminders", "remind"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::ShowLinks,
-        title: "Показать ссылки",
         synonyms: &["ссылки", "links"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::OpenReview,
-        title: "Еженедельный обзор",
         synonyms: &["обзор", "неделя", "review", "weekly", "weekly review"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::OpenArchive,
-        title: "Открыть архив",
         synonyms: &["архив", "archive", "библиотека", "library"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::OpenTrash,
-        title: "Открыть корзину",
         synonyms: &["корзина", "удалённые", "удаленные", "trash", "bin"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::OpenSettings,
-        title: "Настройки",
         synonyms: &["параметры", "settings", "preferences", "options"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::ToggleLayer,
-        title: "Слой",
         synonyms: &["показать", "скрыть", "layer", "show", "hide"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::TogglePinBottom,
-        title: "Слой под окнами",
         synonyms: &["под окнами", "рабочий стол", "bottom", "desktop", "pin"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::ToggleCurtain,
-        title: "Свернуть слой",
         synonyms: &["свернуть", "развернуть", "штора", "collapse", "expand", "curtain"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::MoveToMonitor,
-        title: "Переместить слой на монитор",
         synonyms: &["монитор", "экран", "monitor", "display", "screen"],
-        arg: Arg::Number { hint: "номер монитора", min: 1, max: MONITORS_MAX },
+        arg: Arg::Number { hint: NumberHint::Monitor, min: 1, max: MONITORS_MAX },
     },
     Command {
         id: CommandId::Dimming,
-        title: "Затемнение слоя",
-        synonyms: &["затемнение", "прозрачность", "тень", "dim", "tint", "opacity", "transparency"],
-        arg: Arg::Number { hint: "0–100", min: 0, max: 100 },
+        synonyms: &["затемнение", "прозрачность", "тень", "dim", "dimming", "tint", "opacity", "transparency"],
+        arg: Arg::Number { hint: NumberHint::Percent, min: 0, max: 100 },
     },
     Command {
         id: CommandId::NextBackdrop,
-        title: "Фон слоя: следующий",
         synonyms: &["фон", "акрил", "размытие", "backdrop", "acrylic", "blur"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::ImportSticky,
-        title: "Импорт из Sticky Notes",
         synonyms: &["импорт", "стикеры", "sticky", "import"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::ToggleAutostart,
-        title: "Запускать при входе",
-        synonyms: &["автозапуск", "запуск", "autostart", "startup", "logon", "login"],
+        synonyms: &["автозапуск", "запуск", "autostart", "startup", "logon", "login", "sign in", "start"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::BackupNow,
-        title: "Сделать резервную копию",
-        synonyms: &["бэкап", "копия", "backup"],
+        synonyms: &["бэкап", "копия", "backup", "back up"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::Quit,
-        title: "Выйти из Ebb",
         synonyms: &["выход", "закрыть", "quit", "exit"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::ArchiveCard,
-        title: "Выбранная карточка: убрать в архив",
-        synonyms: &["убрать", "сделано", "done"],
+        synonyms: &["убрать", "сделано", "done", "archive"],
         arg: Arg::None,
     },
     Command {
         id: CommandId::TogglePinCard,
-        title: "Выбранная карточка: закрепить",
         synonyms: &["закрепить", "открепить", "pin", "unpin"],
         arg: Arg::None,
     },
@@ -296,23 +298,25 @@ pub fn available(id: CommandId, ctx: &Ctx) -> bool {
 
 /// The command's name with its current state, as the list shows it.
 pub fn title(id: CommandId, ctx: &Ctx) -> String {
-    let base = command(id).map_or("", |c| c.title);
-    let on_off = |on: bool| if on { "выключить" } else { "включить" };
+    title_in(&crate::i18n::s().bar, id, ctx)
+}
+
+fn title_in(t: &Bar, id: CommandId, ctx: &Ctx) -> String {
+    let base = base_title_in(t, id);
+    let on_off = |on: bool| if on { t.turn_off } else { t.turn_on };
     match id {
         // A rolled-up layer is brought back, not hidden (see `toggle_layer`).
         CommandId::ToggleLayer => {
-            (if ctx.layer_visible && !ctx.collapsed { "Скрыть слой" } else { "Показать слой" }).to_owned()
+            (if ctx.layer_visible && !ctx.collapsed { t.hide_layer } else { t.show_layer }).to_owned()
         }
         CommandId::TogglePinBottom => format!("{base}: {}", on_off(ctx.pin_bottom)),
-        CommandId::ToggleCurtain => (if ctx.collapsed { "Развернуть слой" } else { "Свернуть слой" }).to_owned(),
+        CommandId::ToggleCurtain => (if ctx.collapsed { t.expand_layer } else { t.collapse_layer }).to_owned(),
         CommandId::Dimming => format!("{base}: {}%", percent_of_tint(ctx.tint)),
         CommandId::ToggleAutostart => match ctx.autostart {
             Some(on) => format!("{base}: {}", on_off(on)),
-            None => format!("{base}: переключить"),
+            None => format!("{base}: {}", t.toggle),
         },
-        CommandId::TogglePinCard => {
-            (if ctx.active_pinned { "Выбранная карточка: открепить" } else { base }).to_owned()
-        }
+        CommandId::TogglePinCard => (if ctx.active_pinned { t.unpin_card } else { base }).to_owned(),
         _ => base.to_owned(),
     }
 }
@@ -721,6 +725,36 @@ mod tests {
             let Some(BarTarget::Search(text)) = id.bar_target() else { panic!("{id:?}") };
             assert_eq!(crate::search::parse_local(text, 0).kind, Some(kind), "{id:?}");
         }
+    }
+
+    #[test]
+    fn english_titles_and_filter_words() {
+        use crate::i18n::{Lang, strings};
+        let en = &strings(Lang::En).bar;
+        assert_eq!(en.command_titles.len(), CommandId::ALL.len());
+        let mut c = ctx();
+        assert_eq!(title_in(en, CommandId::TogglePinBottom, &c), "Layer under windows: turn off");
+        assert_eq!(title_in(en, CommandId::ToggleAutostart, &c), "Start at sign-in: toggle");
+        assert_eq!(title_in(en, CommandId::ToggleLayer, &c), "Hide the layer");
+        assert_eq!(title_in(en, CommandId::Dimming, &c), "Layer dimming: 32%");
+        c.collapsed = true;
+        assert_eq!(title_in(en, CommandId::ToggleCurtain, &c), "Expand the layer");
+        c.active_pinned = true;
+        assert_eq!(title_in(en, CommandId::TogglePinCard, &c), "Selected card: unpin");
+        // The English words of the type commands are read as kind filters too.
+        for (word, kind) in zip5(&en.filter_words) {
+            assert_eq!(crate::search::parse_local(word, 0).kind, Some(kind), "{word}");
+        }
+        // Russian ones are the existing words.
+        for (word, kind) in zip5(&strings(Lang::Ru).bar.filter_words) {
+            assert_eq!(crate::search::parse_local(word, 0).kind, Some(kind), "{word}");
+        }
+    }
+
+    fn zip5(words: &[&'static str; 5]) -> [(&'static str, crate::card::Kind); 5] {
+        use crate::card::Kind;
+        let kinds = [Kind::Idea, Kind::Prompt, Kind::Goal, Kind::Reminder, Kind::Link];
+        std::array::from_fn(|i| (words[i], kinds[i]))
     }
 
     #[test]

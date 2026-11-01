@@ -1,6 +1,7 @@
 //! Deterministic, local-only selection of notes worth bringing back.
 
 use crate::card::Kind;
+use crate::i18n::bar::Bar;
 
 pub const DAY: i64 = 86_400;
 pub const COOLDOWN_DAYS: i64 = 14;
@@ -107,32 +108,35 @@ pub fn candidates(now: i64, input: &[Candidate], limit: usize) -> Vec<Pick> {
 /// Why a note is back: "Напоминание на сегодня", "Напоминание: прошло 2 дня",
 /// "Ты записал это 73 дня назад".
 pub fn reason(now: i64, created_at: i64, review_at: Option<i64>) -> String {
+    reason_in(&crate::i18n::s().bar, now, created_at, review_at)
+}
+
+fn reason_in(t: &Bar, now: i64, created_at: i64, review_at: Option<i64>) -> String {
     if let Some(at) = review_at.filter(|at| *at <= now) {
-        return reminder_reason(now, at);
+        return reminder_reason_in(t, now, at);
     }
     match (now - created_at).max(0) / DAY {
-        0 => "Давно не открывал".to_owned(),
-        n => format!("Ты записал это {n} {} назад", days_word(n)),
+        0 => t.reason_not_opened.to_owned(),
+        n => (t.reason_wrote)(n),
     }
 }
 
 /// A reminder that has come due: today, or how long ago.
 pub fn reminder_reason(now: i64, review_at: i64) -> String {
+    reminder_reason_in(&crate::i18n::s().bar, now, review_at)
+}
+
+fn reminder_reason_in(t: &Bar, now: i64, review_at: i64) -> String {
     match (now - review_at).max(0) / DAY {
-        0 => "Напоминание на сегодня".to_owned(),
-        n => format!("Напоминание: прошло {n} {}", days_word(n)),
+        0 => t.reason_reminder_today.to_owned(),
+        n => (t.reason_reminder_ago)(n),
     }
 }
 
-/// "день" / "дня" / "дней" for `n`.
+/// "день" / "дня" / "дней" for `n` (Russian; kept for the windows not yet moved
+/// to the string table).
 pub fn days_word(n: i64) -> &'static str {
-    let n = n.abs();
-    match (n % 10, n % 100) {
-        (_, 11..=14) => "дней",
-        (1, _) => "день",
-        (2..=4, _) => "дня",
-        _ => "дней",
-    }
+    crate::i18n::common::ru_days(n)
 }
 
 /// A Rediscover day starts in the morning, not at midnight: cards picked for
@@ -158,11 +162,15 @@ pub fn snooze_until(at: i64, utc_offset: i64, days: i64) -> i64 {
 
 /// "завтра", "через 3 дня", "через неделю", "через месяц".
 pub fn snooze_label(days: i64) -> String {
+    snooze_label_in(&crate::i18n::s().bar, days)
+}
+
+fn snooze_label_in(t: &Bar, days: i64) -> String {
     match days {
-        1 => "завтра".to_owned(),
-        7 => "через неделю".to_owned(),
-        30 => "через месяц".to_owned(),
-        n => format!("через {n} {}", days_word(n)),
+        1 => t.snooze_tomorrow.to_owned(),
+        7 => t.snooze_week.to_owned(),
+        30 => t.snooze_month.to_owned(),
+        n => (t.snooze_days)(n),
     }
 }
 
@@ -317,6 +325,21 @@ mod tests {
         assert_eq!(reason(11 * DAY, 0, None), "Ты записал это 11 дней назад");
         assert_eq!(reason(5, 0, Some(1)), "Напоминание на сегодня");
         assert_eq!(reason(3 * DAY + 5, 0, Some(1)), "Напоминание: прошло 3 дня");
+    }
+
+    #[test]
+    fn english_reasons_and_snooze_labels() {
+        let en = &crate::i18n::strings(crate::i18n::Lang::En).bar;
+        assert_eq!(reason_in(en, 23 * DAY, 0, None), "You wrote this 23 days ago");
+        assert_eq!(reason_in(en, DAY, 0, None), "You wrote this 1 day ago");
+        assert_eq!(reason_in(en, 5, 0, None), "Haven't opened this in a while");
+        assert_eq!(reason_in(en, 5, 0, Some(1)), "Reminder for today");
+        assert_eq!(reason_in(en, 3 * DAY + 5, 0, Some(1)), "Reminder: 3 days ago");
+        assert_eq!(reason_in(en, 2 * DAY + 5, 0, Some(DAY)), "Reminder: 1 day ago");
+        assert_eq!(snooze_label_in(en, 1), "tomorrow");
+        assert_eq!(snooze_label_in(en, 3), "in 3 days");
+        assert_eq!(snooze_label_in(en, 7), "in a week");
+        assert_eq!(snooze_label_in(en, 30), "in a month");
     }
 
     #[test]
