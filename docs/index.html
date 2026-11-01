@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ebb — заметки на втором мониторе Windows</title>
+<meta name="description" content="Заметки, которые уходят из головы и сами возвращаются: спокойный слой стеклянных карточек на втором мониторе Windows.">
+<meta property="og:title" content="Ebb">
+<meta property="og:description" content="Notes that ebb away and come back: a calm second-screen layer for Windows.">
+<meta property="og:url" content="https://gerrux.github.io/ebb/">
+<!-- Absolute: link preview crawlers don't resolve a relative image. -->
+<meta property="og:image" content="https://gerrux.github.io/ebb/screenshots/social.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta property="og:image:alt" content="Ebb: glass note cards on a second monitor next to the project's pitch">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<style>
+/* System fonts only: the app keeps the user's data on the machine, and its page
+   doesn't send the reader's address to a font server either. Segoe UI Variable
+   is what the app itself draws with. */
+:root{
+  --ink:#0b1220;
+  --ink-2:#121a2a;
+  --line:rgba(255,255,255,.09);
+  --text:#eceff4;
+  --soft:#c4cbd7;
+  --muted:#8b93a3;
+  --green:#34d399;
+  --teal:#2dd4bf;
+  --ui:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,sans-serif;
+  --display:"Segoe UI Variable Display","Segoe UI Semibold","Segoe UI",system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--ink);color:var(--text);font:16px/1.6 var(--ui);-webkit-font-smoothing:antialiased}
+.wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+a{color:inherit}
+img{max-width:100%}
+
+.langs{display:flex;gap:6px;justify-content:flex-end;padding-top:22px}
+.pill{font:inherit;font-size:13px;line-height:1;padding:7px 12px;border-radius:999px;
+  border:1px solid var(--line);background:transparent;color:var(--muted);cursor:pointer;transition:.15s}
+.pill:hover{color:var(--text);background:rgba(255,255,255,.05)}
+.pill[aria-pressed="true"]{color:var(--text);border-color:transparent;background:rgba(255,255,255,.1)}
+
+/* The hero's glow: the wallpaper under the layer in the screenshots. */
+header{padding:0 0 64px;border-bottom:1px solid var(--line);
+  background:radial-gradient(ellipse 70% 60% at 85% 0%,rgba(43,111,214,.22),transparent 70%),
+             radial-gradient(ellipse 50% 50% at 0% 20%,rgba(52,211,153,.10),transparent 70%)}
+.lockup{display:flex;align-items:center;gap:16px;margin-top:44px}
+.lockup img{width:56px;height:56px;flex:none}
+.wordmark{font-family:var(--display);font-size:44px;font-weight:600;line-height:1;letter-spacing:-.01em}
+.tagline{margin:24px 0 0;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
+.rule{display:block;width:64px;height:3px;border-radius:2px;margin-top:14px;background:linear-gradient(90deg,var(--green),var(--teal))}
+h1{margin:30px 0 0;font-family:var(--display);font-size:clamp(30px,4.8vw,50px);font-weight:600;line-height:1.12;letter-spacing:-.015em;max-width:20ch;text-wrap:balance}
+.lede{margin:20px 0 0;font-size:clamp(16px,2vw,19px);line-height:1.55;color:var(--soft);max-width:62ch;text-wrap:pretty}
+.cta{display:flex;flex-wrap:wrap;gap:12px;margin-top:30px}
+.btn{display:inline-flex;align-items:center;padding:12px 20px;border-radius:9px;font-weight:600;font-size:15px;
+  text-decoration:none;border:1px solid transparent;transition:.15s}
+.btn-main{background:var(--green);color:#0b3b2b}
+.btn-main:hover{filter:brightness(1.08)}
+.btn-ghost{border-color:var(--line);color:var(--text)}
+.btn-ghost:hover{background:rgba(255,255,255,.05)}
+.note{margin-top:14px;font-size:13.5px;color:var(--muted)}
+.hero{margin-top:44px}
+
+section{padding:64px 0;border-bottom:1px solid var(--line)}
+h2{margin:0 0 10px;font-family:var(--display);font-size:12px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.claim{margin:0 0 30px;font-family:var(--display);font-size:clamp(22px,2.8vw,30px);font-weight:600;line-height:1.25;max-width:28ch;text-wrap:balance}
+p{text-wrap:pretty}
+
+/* Capture → Forget → Resurface → Act → Archive */
+.loop{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;list-style:none;padding:0;margin:0;counter-reset:step}
+.loop li{border:1px solid var(--line);border-radius:12px;background:var(--ink-2);padding:18px}
+.loop b{display:block;font-family:var(--display);font-size:16px;font-weight:600;color:var(--green);margin-bottom:6px}
+.loop span{font-size:14.5px;line-height:1.5;color:var(--soft)}
+@media (max-width:900px){.loop{grid-template-columns:1fr 1fr}}
+@media (max-width:520px){.loop{grid-template-columns:1fr}}
+
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px;margin-top:30px}
+.card{border:1px solid var(--line);border-radius:12px;background:var(--ink-2);padding:20px}
+.card h3{margin:0 0 6px;font-family:var(--display);font-size:15.5px;font-weight:600}
+.card p{margin:0;font-size:14.5px;line-height:1.55;color:var(--soft)}
+code{font:13.5px Consolas,"Cascadia Mono",monospace;background:rgba(255,255,255,.07);padding:1px 5px;border-radius:5px}
+
+figure{margin:0}
+figure img{display:block;width:100%;height:auto;border-radius:12px;border:1px solid var(--line)}
+figcaption{margin-top:12px;font-size:14px;color:var(--muted);max-width:70ch}
+.shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:24px;align-items:start}
+.switch{display:flex;gap:6px;margin:0 0 16px}
+
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:18px}
+.stat{border-top:2px solid var(--green);padding-top:14px}
+.stat b{display:block;font-family:var(--display);font-size:30px;font-weight:600;line-height:1.1}
+.stat span{font-size:14px;color:var(--soft)}
+.local{margin-top:30px;font-size:15px;color:var(--soft);max-width:70ch}
+
+footer{padding:40px 0 70px;color:var(--muted);font-size:13.5px}
+.foot-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px}
+footer .lockup{margin:0;gap:10px}
+footer .lockup img{width:22px;height:22px}
+footer .wordmark{font-size:17px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <!-- Russian is the source text, right in the markup: the page stays whole
+         without the script. English comes from DICT below. -->
+    <nav class="langs" aria-label="Язык / Language">
+      <button class="pill" type="button" data-lang="ru" lang="ru">Русский</button>
+      <button class="pill" type="button" data-lang="en" lang="en">English</button>
+    </nav>
+
+    <div class="lockup">
+      <img src="favicon.svg" alt="" width="56" height="56">
+      <span class="wordmark">Ebb</span>
+    </div>
+    <p class="tagline" data-i18n="tagline">заметки на втором мониторе Windows</p>
+    <span class="rule"></span>
+
+    <h1 data-i18n="h1">Заметки, которые уходят из головы и сами возвращаются.</h1>
+    <p class="lede" data-i18n="lede">Ebb заменяет разбросанные Sticky Notes: идеи, prompts, ссылки, цели и напоминания лежат стеклянными карточками на отдельном мониторе — под окнами, не на панели задач. Записали, перестали держать в голове, а Ebb вернёт нужное в поле зрения.</p>
+
+    <div class="cta">
+      <a class="btn btn-main" href="https://github.com/Gerrux/ebb/releases/latest" data-i18n="dl">Скачать для Windows</a>
+      <a class="btn btn-ghost" href="https://github.com/Gerrux/ebb" data-i18n="src">Исходный код</a>
+    </div>
+    <p class="note" data-i18n="note">Windows 10 1809+, лучше Windows 11. Установщик без прав администратора или портативный zip. Бесплатно, лицензия MIT.</p>
+
+    <figure class="hero">
+      <img data-shot="layer" src="screenshots/layer.png" width="2560" height="1184"
+           data-i18n-alt="altLayer" alt="Слой Ebb: стеклянные карточки идей, целей, prompt, ссылки и справки на втором мониторе">
+    </figure>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <h2 data-i18n="s1">Цикл</h2>
+    <p class="claim" data-i18n="c1">Записать, забыть, вернуть в нужный момент.</p>
+    <ol class="loop">
+      <li><b>Capture</b><span data-i18n="l1"><code>Win+Alt+N</code> из любой программы; тип и #теги прямо в тексте.</span></li>
+      <li><b>Forget</b><span data-i18n="l2">Карточка лежит на своём мониторе под окнами и не просит внимания.</span></li>
+      <li><b>Resurface</b><span data-i18n="l3">Раз в день до трёх давно не открытых заметок возвращаются из архива с причиной: «Ты записал это 23 дня назад».</span></li>
+      <li><b>Act</b><span data-i18n="l4">Под курсором — главное действие типа: открыть ссылку, скопировать prompt, отметить цель.</span></li>
+      <li><b>Archive</b><span data-i18n="l5">Сделанное уходит в архив; поиск найдёт его за миллисекунды.</span></li>
+    </ol>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2 data-i18n="s2">Карточки</h2>
+    <p class="claim" data-i18n="c2">В покое — текст и цвет типа. Остальное появляется под курсором.</p>
+    <figure>
+      <img data-shot="cards" src="screenshots/cards.png" width="1560" height="800" loading="lazy"
+           data-i18n-alt="altCards" alt="Карточка-напоминание под курсором: панель действий и меню «Позже»">
+      <figcaption data-i18n="capCards">Теги, возраст и действия видны только при наведении. «Позже» убирает карточку и возвращает её завтра, через 3 дня, неделю или месяц.</figcaption>
+    </figure>
+    <div class="grid">
+      <div class="card"><h3 data-i18n="k1h">Восемь типов</h3><p data-i18n="k1p">Заметка, идея, prompt, ссылка, цель, напоминание, reference и private. Тип читается из текста, сменить его — клик по метке или цифра.</p></div>
+      <div class="card"><h3 data-i18n="k2h">Списки как в Sticky Notes</h3><p data-i18n="k2p">Строка с «- » показывается с маркером, «- [ ]» — с чекбоксом; клик отмечает пункт сделанным.</p></div>
+      <div class="card"><h3 data-i18n="k3h">Reference и prompt</h3><p data-i18n="k3p">В reference каждая команда, путь или адрес копируется кнопкой у строки. В prompt <code>{{переменные}}</code> видны как чипы.</p></div>
+      <div class="card"><h3 data-i18n="k4h">Private</h3><p data-i18n="k4p">Пароли и ключи шифруются средствами Windows (DPAPI), в поиск не попадают, копируются не показываясь.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2 data-i18n="s3">Захват и поиск</h2>
+    <p class="claim" data-i18n="c3">Одно сочетание клавиш из любой программы.</p>
+    <div class="shots">
+      <figure>
+        <img data-shot="capture" src="screenshots/capture.png" width="1440" height="424" loading="lazy"
+             data-i18n-alt="altCapture" alt="Окно быстрого захвата: идея с тегом, распознанные тип и тег внизу">
+        <figcaption data-i18n="capCapture"><code>Win+Alt+N</code> — записать мысль. Тип и #теги распознаются прямо из текста, Enter — и карточка на слое.</figcaption>
+      </figure>
+      <figure>
+        <img data-shot="search" src="screenshots/search.png" width="1520" height="1112" loading="lazy"
+             data-i18n-alt="altSearch" alt="Окно поиска: запрос «идеи прошлого месяца слой», фильтры и результаты с подсветкой">
+        <figcaption data-i18n="capSearch"><code>Win+Alt+F</code> — поиск по всем заметкам, включая архив. Фильтры словами: «идеи прошлого месяца», #тег.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2 data-i18n="s4">Переезд со Sticky Notes</h2>
+    <p class="claim" data-i18n="c4">Открытые заметки встают на слой там же, где лежали, и в своих цветах.</p>
+    <figure>
+      <img data-shot="import" src="screenshots/import.png" width="2704" height="996" loading="lazy"
+           data-i18n-alt="altImport" alt="Слева окна Sticky Notes на рабочем столе, справа те же заметки карточками Ebb на тех же местах">
+    </figure>
+    <div class="grid">
+      <div class="card"><h3 data-i18n="k5h">Без подготовки</h3><p data-i18n="k5p">Ebb сам находит Sticky Notes и предлагает импорт. Открытые заметки — на слой, остальные — в архив, где их найдёт поиск.</p></div>
+      <div class="card"><h3 data-i18n="k6h">Оригиналы не трогаются</h3><p data-i18n="k6p">Читается копия базы Sticky Notes. Пустые и дубликаты пропускаются, импорт можно отменить одной кнопкой.</p></div>
+      <div class="card"><h3 data-i18n="k7h">Разбор по типам</h3><p data-i18n="k7p">После импорта «Разобрать» группирует заметки: пароли, ссылки, промпты, идеи — решение одной кнопкой на группу.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2 data-i18n="s5">Оформление</h2>
+    <p class="claim" data-i18n="c5">Восемь видов карточек, светлая и тёмная тема.</p>
+    <div class="switch" role="group" aria-label="Тема">
+      <button class="pill" type="button" data-theme="dark" aria-pressed="true" data-i18n="dark">Тёмная</button>
+      <button class="pill" type="button" data-theme="light" aria-pressed="false" data-i18n="light">Светлая</button>
+    </div>
+    <figure>
+      <img id="styles" data-shot="styles" src="screenshots/styles.png" width="2560" height="1528" loading="lazy"
+           data-i18n-alt="altStyles" alt="Восемь видов карточек: Ebb, Sticky Notes, Google Keep, Obsidian Canvas, Trello, бумажный стикер, минимализм, Windows">
+      <figcaption data-i18n="capStyles">Ebb, Sticky Notes, Google Keep, Obsidian Canvas, Trello, бумажный стикер, минимализм и Windows. Тема — как в Windows, тёмная или светлая.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2 data-i18n="s6">Лёгкий и локальный</h2>
+    <div class="stats">
+      <div class="stat"><b>~290 мс</b><span data-i18n="st1">от запуска до первого кадра</span></div>
+      <div class="stat"><b>0</b><span data-i18n="st2">процессорного времени в простое</span></div>
+      <div class="stat"><b>~15 мс</b><span data-i18n="st3">от сочетания клавиш до окна захвата</span></div>
+      <div class="stat"><b>≤ 7 мс</b><span data-i18n="st4">поиск по 10 000 заметок (p95)</span></div>
+    </div>
+    <p class="local" data-i18n="local">Заметки лежат в одном файле SQLite у вас на диске, резервная копия делается раз в неделю. Без явного действия данные не покидают компьютер.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot-row">
+    <div class="lockup"><img src="favicon.svg" alt="" width="22" height="22"><span class="wordmark">Ebb</span></div>
+    <span><span data-i18n="foot">Исходный код и релизы на</span> <a href="https://github.com/Gerrux/ebb">GitHub</a> · MIT</span>
+  </div>
+</footer>
+
+<script>
+const DICT = {
+  en: {
+    title: "Ebb — notes on a second monitor for Windows",
+    desc: "Notes that ebb away and come back: a calm layer of glass cards on a second monitor for Windows.",
+    tagline: "notes on a second Windows monitor",
+    h1: "Notes that ebb away and come back.",
+    lede: "Ebb replaces scattered Sticky Notes: ideas, prompts, links, goals and reminders sit as glass cards on a monitor of their own — under your windows, not on the taskbar. Write it down, stop holding it in your head, and Ebb brings it back into view.",
+    dl: "Download for Windows",
+    src: "Source code",
+    note: "Windows 10 1809+, Windows 11 recommended. An installer without admin rights, or a portable zip. Free, MIT license. The app's interface is in Russian for now.",
+    altLayer: "The Ebb layer: glass cards with ideas, goals, a prompt, a link and a reference on a second monitor",
+    s1: "The loop",
+    c1: "Write it down, forget it, get it back when it matters.",
+    l1: "Win+Alt+N from any app; the kind and #tags right in the text.",
+    l2: "The card sits on its own monitor under your windows and doesn't ask for attention.",
+    l3: "Once a day up to three notes you haven't opened in a while come back from the archive, with a reason: \"You wrote this 23 days ago\".",
+    l4: "Under the pointer, the kind's own action: open the link, copy the prompt, mark the goal done.",
+    l5: "What's done goes to the archive; search finds it in milliseconds.",
+    s2: "Cards",
+    c2: "At rest, the text and the kind's color. The rest shows up under the pointer.",
+    altCards: "A reminder card under the pointer: its actions and the \"Later\" menu",
+    capCards: "Tags, age and actions show only on hover. \"Later\" puts a card away and brings it back tomorrow, in 3 days, a week or a month.",
+    k1h: "Eight kinds",
+    k1p: "Note, idea, prompt, link, goal, reminder, reference and private. The kind is read from the text; change it with a click on the mark or a digit key.",
+    k2h: "Lists like in Sticky Notes",
+    k2p: "A line starting with \"- \" shows a bullet, \"- [ ]\" a check box; a click marks the item done.",
+    k3h: "Reference and prompt",
+    k3p: "In a reference every command, path or address has its own copy button. In a prompt, {{variables}} show as chips.",
+    k4h: "Private",
+    k4p: "Passwords and keys are encrypted with Windows' own DPAPI, kept out of search, and copied without being shown.",
+    s3: "Capture and search",
+    c3: "One key combination from any app.",
+    altCapture: "The quick capture window: an idea with a tag, the recognized kind and tag below",
+    capCapture: "Win+Alt+N — write a thought down. The kind and #tags are read from the text; Enter, and the card is on the layer.",
+    altSearch: "The search window: the query \"ideas last month layer\", its filters and highlighted results",
+    capSearch: "Win+Alt+F — search every note, the archive included. Filters in plain words: \"ideas last month\", #tag.",
+    s4: "Moving from Sticky Notes",
+    c4: "Open notes land on the layer where they were, in their own colors.",
+    altImport: "Left: Sticky Notes windows on the desktop. Right: the same notes as Ebb cards in the same places",
+    k5h: "No setup",
+    k5p: "Ebb finds Sticky Notes on its own and offers the import. Open notes go to the layer, the rest to the archive, where search finds them.",
+    k6h: "Originals untouched",
+    k6p: "Ebb reads a copy of the Sticky Notes database. Empty notes and duplicates are skipped, and the import can be undone with one button.",
+    k7h: "Sorted by kind",
+    k7p: "After the import, \"Sort out\" groups the notes — passwords, links, prompts, ideas — with one decision per group.",
+    s5: "Looks",
+    c5: "Eight card styles, a light and a dark theme.",
+    dark: "Dark",
+    light: "Light",
+    altStyles: "Eight card styles: Ebb, Sticky Notes, Google Keep, Obsidian Canvas, Trello, paper sticker, minimal, Windows",
+    capStyles: "Ebb, Sticky Notes, Google Keep, Obsidian Canvas, Trello, paper sticker, minimal and Windows. The theme follows Windows, or is dark or light.",
+    s6: "Light and local",
+    st1: "from launch to the first frame",
+    st2: "CPU time while idle",
+    st3: "from the hotkey to the capture window",
+    st4: "search across 10,000 notes (p95)",
+    local: "Notes live in a single SQLite file on your disk, backed up once a week. Without an explicit action, nothing leaves your computer.",
+    foot: "Source code and releases on",
+  },
+}
+
+// The Russian text stays in the markup; remember it once, so switching back
+// and forth doesn't lose it.
+const base = new Map()
+for (const el of document.querySelectorAll("[data-i18n]")) base.set(el, el.innerHTML)
+for (const el of document.querySelectorAll("[data-i18n-alt]")) base.set(el, el.alt)
+const baseTitle = document.title
+const desc = document.querySelector('meta[name="description"]')
+const baseDesc = desc.content
+let lang = "ru"
+let theme = "dark"
+
+// Screenshots: <name>.png in Russian, <name>-en.png in English; the styles one
+// also has a light-theme variant.
+function shots() {
+  for (const img of document.querySelectorAll("img[data-shot]")) {
+    let name = img.dataset.shot
+    if (name === "styles" && theme === "light") name = "styles-light"
+    img.src = `screenshots/${name}${lang === "en" ? "-en" : ""}.png`
+  }
+}
+
+function apply(code) {
+  lang = code
+  const t = DICT[code]
+  document.documentElement.lang = code
+  for (const el of document.querySelectorAll("[data-i18n]")) {
+    const v = t && t[el.dataset.i18n]
+    if (v) el.textContent = v
+    else el.innerHTML = base.get(el)
+  }
+  for (const el of document.querySelectorAll("[data-i18n-alt]")) el.alt = (t && t[el.dataset.i18nAlt]) || base.get(el)
+  document.title = (t && t.title) || baseTitle
+  desc.content = (t && t.desc) || baseDesc
+  for (const b of document.querySelectorAll("[data-lang]")) b.setAttribute("aria-pressed", String(b.dataset.lang === code))
+  shots()
+  try { localStorage.setItem("ebb-lang", code) } catch (e) { /* private window */ }
+  // The address follows the choice, or ?lang=en would win again on reload.
+  const url = new URL(location.href)
+  url.searchParams.set("lang", code)
+  history.replaceState(null, "", url)
+}
+
+for (const b of document.querySelectorAll("[data-lang]")) b.addEventListener("click", () => apply(b.dataset.lang))
+for (const b of document.querySelectorAll("[data-theme]")) {
+  b.addEventListener("click", () => {
+    theme = b.dataset.theme
+    for (const o of document.querySelectorAll("[data-theme]")) o.setAttribute("aria-pressed", String(o === b))
+    shots()
+  })
+}
+
+// The address beats what was saved, which beats the browser: a link to a
+// language has to open in it.
+const known = c => (c === "ru" || c === "en") ? c : null
+let stored = null
+try { stored = localStorage.getItem("ebb-lang") } catch (e) { /* private window */ }
+const browser = (navigator.language || "").slice(0, 2).toLowerCase()
+apply(known(new URLSearchParams(location.search).get("lang")) || known(stored) || (browser === "ru" ? "ru" : "en"))
+</script>
+
+</body>
+</html>
