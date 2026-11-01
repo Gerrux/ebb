@@ -133,12 +133,6 @@ fn reminder_reason_in(t: &Bar, now: i64, review_at: i64) -> String {
     }
 }
 
-/// "день" / "дня" / "дней" for `n` (Russian; kept for the windows not yet moved
-/// to the string table).
-pub fn days_word(n: i64) -> &'static str {
-    crate::i18n::common::ru_days(n)
-}
-
 /// A Rediscover day starts in the morning, not at midnight: cards picked for
 /// the day don't change under someone still at work late in the evening.
 pub const DAY_STARTS_AT: i64 = 6 * 3_600;
