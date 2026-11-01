@@ -279,15 +279,6 @@ impl Backdrop {
         Self::ALL.into_iter().find(|b| b.key() == key)
     }
 
-    /// For the settings UI.
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::AccentAcrylic => "Размытие фона",
-            Self::DwmAcrylic => "Размытие Windows (серое, когда слой неактивен)",
-            Self::Off => "Без размытия",
-        }
-    }
-
     pub fn next(self) -> Self {
         match self {
             Self::DwmAcrylic => Self::AccentAcrylic,

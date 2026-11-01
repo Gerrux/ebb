@@ -2,6 +2,8 @@
 
 use egui::{Color32, Pos2, Vec2, pos2, vec2};
 
+use crate::i18n;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Note,
@@ -83,16 +85,7 @@ impl Kind {
     }
 
     pub fn label(self) -> &'static str {
-        match self {
-            Kind::Note => "Заметка",
-            Kind::Idea => "Идея",
-            Kind::Prompt => "Prompt",
-            Kind::Link => "Ссылка",
-            Kind::Goal => "Цель",
-            Kind::Reminder => "Напоминание",
-            Kind::Reference => "Reference",
-            Kind::Private => "Private",
-        }
+        i18n::name_of(&Kind::ALL, self, &i18n::s().common.kinds)
     }
 
     /// Segoe Fluent Icons glyph.
@@ -168,12 +161,7 @@ impl IdeaStatus {
     }
 
     pub fn label(self) -> &'static str {
-        match self {
-            IdeaStatus::Potential => "Потенциал",
-            IdeaStatus::Maybe => "Может быть",
-            IdeaStatus::Explore => "Изучить",
-            IdeaStatus::Important => "Важно",
-        }
+        i18n::name_of(&IdeaStatus::ALL, self, &i18n::s().common.idea_statuses)
     }
 
     /// Readable on a card (see theme::on_card).
@@ -235,16 +223,7 @@ impl Tint {
     }
 
     pub fn label(self) -> &'static str {
-        match self {
-            Tint::Yellow => "Жёлтый",
-            Tint::Orange => "Оранжевый",
-            Tint::Pink => "Розовый",
-            Tint::Purple => "Фиолетовый",
-            Tint::Blue => "Синий",
-            Tint::Teal => "Бирюзовый",
-            Tint::Green => "Зелёный",
-            Tint::Gray => "Серый",
-        }
+        i18n::name_of(&Tint::ALL, self, &i18n::s().common.tints)
     }
 
     /// The mark color, readable on the current theme.
@@ -395,17 +374,7 @@ impl Marker {
     }
 
     pub fn label(self) -> &'static str {
-        match self {
-            Marker::None => "Без цвета",
-            Marker::Glow => "Свечение из угла",
-            Marker::StripTop => "Полоса сверху",
-            Marker::StripLeft => "Полоса слева",
-            Marker::Tint => "Тонировка",
-            Marker::Border => "Цветная рамка",
-            Marker::Fill => "Заливка",
-            Marker::Outline => "Рамка и тон",
-            Marker::Paper => "Бумага с шапкой",
-        }
+        i18n::name_of(&Marker::ALL, self, &i18n::s().common.markers)
     }
 }
 
@@ -421,11 +390,7 @@ impl IconSpot {
     }
 
     pub fn label(self) -> &'static str {
-        match self {
-            IconSpot::BottomRight => "Значок",
-            IconSpot::TopLeft => "Точка и название",
-            IconSpot::Hover => "Только при наведении",
-        }
+        i18n::name_of(&IconSpot::ALL, self, &i18n::s().common.icon_spots)
     }
 }
 
@@ -496,9 +461,19 @@ impl CardStyle {
 
 /// A named look, modeled on an app people may be coming from.
 pub struct Preset {
-    pub name: &'static str,
-    pub hint: &'static str,
+    /// Position in [`PRESETS`], for its name and hint in the string table.
+    index: usize,
     pub style: CardStyle,
+}
+
+impl Preset {
+    pub fn name(&self) -> &'static str {
+        i18n::s().common.preset_names[self.index]
+    }
+
+    pub fn hint(&self) -> &'static str {
+        i18n::s().common.preset_hints[self.index]
+    }
 }
 
 /// Look: color marker, icon, strength, bold icon, strip, radius, shadow, opacity, font, text size (half pt), background.
@@ -535,8 +510,7 @@ use crate::theme::{CardBackground as B, CardFont as F};
 
 pub const PRESETS: [Preset; 8] = [
     Preset {
-        name: "Ebb",
-        hint: "Стекло и свечение цвета",
+        index: 0,
         style: style(
             Marker::Glow,
             IconSpot::TopLeft,
@@ -552,8 +526,7 @@ pub const PRESETS: [Preset; 8] = [
         ),
     },
     Preset {
-        name: "Sticky Notes",
-        hint: "Цветная бумага, шапка при наведении",
+        index: 1,
         style: style(
             Marker::Paper,
             IconSpot::Hover,
@@ -569,8 +542,7 @@ pub const PRESETS: [Preset; 8] = [
         ),
     },
     Preset {
-        name: "Google Keep",
-        hint: "Пастель днём, ночные тона в темноте",
+        index: 2,
         style: style(
             Marker::Fill,
             IconSpot::Hover,
@@ -586,8 +558,7 @@ pub const PRESETS: [Preset; 8] = [
         ),
     },
     Preset {
-        name: "Obsidian Canvas",
-        hint: "Рамка и лёгкий тон",
+        index: 3,
         style: style(
             Marker::Outline,
             IconSpot::TopLeft,
@@ -603,8 +574,7 @@ pub const PRESETS: [Preset; 8] = [
         ),
     },
     Preset {
-        name: "Trello",
-        hint: "Цветная метка слева",
+        index: 4,
         style: style(
             Marker::StripLeft,
             IconSpot::TopLeft,
@@ -620,8 +590,7 @@ pub const PRESETS: [Preset; 8] = [
         ),
     },
     Preset {
-        name: "Бумажный стикер",
-        hint: "Заливка, тень, от руки",
+        index: 5,
         style: style(
             Marker::Fill,
             IconSpot::Hover,
@@ -637,8 +606,7 @@ pub const PRESETS: [Preset; 8] = [
         ),
     },
     Preset {
-        name: "Минимализм",
-        hint: "Только жирная иконка",
+        index: 6,
         style: style(
             Marker::None,
             IconSpot::BottomRight,
@@ -654,8 +622,7 @@ pub const PRESETS: [Preset; 8] = [
         ),
     },
     Preset {
-        name: "Windows",
-        hint: "Фон как у панели задач",
+        index: 7,
         style: style(
             Marker::None,
             IconSpot::TopLeft,

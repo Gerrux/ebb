@@ -29,6 +29,7 @@ use std::sync::atomic::Ordering;
 use crate::bar::{self, BarState, Mode, Outbox, Press};
 use crate::card::{self, Card, MIN_SIZE, Placement};
 use crate::hotkey::{self, Action, Wanted};
+use crate::i18n;
 use crate::import_ui::StickyImport;
 use crate::library::{self, LibraryState, Request, Tab};
 use crate::resurface;
@@ -66,6 +67,8 @@ const SET_SNAP: &str = "cards.snap";
 const SET_HIDE_FROM_CAPTURE: &str = "private.hide_from_capture";
 const SET_CARD_STYLE: &str = "cards.style";
 const SET_THEME: &str = "app.theme";
+/// `ru`, `en`; absent: the Windows UI language.
+const SET_LANGUAGE: &str = "app.language";
 
 pub struct EbbApp {
     store: Store,
@@ -106,6 +109,8 @@ pub struct EbbApp {
     hide_from_capture: bool,
     card_style: card::CardStyle,
     theme_mode: theme::ThemeMode,
+    /// `None`: as in Windows.
+    language: Option<i18n::Lang>,
     /// Started by the user (not at logon): bring the layer up, maybe open settings.
     manual_start: bool,
     library: Arc<Mutex<LibraryState>>,
@@ -172,6 +177,8 @@ impl EbbApp {
         autostarted: bool,
     ) -> Self {
         theme::install(&cc.egui_ctx);
+        let language = store.setting(SET_LANGUAGE).and_then(|v| i18n::Lang::from_key(&v));
+        i18n::set(i18n::resolve(language));
         let card_style = store
             .setting(SET_CARD_STYLE)
             .map_or_else(card::CardStyle::default, |v| {
@@ -281,6 +288,7 @@ impl EbbApp {
             hide_from_capture,
             card_style,
             theme_mode,
+            language,
             manual_start,
             library: Arc::default(),
             editing: None,
@@ -448,6 +456,7 @@ impl EbbApp {
             hide_from_capture: self.hide_from_capture,
             card_style: self.card_style,
             theme_mode: self.theme_mode,
+            language: self.language,
         }
     }
 
@@ -614,6 +623,15 @@ impl EbbApp {
                 self.theme_mode = mode;
                 let _ = self.store.set_setting(SET_THEME, mode.key());
                 self.refresh_theme(ctx);
+            }
+            Request::SetLanguage(language) => {
+                self.language = language;
+                let _ = match language {
+                    Some(l) => self.store.set_setting(SET_LANGUAGE, l.key()),
+                    None => self.store.delete_setting(SET_LANGUAGE),
+                };
+                i18n::set(i18n::resolve(language));
+                ctx.request_repaint();
             }
             Request::ImportSticky => {
                 self.set_layer_visible(ctx, true);

@@ -8,6 +8,7 @@ mod card;
 mod commands;
 mod emoji;
 mod hotkey;
+mod i18n;
 mod import_ui;
 mod library;
 mod renderer;
@@ -139,6 +140,8 @@ fn main() -> eframe::Result {
         return Ok(()); // nothing running
     }
 
+    // Errors below come before the settings are read; the app applies the user's choice.
+    i18n::set(i18n::system());
     store::migrate_legacy_data();
     let fail = |what: &str, e: rusqlite::Error| -> ! {
         win::error_box(&format!(

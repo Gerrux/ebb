@@ -17,6 +17,7 @@ use crate::autostart;
 use crate::bar::{age, highlighted};
 use crate::card::{Card, Kind};
 use crate::hotkey::{self, Action, Combo, Config, Wanted};
+use crate::i18n;
 use crate::resurface::{self, DAY, days_word};
 use crate::review;
 use crate::rich_text;
@@ -91,6 +92,8 @@ pub struct LayerSettings {
     /// How cards show their kind on the layer.
     pub card_style: crate::card::CardStyle,
     pub theme_mode: theme::ThemeMode,
+    /// `None`: as in Windows.
+    pub language: Option<i18n::Lang>,
 }
 
 impl Default for LayerSettings {
@@ -109,6 +112,7 @@ impl Default for LayerSettings {
             hide_from_capture: true,
             card_style: crate::card::CardStyle::default(),
             theme_mode: theme::ThemeMode::System,
+            language: None,
         }
     }
 }
@@ -130,6 +134,8 @@ pub enum Request {
     SetHideFromCapture(bool),
     SetCardStyle(crate::card::CardStyle),
     SetTheme(theme::ThemeMode),
+    /// `None`: as in Windows.
+    SetLanguage(Option<i18n::Lang>),
     /// Bind the action's hotkey as asked; the root answers through
     /// [`LibraryState::hotkey_errors`] and `settings.hotkeys`.
     SetHotkey(Action, Wanted),
@@ -1683,7 +1689,7 @@ fn preset_tile(ui: &mut Ui, preset: &crate::card::Preset, on: bool) -> egui::Res
     use crate::card::Kind;
     let (rect, resp) = ui.allocate_exact_size(vec2(172.0, 112.0), Sense::click());
     resp.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, preset.name)
+        egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, preset.name())
     });
     let fill = match (on, resp.hovered()) {
         (true, _) => theme::highlight(40),
@@ -1783,19 +1789,19 @@ fn preset_tile(ui: &mut Ui, preset: &crate::card::Preset, on: bool) -> egui::Res
     ui.painter().text(
         pos2(rect.left() + 10.0, rect.bottom() - 34.0),
         Align2::LEFT_TOP,
-        preset.name,
+        preset.name(),
         theme::semibold(13.0),
         theme::text(),
     );
     ui.painter().text(
         pos2(rect.left() + 10.0, rect.bottom() - 17.0),
         Align2::LEFT_TOP,
-        preset.hint,
+        preset.hint(),
         FontId::proportional(10.5),
         theme::muted(),
     );
     resp.on_hover_cursor(CursorIcon::PointingHand)
-        .on_hover_text(preset.hint)
+        .on_hover_text(preset.hint())
 }
 
 /// One hotkey: its name, the combination as a button that records a new one,
@@ -1937,6 +1943,19 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
                 ui.radio_value(&mut mode, m, m.label());
             }
         });
+        let mut language = st.settings.language;
+        ui.horizontal_wrapped(|ui| {
+            let s = &i18n::s().library;
+            ui.label(RichText::new(s.language).size(13.0).color(theme::dim()));
+            ui.radio_value(&mut language, None, s.language_system);
+            for l in i18n::Lang::ALL {
+                ui.radio_value(&mut language, Some(l), l.name());
+            }
+        });
+        if language != st.settings.language {
+            st.settings.language = language;
+            st.outbox.push(Request::SetLanguage(language));
+        }
 
         ui.add_space(4.0);
         ui.label(RichText::new("Вид карточек").size(13.0).color(theme::dim()));
@@ -2108,7 +2127,7 @@ fn settings_tab(ui: &mut Ui, st: &mut LibraryState) {
         section(ui, "Внешний вид");
         ui.label(RichText::new("Фон").size(13.0).color(theme::dim()));
         for backdrop in Backdrop::ALL {
-            if ui.radio(st.settings.backdrop == backdrop, backdrop.title()).clicked() && st.settings.backdrop != backdrop {
+            if ui.radio(st.settings.backdrop == backdrop, i18n::name_of(&Backdrop::ALL, backdrop, &i18n::s().common.backdrops)).clicked() && st.settings.backdrop != backdrop {
                 st.settings.backdrop = backdrop;
                 st.outbox.push(Request::SetBackdrop(backdrop));
             }
